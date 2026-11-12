@@ -1,0 +1,859 @@
+package com.example.ui.components
+
+import android.content.Intent
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.AddCircleOutline
+import androidx.compose.material.icons.rounded.AudioFile
+import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.FolderOpen
+import androidx.compose.material.icons.rounded.Image
+import androidx.compose.material.icons.rounded.PlaylistAdd
+import androidx.compose.material.icons.rounded.Sync
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.unit.dp
+import androidx.documentfile.provider.DocumentFile
+import coil.compose.AsyncImage
+import com.example.data.local.PlaylistWithTracks
+import com.example.data.local.TrackEntity
+import com.example.ui.MainUiState
+import com.example.ui.StagedUploadDraft
+import com.example.ui.formatBytesMb
+import com.example.ui.formatDuration
+import com.example.ui.i18n.LocalAppStrings
+import com.example.ui.i18n.filterDisplayLabel
+import com.example.ui.shaders.TrackCoverArtwork
+import com.example.ui.theme.LiquidCyan
+import com.example.ui.theme.LiquidMint
+import com.example.ui.theme.LiquidRose
+
+@Composable
+fun EditTrackDialog(
+    track: TrackEntity,
+    onDismiss: () -> Unit,
+    onSave: (newTitle: String, newArtist: String, newCoverUri: Uri?, clearCover: Boolean) -> Unit,
+) {
+    val strings = LocalAppStrings.current
+    var title by remember(track.id) { mutableStateOf(track.title) }
+    var artist by remember(track.id) { mutableStateOf(track.artist) }
+    var pickedCoverUri by remember(track.id) { mutableStateOf<Uri?>(null) }
+    var clearCover by remember(track.id) { mutableStateOf(false) }
+
+    val photoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia(),
+    ) { uri ->
+        if (uri != null) {
+            pickedCoverUri = uri
+            clearCover = false
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        shape = RoundedCornerShape(28.dp),
+        title = { Text(strings.editTrackTitle) },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(72.dp)
+                            .clip(RoundedCornerShape(18.dp))
+                            .clickable {
+                                photoPickerLauncher.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                                )
+                            }
+                            .testTag("edit_cover_preview"),
+                    ) {
+                        if (pickedCoverUri != null && !clearCover) {
+                            AsyncImage(
+                                model = pickedCoverUri,
+                                contentDescription = strings.changeCover,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.matchParentSize(),
+                            )
+                        } else if (!clearCover) {
+                            TrackCoverArtwork(
+                                track = track,
+                                modifier = Modifier.matchParentSize(),
+                                cornerRadius = 18.dp,
+                            )
+                        } else {
+                            TrackCoverArtwork(
+                                track = track.copy(coverArtPath = null),
+                                modifier = Modifier.matchParentSize(),
+                                cornerRadius = 18.dp,
+                            )
+                        }
+                    }
+
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        OutlinedButton(
+                            onClick = {
+                                photoPickerLauncher.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                                )
+                            },
+                            shape = CircleShape,
+                            modifier = Modifier.testTag("pick_cover_button"),
+                        ) {
+                            Icon(Icons.Rounded.Image, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(strings.changeCover)
+                        }
+                        if (track.coverArtPath != null || pickedCoverUri != null) {
+                            TextButton(
+                                onClick = {
+                                    pickedCoverUri = null
+                                    clearCover = true
+                                },
+                            ) {
+                                Text(strings.resetCover, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                }
+
+                OutlinedTextField(
+                    value = title,
+                    onValueChange = { title = it },
+                    label = { Text(strings.titleLabel) },
+                    singleLine = true,
+                    shape = RoundedCornerShape(18.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("edit_title_input"),
+                )
+
+                OutlinedTextField(
+                    value = artist,
+                    onValueChange = { artist = it },
+                    label = { Text(strings.artistLabel) },
+                    singleLine = true,
+                    shape = RoundedCornerShape(18.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("edit_artist_input"),
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onSave(title, artist, pickedCoverUri, clearCover) },
+                enabled = title.isNotBlank() && artist.isNotBlank(),
+                shape = CircleShape,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                ),
+                modifier = Modifier.testTag("save_track_edit_button"),
+            ) {
+                Text(strings.save)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(strings.cancel)
+            }
+        },
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun TrackOptionsBottomSheet(
+    track: TrackEntity,
+    onDismiss: () -> Unit,
+    onEditClick: (() -> Unit)?,
+    onAddToPlaylistClick: () -> Unit,
+    onDeleteClick: (() -> Unit)?,
+) {
+    val strings = LocalAppStrings.current
+    val haptics = rememberSoundLapaHaptics()
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.padding(bottom = 8.dp),
+            ) {
+                TrackCoverArtwork(
+                    track = track,
+                    modifier = Modifier.size(48.dp),
+                    cornerRadius = 14.dp,
+                )
+                Column {
+                    Text(text = track.title, style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        text = track.artist,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
+            HorizontalDivider()
+
+            if (onEditClick != null) {
+                SheetActionRow(
+                    icon = Icons.Rounded.Edit,
+                    label = strings.editTrackMenu,
+                    onClick = {
+                        haptics.tick()
+                        onDismiss()
+                        onEditClick()
+                    },
+                    testTag = "sheet_edit_track",
+                )
+            }
+
+            SheetActionRow(
+                icon = Icons.Rounded.PlaylistAdd,
+                label = strings.addToPlaylistMenu,
+                onClick = {
+                    haptics.tick()
+                    onDismiss()
+                    onAddToPlaylistClick()
+                },
+                testTag = "sheet_add_to_playlist",
+            )
+
+            if (onDeleteClick != null) {
+                SheetActionRow(
+                    icon = Icons.Rounded.DeleteOutline,
+                    label = strings.deleteTrackMenu,
+                    tint = LiquidRose,
+                    onClick = {
+                        onDismiss()
+                        onDeleteClick()
+                    },
+                    testTag = "sheet_delete_track",
+                )
+            }
+
+            Spacer(Modifier.height(16.dp))
+        }
+    }
+}
+
+@Composable
+private fun SheetActionRow(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    tint: Color = MaterialTheme.colorScheme.onSurface,
+    testTag: String = "",
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 14.dp)
+            .then(if (testTag.isNotEmpty()) Modifier.testTag(testTag) else Modifier),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        Icon(imageVector = icon, contentDescription = null, tint = tint)
+        Text(text = label, style = MaterialTheme.typography.bodyLarge, color = tint)
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun AddToPlaylistBottomSheet(
+    track: TrackEntity,
+    playlists: List<PlaylistWithTracks>,
+    onDismiss: () -> Unit,
+    onSelectPlaylist: (playlistId: String) -> Unit,
+    onRemoveFromPlaylist: (playlistId: String) -> Unit,
+    onCreateNewPlaylist: (name: String) -> Unit,
+) {
+    val strings = LocalAppStrings.current
+    val haptics = rememberSoundLapaHaptics()
+    var showCreateDialog by remember { mutableStateOf(false) }
+
+    if (showCreateDialog) {
+        CreatePlaylistDialog(
+            onDismiss = { showCreateDialog = false },
+            onConfirm = { name, _ ->
+                showCreateDialog = false
+                onCreateNewPlaylist(name)
+            },
+        )
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(
+                text = strings.addToPlaylistTitle(track.title),
+                style = MaterialTheme.typography.titleMedium,
+            )
+
+            OutlinedButton(
+                onClick = {
+                    haptics.tick()
+                    showCreateDialog = true
+                },
+                shape = CircleShape,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(Icons.Rounded.Add, contentDescription = null)
+                Spacer(Modifier.width(6.dp))
+                Text(strings.createNewPlaylistOption)
+            }
+
+            if (playlists.isEmpty()) {
+                Text(
+                    text = strings.noPlaylistsYet,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(vertical = 12.dp),
+                )
+            } else {
+                playlists.forEach { item ->
+                    val alreadyAdded = item.tracks.any { it.id == track.id }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(
+                                if (alreadyAdded) MaterialTheme.colorScheme.primary.copy(alpha = 0.10f)
+                                else Color.Transparent,
+                            )
+                            .clickable {
+                                if (alreadyAdded) {
+                                    haptics.tick()
+                                    onRemoveFromPlaylist(item.playlist.id)
+                                } else {
+                                    haptics.confirm()
+                                    onSelectPlaylist(item.playlist.id)
+                                }
+                            }
+                            .padding(horizontal = 10.dp, vertical = 12.dp)
+                            .testTag("playlist_toggle_${item.playlist.id}"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(text = item.playlist.name, style = MaterialTheme.typography.titleSmall)
+                            Text(
+                                text = strings.tracksCountLabel(item.tracks.size),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text(
+                                text = if (alreadyAdded) strings.removeLabel else strings.addLabel,
+                                style = MaterialTheme.typography.labelLarge,
+                                color = if (alreadyAdded) LiquidRose else MaterialTheme.colorScheme.primary,
+                            )
+                            Icon(
+                                imageVector = if (alreadyAdded) Icons.Rounded.CheckCircle else Icons.Rounded.AddCircleOutline,
+                                contentDescription = if (alreadyAdded) strings.removeLabel else strings.addLabel,
+                                tint = if (alreadyAdded) LiquidMint else MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(22.dp),
+                            )
+                        }
+                    }
+                }
+            }
+
+            Button(
+                onClick = {
+                    haptics.tick()
+                    onDismiss()
+                },
+                shape = CircleShape,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("playlist_sheet_done_button"),
+            ) {
+                Text(strings.doneLabel)
+            }
+
+            Spacer(Modifier.height(12.dp))
+        }
+    }
+}
+
+@Composable
+fun CreatePlaylistDialog(
+    onDismiss: () -> Unit,
+    onConfirm: (name: String, description: String) -> Unit,
+) {
+    val strings = LocalAppStrings.current
+    var name by remember { mutableStateOf("") }
+    var description by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        shape = RoundedCornerShape(28.dp),
+        title = { Text(strings.newPlaylistDialogTitle) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text(strings.playlistNameLabel) },
+                    singleLine = true,
+                    shape = RoundedCornerShape(18.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("playlist_name_input"),
+                )
+                OutlinedTextField(
+                    value = description,
+                    onValueChange = { description = it },
+                    label = { Text(strings.descriptionOptionalLabel) },
+                    maxLines = 2,
+                    shape = RoundedCornerShape(18.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onConfirm(name, description) },
+                enabled = name.isNotBlank(),
+                shape = CircleShape,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                ),
+                modifier = Modifier.testTag("confirm_create_playlist_button"),
+            ) {
+                Text(strings.createLabel)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(strings.cancel)
+            }
+        },
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun UploadTracksBottomSheet(
+    state: MainUiState,
+    palettes: List<Pair<Long, Long>>,
+    onDismiss: () -> Unit,
+    onStageAudioFiles: (List<Uri>) -> Unit,
+    onUpdateDraft: (title: String?, artist: String?, genre: String?, description: String?, paletteIndex: Int?) -> Unit,
+    onPublishDraft: () -> Unit,
+    onCancelDraft: () -> Unit,
+    onSetAutoUploadFolder: (Uri, String?) -> Unit,
+    onSyncNow: () -> Unit,
+) {
+    val strings = LocalAppStrings.current
+    val context = LocalContext.current
+
+    val audioPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenMultipleDocuments(),
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            uris.forEach { uri ->
+                runCatching {
+                    context.contentResolver.takePersistableUriPermission(
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                    )
+                }
+            }
+            onStageAudioFiles(uris)
+        }
+    }
+
+    val folderPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree(),
+    ) { treeUri ->
+        if (treeUri != null) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    treeUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                )
+            }
+            val folderName = DocumentFile.fromTreeUri(context, treeUri)?.name
+            onSetAutoUploadFolder(treeUri, folderName)
+        }
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Text(
+                text = strings.uploadOwnTracks,
+                style = MaterialTheme.typography.titleLarge,
+            )
+
+            state.upload.statusMessage?.let { msg ->
+                Text(
+                    text = msg,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = LiquidMint,
+                )
+            }
+
+            val draft = state.upload.stagedDraft
+            if (draft != null) {
+                StagedUploadDraftEditor(
+                    draft = draft,
+                    palettes = palettes,
+                    isImporting = state.upload.isImporting,
+                    onUpdateDraft = onUpdateDraft,
+                    onPublish = {
+                        onPublishDraft()
+                        onDismiss()
+                    },
+                    onCancel = onCancelDraft,
+                )
+            } else {
+                Button(
+                    onClick = { audioPickerLauncher.launch(arrayOf("audio/*")) },
+                    enabled = !state.upload.isImporting,
+                    shape = CircleShape,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary,
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(50.dp)
+                        .testTag("sheet_pick_audio_button"),
+                ) {
+                    if (state.upload.isImporting) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.onPrimary,
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(strings.uploadingLabel)
+                    } else {
+                        Icon(Icons.Rounded.AudioFile, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text(strings.pickAudioFiles)
+                    }
+                }
+
+                HorizontalDivider()
+
+                Text(
+                    text = strings.autoUploadFolderTitle,
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                Text(
+                    text = state.settings.autoUploadFolderName
+                        ?.let { strings.folderLinkedPrefix(it) }
+                        ?: strings.autoUploadFolderHint,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    OutlinedButton(
+                        onClick = { folderPickerLauncher.launch(null) },
+                        shape = CircleShape,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Icon(Icons.Rounded.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(strings.pickFolderButton)
+                    }
+
+                    if (state.settings.autoUploadTreeUri != null) {
+                        Button(
+                            onClick = onSyncNow,
+                            enabled = !state.upload.isSyncingFolder,
+                            shape = CircleShape,
+                            colors = ButtonDefaults.buttonColors(containerColor = LiquidCyan, contentColor = Color.Black),
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Icon(Icons.Rounded.Sync, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(strings.syncButton)
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(20.dp))
+        }
+    }
+}
+
+@Composable
+private fun StagedUploadDraftEditor(
+    draft: StagedUploadDraft,
+    palettes: List<Pair<Long, Long>>,
+    isImporting: Boolean,
+    onUpdateDraft: (title: String?, artist: String?, genre: String?, description: String?, paletteIndex: Int?) -> Unit,
+    onPublish: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    val strings = LocalAppStrings.current
+    val genres = listOf("Мои треки", "Хип-хоп", "Электроника", "Поп", "Рок", "Lo-Fi", "Синтвейв", "Инди", "Амбиент")
+    val activePalette = palettes[draft.paletteIndex % palettes.size]
+
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text(
+            text = strings.durationSizeLabel(
+                formatDuration(draft.preview.durationMs),
+                formatBytesMb(draft.preview.fileSizeBytes),
+            ),
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        OutlinedTextField(
+            value = draft.title,
+            onValueChange = { onUpdateDraft(it, null, null, null, null) },
+            label = { Text(strings.titleLabel) },
+            singleLine = true,
+            shape = RoundedCornerShape(18.dp),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        OutlinedTextField(
+            value = draft.artist,
+            onValueChange = { onUpdateDraft(null, it, null, null, null) },
+            label = { Text(strings.artistLabel) },
+            singleLine = true,
+            shape = RoundedCornerShape(18.dp),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            items(genres) { genre ->
+                val selected = draft.genre == genre
+                Box(
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .background(
+                            if (selected) Color(activePalette.first).copy(alpha = 0.25f)
+                            else MaterialTheme.colorScheme.surfaceVariant,
+                        )
+                        .border(
+                            1.dp,
+                            if (selected) Color(activePalette.first) else Color.Transparent,
+                            CircleShape,
+                        )
+                        .clickable { onUpdateDraft(null, null, genre, null, null) }
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                ) {
+                    Text(
+                        text = filterDisplayLabel(genre, strings),
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                }
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            palettes.forEachIndexed { idx, pair ->
+                val selected = draft.paletteIndex == idx
+                Box(
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(CircleShape)
+                        .background(Brush.linearGradient(listOf(Color(pair.first), Color(pair.second))))
+                        .border(
+                            width = if (selected) 2.5.dp else 1.dp,
+                            color = if (selected) Color.White else Color.Transparent,
+                            shape = CircleShape,
+                        )
+                        .clickable { onUpdateDraft(null, null, null, null, idx) },
+                )
+            }
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            OutlinedButton(
+                onClick = onCancel,
+                shape = CircleShape,
+                modifier = Modifier.weight(1f),
+            ) {
+                Text(strings.cancel)
+            }
+            Button(
+                onClick = onPublish,
+                enabled = !isImporting && draft.title.isNotBlank(),
+                shape = CircleShape,
+                colors = ButtonDefaults.buttonColors(containerColor = Color(activePalette.first)),
+                modifier = Modifier.weight(1f),
+            ) {
+                Text(strings.addButton)
+            }
+        }
+    }
+}
+
+@Composable
+fun AudiusConnectDialog(
+    currentHandle: String?,
+    isSyncing: Boolean,
+    statusMessage: String?,
+    onDismiss: () -> Unit,
+    onSync: (String) -> Unit,
+    onDisconnect: () -> Unit,
+) {
+    val strings = LocalAppStrings.current
+    var handleInput by remember(currentHandle) { mutableStateOf(currentHandle.orEmpty()) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        shape = RoundedCornerShape(28.dp),
+        title = { Text(strings.settingsAudiusSection) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = strings.settingsAudiusHint,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = handleInput,
+                    onValueChange = { handleInput = it },
+                    label = { Text(strings.settingsAudiusHandleLabel) },
+                    placeholder = { Text(strings.settingsAudiusHandlePlaceholder) },
+                    singleLine = true,
+                    shape = RoundedCornerShape(18.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("dialog_audius_handle_input"),
+                )
+                statusMessage?.let {
+                    Text(
+                        text = it,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = LiquidCyan,
+                    )
+                }
+                if (currentHandle != null) {
+                    TextButton(onClick = onDisconnect) {
+                        Text("${strings.settingsAudiusDisconnect} @$currentHandle", color = LiquidRose)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onSync(handleInput) },
+                enabled = handleInput.isNotBlank() && !isSyncing,
+                shape = CircleShape,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                ),
+                modifier = Modifier.testTag("dialog_audius_sync_button"),
+            ) {
+                if (isSyncing) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onPrimary,
+                    )
+                    Spacer(Modifier.width(6.dp))
+                }
+                Text(strings.settingsAudiusSync)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(strings.close)
+            }
+        },
+    )
+}

@@ -1,0 +1,6 @@
+{
+  "name": "SoundLapa",
+  "description": "SoundLapa — музыкальная платформа с жидким стеклом, кастомными шейдерами, авто-загрузкой треков и офлайн-кэшем",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

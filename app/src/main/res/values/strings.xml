@@ -1,0 +1,20 @@
+<resources>
+    <string name="app_name">SoundLapa</string>
+    <string name="tab_home">Главная</string>
+    <string name="tab_library">Медиатека</string>
+    <string name="upload_own_tracks">Загрузить свои треки</string>
+    <string name="upload_pick_audio">Выбрать аудиофайлы</string>
+    <string name="upload_pick_folder">Папка авто-загрузки</string>
+    <string name="upload_sync_now">Синхронизировать</string>
+    <string name="cd_play_pause">Воспроизведение или пауза</string>
+    <string name="cd_previous_track">Предыдущий трек</string>
+    <string name="cd_next_track">Следующий трек</string>
+    <string name="cd_shuffle">Случайный порядок</string>
+    <string name="cd_repeat">Режим повтора</string>
+    <string name="cd_like_track">Нравится</string>
+    <string name="cd_collapse_player">Свернуть плеер</string>
+    <string name="cd_search">Поиск</string>
+    <string name="cd_about_app">О приложении</string>
+    <string name="cd_settings">Настройки</string>
+    <string name="cd_more_options">Действия с треком</string>
+</resources>
