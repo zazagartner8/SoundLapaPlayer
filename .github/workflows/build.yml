@@ -19,7 +19,7 @@ jobs:
         with:
           gradle-version: 9.3.1
       - name: Build Debug APK
-        run: gradle assembleDebug -Pksp.useKSP2=false -Dorg.gradle.jvmargs="-Xmx4g -Djava.awt.headless=true"
+        run: gradle assembleDebug --no-configuration-cache --no-daemon -Pksp.incremental=false -Dorg.gradle.jvmargs="-Xmx4g -Djava.awt.headless=true"
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
