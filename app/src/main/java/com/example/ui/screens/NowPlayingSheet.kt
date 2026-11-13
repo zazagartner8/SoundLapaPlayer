@@ -1,16 +1,30 @@
 package com.example.ui.screens
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -20,10 +34,12 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.sizeIn
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
@@ -49,29 +65,34 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.common.Player
@@ -85,8 +106,9 @@ import com.example.ui.shaders.FloatingCoverBackdrop
 import com.example.ui.shaders.LiquidGlassCard
 import com.example.ui.shaders.TrackCoverArtwork
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 @Composable
 fun NowPlayingSheet(
@@ -109,6 +131,7 @@ fun NowPlayingSheet(
     onOpenQueue: () -> Unit = {},
     onShareTrack: () -> Unit = {},
     onOpenArtistProfile: () -> Unit = {},
+    onDragStateChange: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     BackHandler(onBack = onCollapse)
@@ -125,20 +148,56 @@ fun NowPlayingSheet(
         label = "artworkScale",
     )
 
+    val density = LocalDensity.current
+    val scope = rememberCoroutineScope()
+    val dragOffsetY = remember { Animatable(0f) }
+    val dismissThresholdPx = remember(density) { with(density) { 140.dp.toPx() } }
+
+    DisposableEffect(Unit) {
+        onDispose { onDragStateChange(false) }
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
-            .pointerInput(Unit) {
-                awaitPointerEventScope {
-                    while (true) {
-                        awaitPointerEvent(PointerEventPass.Main).changes.forEach { change ->
-                            if (!change.isConsumed) {
-                                change.consume()
-                            }
+            .graphicsLayer {
+                val y = dragOffsetY.value
+                translationY = y
+                alpha = (1f - (y / (dismissThresholdPx * 3.0f))).coerceIn(0.45f, 1f)
+            }
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = {},
+            )
+            .draggable(
+                orientation = Orientation.Vertical,
+                state = rememberDraggableState { delta ->
+                    scope.launch {
+                        val next = (dragOffsetY.value + delta).coerceAtLeast(0f)
+                        dragOffsetY.snapTo(next)
+                        onDragStateChange(next > 4f)
+                    }
+                },
+                onDragStopped = { velocity ->
+                    val shouldDismiss = dragOffsetY.value > dismissThresholdPx ||
+                        (dragOffsetY.value > 32f && velocity > 900f)
+                    if (shouldDismiss) {
+                        haptics.tick()
+                        onDragStateChange(false)
+                        onCollapse()
+                    } else {
+                        scope.launch {
+                            dragOffsetY.animateTo(
+                                targetValue = 0f,
+                                animationSpec = spring(dampingRatio = 0.82f, stiffness = 420f),
+                            )
+                            onDragStateChange(false)
                         }
                     }
-                }
-            },
+                },
+            )
+            .testTag("now_playing_sheet"),
     ) {
         // Looping floating track cover artwork as atmospheric backdrop
         FloatingCoverBackdrop(
@@ -152,10 +211,20 @@ fun NowPlayingSheet(
                 .windowInsetsPadding(WindowInsets.safeDrawing)
                 .widthIn(max = 600.dp)
                 .align(Alignment.TopCenter)
-                .padding(start = 24.dp, end = 24.dp, top = 8.dp, bottom = 10.dp),
+                .padding(start = 24.dp, end = 24.dp, top = 6.dp, bottom = 10.dp),
             verticalArrangement = Arrangement.SpaceBetween,
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
+            // Subtle drag handle indicator for swipe-down-to-dismiss
+            Box(
+                modifier = Modifier
+                    .padding(bottom = 2.dp)
+                    .width(40.dp)
+                    .height(4.dp)
+                    .clip(CircleShape)
+                    .background(Color.White.copy(alpha = 0.38f)),
+            )
+
             // Top bar
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -577,6 +646,9 @@ private fun SmoothPlaybackSeekBar(
     onTickHaptic: () -> Unit,
 ) {
     val basePositionMs by positionFlow.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
+    val density = LocalDensity.current
+    val themeAccent = MaterialTheme.colorScheme.primary
     var isScrubbing by remember(trackId) { mutableStateOf(false) }
     var scrubFraction by remember(trackId) { mutableFloatStateOf(0f) }
     val animFraction = remember(trackId) {
@@ -619,29 +691,142 @@ private fun SmoothPlaybackSeekBar(
     val formattedCurrentTime = remember(displaySecond) { formatDuration(displaySecond * 1000L) }
     val formattedDuration = remember(durationMs) { formatDuration(durationMs) }
 
+    val thumbDiameter by animateDpAsState(
+        targetValue = if (isScrubbing) 18.dp else 13.dp,
+        animationSpec = spring(dampingRatio = 0.72f, stiffness = 500f),
+        label = "seekThumbSize",
+    )
+    val trackHeight by animateDpAsState(
+        targetValue = if (isScrubbing) 6.dp else 4.dp,
+        animationSpec = tween(durationMillis = 120),
+        label = "seekTrackHeight",
+    )
+
     Column(modifier = Modifier.fillMaxWidth()) {
-        Slider(
-            value = displayFraction,
-            valueRange = 0f..1f,
-            onValueChange = { value ->
-                isScrubbing = true
-                scrubFraction = if (value.isFinite()) value.coerceIn(0f, 1f) else 0f
-            },
-            onValueChangeFinished = {
-                onTickHaptic()
-                val target = if (scrubFraction.isFinite()) scrubFraction.coerceIn(0f, 1f) else 0f
-                isScrubbing = false
-                onSeekFraction(target)
-            },
-            colors = SliderDefaults.colors(
-                thumbColor = Color.White,
-                activeTrackColor = Color.White,
-                inactiveTrackColor = Color.White.copy(alpha = 0.28f),
-            ),
+        BoxWithConstraints(
             modifier = Modifier
                 .fillMaxWidth()
+                .height(48.dp)
                 .testTag("player_material_slider"),
-        )
+        ) {
+            val totalWidthPx = with(density) { maxWidth.toPx() }.coerceAtLeast(1f)
+            val endPadPx = with(density) { 9.dp.toPx() }
+            val usableWidthPx = (totalWidthPx - endPadPx * 2f).coerceAtLeast(1f)
+            var pillWidthPx by remember { mutableIntStateOf(0) }
+
+            fun xToFraction(x: Float): Float = ((x - endPadPx) / usableWidthPx).coerceIn(0f, 1f)
+
+            // Floating timecode marker pill above thumb during slide/scrub
+            androidx.compose.animation.AnimatedVisibility(
+                visible = isScrubbing,
+                enter = fadeIn(tween(90)) + scaleIn(initialScale = 0.85f, animationSpec = tween(110)),
+                exit = fadeOut(tween(110)) + scaleOut(targetScale = 0.85f, animationSpec = tween(110)),
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .offset {
+                        val thumbCenterX = endPadPx + usableWidthPx * displayFraction
+                        val maxOffsetX = (totalWidthPx - pillWidthPx).coerceAtLeast(0f)
+                        val x = (thumbCenterX - pillWidthPx / 2f).coerceIn(0f, maxOffsetX)
+                        IntOffset(x = x.roundToInt(), y = -with(density) { 20.dp.toPx() }.roundToInt())
+                    }
+                    .onSizeChanged { pillWidthPx = it.width }
+                    .testTag("seekbar_timecode_marker"),
+            ) {
+                Surface(
+                    shape = CircleShape,
+                    color = Color(0xEC14131B),
+                    border = BorderStroke(1.dp, themeAccent.copy(alpha = 0.78f)),
+                    shadowElevation = 6.dp,
+                ) {
+                    Text(
+                        text = formattedCurrentTime,
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                    )
+                }
+            }
+
+            // Interactive hit area supporting both smooth horizontal slide and direct tap
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(trackId, durationMs, usableWidthPx) {
+                        detectHorizontalDragGestures(
+                            onDragStart = { offset ->
+                                isScrubbing = true
+                                scrubFraction = xToFraction(offset.x)
+                            },
+                            onHorizontalDrag = { change, _ ->
+                                change.consume()
+                                scrubFraction = xToFraction(change.position.x)
+                            },
+                            onDragEnd = {
+                                onTickHaptic()
+                                val target = if (scrubFraction.isFinite()) scrubFraction.coerceIn(0f, 1f) else 0f
+                                scope.launch {
+                                    animFraction.snapTo(target)
+                                    isScrubbing = false
+                                    onSeekFraction(target)
+                                }
+                            },
+                            onDragCancel = {
+                                isScrubbing = false
+                            },
+                        )
+                    }
+                    .pointerInput(trackId, durationMs, usableWidthPx) {
+                        detectTapGestures { offset ->
+                            onTickHaptic()
+                            val target = xToFraction(offset.x)
+                            scope.launch {
+                                animFraction.snapTo(target)
+                                onSeekFraction(target)
+                            }
+                        }
+                    },
+                contentAlignment = Alignment.CenterStart,
+            ) {
+                // Inactive track
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 9.dp)
+                        .height(trackHeight)
+                        .clip(CircleShape)
+                        .background(Color.White.copy(alpha = 0.26f)),
+                ) {
+                    // Active progress fill
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(displayFraction)
+                            .height(trackHeight)
+                            .clip(CircleShape)
+                            .background(if (isScrubbing) themeAccent else Color.White),
+                    )
+                }
+
+                // Thumb positioned precisely along usable width
+                Box(
+                    modifier = Modifier
+                        .offset {
+                            val centerX = endPadPx + usableWidthPx * displayFraction
+                            val halfThumb = with(density) { (thumbDiameter / 2).toPx() }
+                            IntOffset(x = (centerX - halfThumb).roundToInt(), y = 0)
+                        }
+                        .size(thumbDiameter)
+                        .clip(CircleShape)
+                        .background(Color.White)
+                        .border(
+                            width = if (isScrubbing) 2.5.dp else 0.dp,
+                            color = if (isScrubbing) themeAccent else Color.Transparent,
+                            shape = CircleShape,
+                        ),
+                )
+            }
+        }
+
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -651,7 +836,8 @@ private fun SmoothPlaybackSeekBar(
             Text(
                 text = formattedCurrentTime,
                 style = MaterialTheme.typography.labelMedium,
-                color = Color.White.copy(alpha = 0.80f),
+                fontWeight = if (isScrubbing) FontWeight.Bold else FontWeight.Medium,
+                color = if (isScrubbing) Color.White else Color.White.copy(alpha = 0.80f),
             )
             Text(
                 text = formattedDuration,

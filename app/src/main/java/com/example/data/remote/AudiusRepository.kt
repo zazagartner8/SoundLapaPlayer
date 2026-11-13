@@ -669,28 +669,18 @@ class AudiusRepository(
         coroutineScope {
             val localTracksDeferred = async { dao.getAllTracksOnce() }
 
-            @Volatile
             var spInfo: SpotifyArtistInfo? = null
-            @Volatile
             var spTracks: List<TrackEntity> = emptyList()
-            @Volatile
             var spAlbums: List<ArtistAlbumItem> = emptyList()
 
-            @Volatile
             var scProfile: SoundCloudArtistProfile? = null
-            @Volatile
             var scChannelTracks: List<TrackEntity> = emptyList()
-            @Volatile
             var scChannelAlbums: List<ArtistAlbumItem> = emptyList()
 
-            @Volatile
             var scSearchTracks: List<TrackEntity> = emptyList()
 
-            @Volatile
             var audiusAvatar: String? = null
-            @Volatile
             var audiusTracks: List<TrackEntity> = emptyList()
-            @Volatile
             var audiusAlbums: List<ArtistAlbumItem> = emptyList()
 
             val buildMutex = Mutex()
@@ -781,11 +771,19 @@ class AudiusRepository(
                     )
                 }
                 if (res != null) {
-                    spInfo = res.first
-                    spTracks = res.second
-                    spAlbums = res.third
-                    if (res.second.isNotEmpty() || res.third.isNotEmpty()) {
-                        emitProgressSnapshot()
+                    val localTracks = localTracksDeferred.await()
+                    val snapshot = buildMutex.withLock {
+                        spInfo = res.first
+                        spTracks = res.second
+                        spAlbums = res.third
+                        if (res.second.isNotEmpty() || res.third.isNotEmpty()) {
+                            buildMergedSnapshot(localTracks)
+                        } else {
+                            null
+                        }
+                    }
+                    if (snapshot != null && (snapshot.tracks.isNotEmpty() || snapshot.albums.isNotEmpty() || !snapshot.avatarUrl.isNullOrBlank())) {
+                        onPartialResult(snapshot)
                     }
                 }
             }
@@ -799,11 +797,19 @@ class AudiusRepository(
                     )
                 }
                 if (res != null) {
-                    scProfile = res.first
-                    scChannelTracks = res.second
-                    scChannelAlbums = res.third
-                    if (res.second.isNotEmpty() || res.third.isNotEmpty()) {
-                        emitProgressSnapshot()
+                    val localTracks = localTracksDeferred.await()
+                    val snapshot = buildMutex.withLock {
+                        scProfile = res.first
+                        scChannelTracks = res.second
+                        scChannelAlbums = res.third
+                        if (res.second.isNotEmpty() || res.third.isNotEmpty()) {
+                            buildMergedSnapshot(localTracks)
+                        } else {
+                            null
+                        }
+                    }
+                    if (snapshot != null && (snapshot.tracks.isNotEmpty() || snapshot.albums.isNotEmpty() || !snapshot.avatarUrl.isNullOrBlank())) {
+                        onPartialResult(snapshot)
                     }
                 }
             }
@@ -813,8 +819,14 @@ class AudiusRepository(
                     FullStreamResolver.searchSoundCloud(query = expanded, limit = 14)
                 }.orEmpty()
                 if (res.isNotEmpty()) {
-                    scSearchTracks = res
-                    emitProgressSnapshot()
+                    val localTracks = localTracksDeferred.await()
+                    val snapshot = buildMutex.withLock {
+                        scSearchTracks = res
+                        buildMergedSnapshot(localTracks)
+                    }
+                    if (snapshot.tracks.isNotEmpty() || snapshot.albums.isNotEmpty() || !snapshot.avatarUrl.isNullOrBlank()) {
+                        onPartialResult(snapshot)
+                    }
                 }
             }
 
@@ -878,11 +890,19 @@ class AudiusRepository(
                     }.getOrDefault(Triple(null, emptyList(), emptyList()))
                 }
                 if (res != null) {
-                    audiusAvatar = res.first
-                    audiusTracks = res.second
-                    audiusAlbums = res.third
-                    if (res.second.isNotEmpty() || res.third.isNotEmpty()) {
-                        emitProgressSnapshot()
+                    val localTracks = localTracksDeferred.await()
+                    val snapshot = buildMutex.withLock {
+                        audiusAvatar = res.first
+                        audiusTracks = res.second
+                        audiusAlbums = res.third
+                        if (res.second.isNotEmpty() || res.third.isNotEmpty()) {
+                            buildMergedSnapshot(localTracks)
+                        } else {
+                            null
+                        }
+                    }
+                    if (snapshot != null && (snapshot.tracks.isNotEmpty() || snapshot.albums.isNotEmpty() || !snapshot.avatarUrl.isNullOrBlank())) {
+                        onPartialResult(snapshot)
                     }
                 }
             }
@@ -900,10 +920,16 @@ class AudiusRepository(
                     )
                 }
                 if (linked != null) {
-                    spInfo = linked.first
-                    spTracks = linked.second
-                    spAlbums = linked.third
-                    emitProgressSnapshot()
+                    val localTracks = localTracksDeferred.await()
+                    val snapshot = buildMutex.withLock {
+                        spInfo = linked.first
+                        spTracks = linked.second
+                        spAlbums = linked.third
+                        buildMergedSnapshot(localTracks)
+                    }
+                    if (snapshot.tracks.isNotEmpty() || snapshot.albums.isNotEmpty() || !snapshot.avatarUrl.isNullOrBlank()) {
+                        onPartialResult(snapshot)
+                    }
                 }
             }
 

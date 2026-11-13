@@ -3,6 +3,8 @@ package com.example
 import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.example.audio.RecommendationEngine
+import com.example.data.local.ListeningHistoryEntry
 import com.example.data.local.PlaylistEntity
 import com.example.data.local.PlaylistTrackCrossRef
 import com.example.data.local.SoundLapaDatabase
@@ -312,6 +314,75 @@ class ExampleRobolectricTest {
       assertTrue(s.offlineErrorTitle.isNotBlank())
       assertTrue(s.offlineGoToDownloadedAction.isNotBlank())
       assertTrue(s.offlineErrorWithDownloadsMessage(2).contains("2"))
+      assertTrue(s.settingsImportPublicNotice.isNotBlank())
+      assertTrue(s.networkReconnectedMessage.isNotBlank())
+      assertTrue(s.playlistShuffleLabel.isNotBlank())
+      assertTrue(s.playlistTotalDurationMinutes(12).contains("12"))
     }
+  }
+
+  @Test
+  fun `trending similar tracks prioritize high-play tracks matching listening history`() {
+    fun track(
+      id: String,
+      artist: String,
+      genre: String,
+      playCount: Int,
+      likeCount: Int,
+      title: String = "Song $id",
+    ) = TrackEntity(
+      id = id,
+      title = title,
+      artist = artist,
+      genre = genre,
+      durationMs = 180_000L,
+      waveformJson = "[]",
+      cachedFilePath = null,
+      sourceUri = "https://example.com/$id.mp3",
+      coverArtPath = null,
+      accentColorHex = 0xFF10B981L,
+      secondaryColorHex = 0xFF065F46L,
+      isUserUpload = false,
+      isCachedOffline = false,
+      fileSizeBytes = 0L,
+      playCount = playCount,
+      likeCount = likeCount,
+    )
+
+    val tracks = listOf(
+      track("pop_low_match", "Miyagi", "Hip-Hop", playCount = 50, likeCount = 5, title = "Demo"),
+      track("hiphop_hit_1", "Miyagi", "Hip-Hop", playCount = 950_000, likeCount = 35_000, title = "Yamakasi"),
+      track("hiphop_hit_2", "Miyagi", "Hip-Hop", playCount = 720_000, likeCount = 24_000, title = "Minor"),
+      track("hiphop_hit_3", "Miyagi", "Hip-Hop", playCount = 650_000, likeCount = 21_000, title = "Captain"),
+      track("hiphop_other", "Andy Panda", "Hip-Hop", playCount = 610_000, likeCount = 19_000, title = "Kosandra"),
+      track("unrelated_hit", "Classical Orchestra", "Classical", playCount = 500_000, likeCount = 12_000, title = "Symphony"),
+      track("ambient_hit", "Lo-Fi Radio", "Ambient", playCount = 120_000, likeCount = 4_000, title = "Rain"),
+    )
+    val history = listOf(
+      ListeningHistoryEntry(
+        trackId = "seed_1",
+        title = "Yamakasi",
+        artist = "Miyagi",
+        genre = "Hip-Hop",
+        playCount = 6,
+        lastPlayedAtMs = 10_000L,
+      ),
+    )
+
+    val trending = RecommendationEngine.computeTrendingSimilarTracks(
+      allTracks = tracks,
+      listeningHistory = history,
+      searchHistory = listOf("Miyagi Hip-Hop"),
+      limit = 4,
+    )
+
+    assertEquals(4, trending.size)
+    // High-play matching Hip-Hop tracks rank above low-play match and unrelated genres,
+    // while enforcing max 2 tracks per artist in primary pass.
+    assertTrue(trending.take(3).any { it.id == "hiphop_hit_1" || it.id == "hiphop_hit_2" })
+    assertTrue(trending.any { it.id == "hiphop_other" })
+    val miyagiCount = trending.count { it.artist == "Miyagi" }
+    assertTrue(miyagiCount <= 2)
+    assertFalse(trending.take(3).any { it.id == "pop_low_match" })
   }
 }

@@ -66,6 +66,7 @@ import com.example.ui.components.EditTrackDialog
 import com.example.ui.components.FloatingMiniPlayer
 import com.example.ui.components.LiquidBottomNavBar
 import com.example.ui.components.LiquidNavigationRail
+import com.example.ui.components.NetworkReconnectedBanner
 import com.example.ui.components.OfflineNetworkErrorBanner
 import com.example.ui.components.QueueBottomSheet
 import com.example.ui.components.SystemUtilityTopBar
@@ -113,6 +114,7 @@ fun SoundLapaApp(
     val artistProfile by viewModel.artistProfileState.collectAsStateWithLifecycle()
     val queueTracks by viewModel.playbackController.queueTracks.collectAsStateWithLifecycle()
     val requestedLibrarySection by viewModel.requestedLibrarySection.collectAsStateWithLifecycle()
+    val showReconnectedBanner by viewModel.showReconnectedBanner.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -127,6 +129,7 @@ fun SoundLapaApp(
     var editingTrack by remember { mutableStateOf<TrackEntity?>(null) }
     var playlistPickerTrack by remember { mutableStateOf<TrackEntity?>(null) }
     var pendingDeleteTrack by remember { mutableStateOf<TrackEntity?>(null) }
+    var isPlayerDragging by remember { mutableStateOf(false) }
 
     val notificationLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
@@ -211,7 +214,7 @@ fun SoundLapaApp(
             aboutTransition.targetState = showAboutScreen
 
             val isMainScreenCovered =
-                (playerTransition.currentState && playerTransition.targetState && playerTransition.isIdle) ||
+                (!isPlayerDragging && playerTransition.currentState && playerTransition.targetState && playerTransition.isIdle) ||
                     (settingsTransition.currentState && settingsTransition.targetState && settingsTransition.isIdle) ||
                     (aboutTransition.currentState && aboutTransition.targetState && aboutTransition.isIdle)
 
@@ -372,6 +375,10 @@ fun SoundLapaApp(
                                             ensureNotificationPermissionOnce()
                                             viewModel.playPlaylist(pl)
                                         },
+                                        onPlayPlaylistShuffle = { pl ->
+                                            ensureNotificationPermissionOnce()
+                                            viewModel.playPlaylist(pl, shuffled = true)
+                                        },
                                         onPlayTrack = { track, queue ->
                                             ensureNotificationPermissionOnce()
                                             viewModel.playOrToggleTrack(track, queue)
@@ -508,7 +515,11 @@ fun SoundLapaApp(
                         isInPlaylist = isInPlaylist,
                         nextTrack = nextTrack,
                         queueCount = activeQueue.size,
-                        onCollapse = { viewModel.setPlayerExpanded(false) },
+                        onCollapse = {
+                            isPlayerDragging = false
+                            viewModel.setPlayerExpanded(false)
+                        },
+                        onDragStateChange = { isPlayerDragging = it },
                         onTogglePlayPause = {
                             ensureNotificationPermissionOnce()
                             if (state.playback.currentTrackId == null ||
@@ -610,6 +621,26 @@ fun SoundLapaApp(
             ) {
                 AboutScreen(
                     onClose = { showAboutScreen = false },
+                )
+            }
+
+            AnimatedVisibility(
+                visible = showReconnectedBanner,
+                enter = slideInVertically(
+                    initialOffsetY = { -it },
+                    animationSpec = tween(280, easing = SilkyEaseOut),
+                ) + fadeIn(animationSpec = tween(200)),
+                exit = slideOutVertically(
+                    targetOffsetY = { -it },
+                    animationSpec = tween(240, easing = FastOutSlowInEasing),
+                ) + fadeOut(animationSpec = tween(180)),
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .windowInsetsPadding(WindowInsets.statusBars)
+                    .padding(top = 6.dp),
+            ) {
+                NetworkReconnectedBanner(
+                    onDismiss = viewModel::dismissReconnectedBanner,
                 )
             }
         }
