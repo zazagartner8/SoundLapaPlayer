@@ -14,10 +14,22 @@ import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
 private val Context.soundLapaDataStore: DataStore<Preferences> by preferencesDataStore(name = "soundlapa_prefs")
+
+@Immutable
+@Serializable
+data class ListeningHistoryEntry(
+    val trackId: String,
+    val title: String,
+    val artist: String,
+    val genre: String,
+    val playCount: Int = 1,
+    val lastPlayedAtMs: Long = 0L,
+)
 
 @Immutable
 data class SoundLapaSettings(
@@ -34,10 +46,12 @@ data class SoundLapaSettings(
     val audiusDisplayName: String? = null,
     val audiusLastSyncTimestamp: Long = 0L,
     val appLanguage: String = "ru",
-    val accentColorArgb: Long = 0xFFFF5500L,
+    val accentColorArgb: Long = 0xFF10B981L,
     val smoothTransitionEnabled: Boolean = true,
     val smoothTransitionDurationSec: Int = 3,
+    val dataSaverEnabled: Boolean = false,
     val searchHistory: List<String> = emptyList(),
+    val listeningHistory: List<ListeningHistoryEntry> = emptyList(),
 )
 
 class SoundLapaPreferences(private val context: Context) {
@@ -59,7 +73,9 @@ class SoundLapaPreferences(private val context: Context) {
         val ACCENT_COLOR_ARGB = longPreferencesKey("accent_color_argb")
         val SMOOTH_TRANSITION_ENABLED = booleanPreferencesKey("smooth_transition_enabled")
         val SMOOTH_TRANSITION_DURATION_SEC = intPreferencesKey("smooth_transition_duration_sec")
+        val DATA_SAVER_ENABLED = booleanPreferencesKey("data_saver_enabled")
         val SEARCH_HISTORY = stringPreferencesKey("search_history_json")
+        val LISTENING_HISTORY = stringPreferencesKey("listening_history_json")
     }
 
     // Synchronous SharedPreferences mirror ensures instant restoration on frame 0
@@ -86,15 +102,22 @@ class SoundLapaPreferences(private val context: Context) {
         audiusDisplayName = syncPrefs.getString("audius_display_name", null),
         audiusLastSyncTimestamp = syncPrefs.getLong("audius_last_sync", 0L),
         appLanguage = syncPrefs.getString("app_language", "ru") ?: "ru",
-        accentColorArgb = syncPrefs.getLong("accent_color_argb", 0xFFFF5500L),
+        accentColorArgb = syncPrefs.getLong("accent_color_argb", 0xFF10B981L),
         smoothTransitionEnabled = syncPrefs.getBoolean("smooth_transition_enabled", true),
         smoothTransitionDurationSec = syncPrefs.getInt("smooth_transition_duration_sec", 3).coerceIn(1, 10),
+        dataSaverEnabled = syncPrefs.getBoolean("data_saver_enabled", false),
         searchHistory = decodeHistory(syncPrefs.getString("search_history_json", null)),
+        listeningHistory = decodeListeningHistory(syncPrefs.getString("listening_history_json", null)),
     )
 
     private fun decodeHistory(raw: String?): List<String> {
         if (raw.isNullOrBlank()) return emptyList()
         return runCatching { Json.decodeFromString<List<String>>(raw) }.getOrDefault(emptyList())
+    }
+
+    private fun decodeListeningHistory(raw: String?): List<ListeningHistoryEntry> {
+        if (raw.isNullOrBlank()) return emptyList()
+        return runCatching { Json.decodeFromString<List<ListeningHistoryEntry>>(raw) }.getOrDefault(emptyList())
     }
 
     private inline fun updateSync(
@@ -283,5 +306,32 @@ class SoundLapaPreferences(private val context: Context) {
             putString("search_history_json", encoded)
         }
         context.soundLapaDataStore.edit { it[Keys.SEARCH_HISTORY] = encoded }
+    }
+
+    suspend fun setDataSaverEnabled(enabled: Boolean) {
+        updateSync({ it.copy(dataSaverEnabled = enabled) }) {
+            putBoolean("data_saver_enabled", enabled)
+        }
+        context.soundLapaDataStore.edit { it[Keys.DATA_SAVER_ENABLED] = enabled }
+    }
+
+    suspend fun recordTrackPlayed(track: TrackEntity) {
+        val now = System.currentTimeMillis()
+        val current = _settings.value.listeningHistory
+        val existing = current.find { it.trackId == track.id }
+        val nextEntry = ListeningHistoryEntry(
+            trackId = track.id,
+            title = track.title,
+            artist = track.artist,
+            genre = track.genre,
+            playCount = (existing?.playCount ?: 0) + 1,
+            lastPlayedAtMs = now,
+        )
+        val updated = (listOf(nextEntry) + current.filterNot { it.trackId == track.id }).take(50)
+        val encoded = Json.encodeToString(updated)
+        updateSync({ it.copy(listeningHistory = updated) }) {
+            putString("listening_history_json", encoded)
+        }
+        context.soundLapaDataStore.edit { it[Keys.LISTENING_HISTORY] = encoded }
     }
 }

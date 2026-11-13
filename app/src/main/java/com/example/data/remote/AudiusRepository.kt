@@ -1,6 +1,7 @@
 package com.example.data.remote
 
 import android.content.Context
+import androidx.compose.runtime.Immutable
 import com.example.data.local.PlaylistEntity
 import com.example.data.local.PlaylistTrackCrossRef
 import com.example.data.local.SoundLapaDao
@@ -9,6 +10,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.SerialName
@@ -36,6 +39,7 @@ data class AudiusUserDto(
     val id: String = "",
     val handle: String = "",
     val name: String = "",
+    @SerialName("profile_picture") val profilePicture: AudiusArtworkDto? = null,
 )
 
 @Serializable
@@ -56,6 +60,8 @@ data class AudiusPlaylistDto(
     val id: String = "",
     @SerialName("playlist_name") val playlistName: String = "",
     val description: String? = null,
+    val artwork: AudiusArtworkDto? = null,
+    @SerialName("is_album") val isAlbum: Boolean = false,
 )
 
 @Serializable
@@ -74,10 +80,32 @@ private data class AudiusSingleTrackResponse(val data: AudiusTrackDto? = null)
 private data class AudiusUserResponse(val data: AudiusUserDto? = null)
 
 @Serializable
+private data class AudiusUserListResponse(val data: List<AudiusUserDto> = emptyList())
+
+@Serializable
 private data class AudiusPlaylistListResponse(val data: List<AudiusPlaylistDto> = emptyList())
 
 @Serializable
 private data class AudiusFavoriteListResponse(val data: List<AudiusFavoriteDto> = emptyList())
+
+@Immutable
+data class SearchArtistProfile(
+    val id: String,
+    val name: String,
+    val avatarUrl: String?,
+    val sourceLabel: String,
+    val followersCount: Int = 0,
+    val seedTrack: TrackEntity? = null,
+    val spotifyId: String? = null,
+    val soundCloudUrl: String? = null,
+)
+
+data class ArtistCatalogResult(
+    val artistName: String,
+    val avatarUrl: String?,
+    val tracks: List<TrackEntity>,
+    val albums: List<ArtistAlbumItem>,
+)
 
 data class AudiusSyncSummary(
     val userId: String,
@@ -116,6 +144,7 @@ class AudiusRepository(
         .build()
 
     private val searchCache = ConcurrentHashMap<String, Pair<Long, List<TrackEntity>>>()
+    private val artistCatalogCache = ConcurrentHashMap<String, Pair<Long, ArtistCatalogResult>>()
     private val searchCacheTtlMs = 5 * 60 * 1000L
 
     private val json = Json {
@@ -126,6 +155,11 @@ class AudiusRepository(
 
     private val audioCacheDir: File by lazy {
         File(context.filesDir, "audio_cache").apply { mkdirs() }
+    }
+
+    fun clearSearchCache() {
+        searchCache.clear()
+        artistCatalogCache.clear()
     }
 
     suspend fun fetchTrendingTracks(limit: Int = 36): Result<List<TrackEntity>> = withContext(Dispatchers.IO) {
@@ -168,22 +202,19 @@ class AudiusRepository(
                 }
 
                 val popularQueries = listOf(
-                    "madk1d династия",
                     "madk1d",
                     "miyagi",
                     "eminem",
                     "the weeknd",
-                    "daft punk",
-                    "linkin park",
                 )
                 val ytPopularDeferred = popularQueries.map { q ->
                     async {
                         withTimeoutOrNull(7000L) {
-                            FullStreamResolver.searchYouTubeMusic(query = q, limit = 4)
+                            FullStreamResolver.searchYouTubeMusic(query = q, limit = 5)
                         }.orEmpty()
                     }
                 }
-                val scPopularDeferred = listOf("madk1d", "miyagi", "eminem").map { q ->
+                val scPopularDeferred = listOf("madk1d", "miyagi").map { q ->
                     async {
                         withTimeoutOrNull(6500L) {
                             FullStreamResolver.searchSoundCloud(query = q, limit = 5)
@@ -341,6 +372,7 @@ class AudiusRepository(
                             id = localPlaylistId,
                             name = pl.playlistName,
                             description = pl.description ?: "Синхронизировано с Audius (@${user.handle})",
+                            coverArtPath = pl.artwork?.large ?: pl.artwork?.medium ?: pl.artwork?.small,
                         ),
                     )
                     importedPlaylistsCount++
@@ -350,8 +382,16 @@ class AudiusRepository(
                         .filter { it.id.isNotBlank() && it.title.isNotBlank() }
                         .map { dtoToEntity(it, forceLiked = false) }
                     upsertPreservingLocalState(plTracks)
-                    plTracks.forEach { t ->
-                        dao.addTrackToPlaylist(PlaylistTrackCrossRef(playlistId = localPlaylistId, trackId = t.id))
+                    val baseTime = System.currentTimeMillis()
+                    plTracks.forEachIndexed { idx, t ->
+                        dao.addTrackToPlaylist(
+                            PlaylistTrackCrossRef(
+                                playlistId = localPlaylistId,
+                                trackId = t.id,
+                                addedAt = baseTime + idx,
+                                position = idx,
+                            ),
+                        )
                     }
                     importedTracksCount += plTracks.size
                 }
@@ -404,7 +444,7 @@ class AudiusRepository(
 
         val resolved = FullStreamResolver.resolveDirectStreamForTrack(track, dao)
         val streamUrl = resolved?.directUrl ?: rawStreamUrl
-        if (streamUrl.contains(".m3u8", ignoreCase = true)) {
+        if (resolved?.isHls == true || streamUrl.contains(".m3u8", ignoreCase = true)) {
             return@withContext track
         }
 
@@ -414,16 +454,22 @@ class AudiusRepository(
             else -> "mp3"
         }
         val targetFile = File(audioCacheDir, "${track.id}.$ext")
+        val ua = resolved?.headers?.get("User-Agent") ?: FullStreamResolver.userAgentForStreamUrl(streamUrl)
         val ok = runCatching {
             val request = Request.Builder()
                 .url(streamUrl)
-                .header(
-                    "User-Agent",
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-                )
+                .header("User-Agent", ua)
                 .build()
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) return@runCatching false
+                val ct = response.header("Content-Type")?.lowercase().orEmpty()
+                if (ct.contains("text/html") ||
+                    ct.contains("application/json") ||
+                    ct.contains("mpegurl") ||
+                    ct.contains("application/xml")
+                ) {
+                    return@runCatching false
+                }
                 val body = response.body ?: return@runCatching false
                 body.byteStream().use { input ->
                     FileOutputStream(targetFile).use { output ->
@@ -431,7 +477,7 @@ class AudiusRepository(
                     }
                 }
             }
-            targetFile.exists() && targetFile.length() > 1024L
+            FullStreamResolver.isLikelyPlayableLocalFile(targetFile)
         }.getOrDefault(false)
 
         if (ok) {
@@ -452,16 +498,559 @@ class AudiusRepository(
         }
     }
 
-    private suspend fun upsertPreservingLocalState(incoming: List<TrackEntity>) {
+    suspend fun fetchSimilarTracksForQueries(
+        queries: List<String>,
+        perQueryLimit: Int = 6,
+    ): List<TrackEntity> = withContext(Dispatchers.IO) {
+        val cleanQueries = queries.map { it.trim() }.filter { it.length >= 2 }.distinct().take(3)
+        if (cleanQueries.isEmpty()) return@withContext emptyList()
+        coroutineScope {
+            val ytDeferred = cleanQueries.map { q ->
+                async {
+                    withTimeoutOrNull(6500L) {
+                        FullStreamResolver.searchYouTubeMusic(query = expandRussianArtistAliases(q), limit = perQueryLimit)
+                    }.orEmpty()
+                }
+            }
+            val scDeferred = cleanQueries.take(2).map { q ->
+                async {
+                    withTimeoutOrNull(6000L) {
+                        FullStreamResolver.searchSoundCloud(query = expandRussianArtistAliases(q), limit = (perQueryLimit / 2).coerceAtLeast(2))
+                    }.orEmpty()
+                }
+            }
+            val merged = LinkedHashMap<String, TrackEntity>()
+            (ytDeferred.flatMap { it.await() } + scDeferred.flatMap { it.await() }).forEach { track ->
+                merged.putIfAbsent(track.id, track)
+            }
+            val list = merged.values.toList()
+            if (list.isNotEmpty()) {
+                upsertPreservingLocalState(list)
+            }
+            list
+        }
+    }
+
+    suspend fun searchArtistProfiles(
+        query: String,
+        limit: Int = 6,
+    ): List<SearchArtistProfile> = withContext(Dispatchers.IO) {
+        val trimmed = query.trim()
+        if (trimmed.length < 2) return@withContext emptyList()
+        val expanded = expandRussianArtistAliases(trimmed)
+        val normQuery = normalizeStrictToken(trimmed)
+        val normExpanded = normalizeStrictToken(expanded)
+
+        coroutineScope {
+            val spDeferred = async {
+                withTimeoutOrNull(5500L) {
+                    SpotifyCatalogClient.searchArtists(expanded, limit = 5).map { sp ->
+                        SearchArtistProfile(
+                            id = "sp_art_${sp.id}",
+                            name = sp.name,
+                            avatarUrl = sp.avatarUrl,
+                            sourceLabel = "Spotify",
+                            followersCount = sp.followers,
+                            spotifyId = sp.id,
+                        )
+                    }
+                }.orEmpty()
+            }
+            val scDeferred = async {
+                withTimeoutOrNull(4500L) {
+                    FullStreamResolver.searchSoundCloudUsers(expanded, limit = 5).map { sc ->
+                        SearchArtistProfile(
+                            id = "sc_art_${abs(sc.url.hashCode())}",
+                            name = sc.name,
+                            avatarUrl = sc.avatarUrl,
+                            sourceLabel = "SoundCloud",
+                            followersCount = sc.subscriberCount.toInt().coerceAtLeast(0),
+                            soundCloudUrl = sc.url,
+                        )
+                    }
+                }.orEmpty()
+            }
+            val audiusDeferred = async {
+                withTimeoutOrNull(3500L) {
+                    runCatching {
+                        val encoded = URLEncoder.encode(expanded, "UTF-8")
+                        val usersBody = executeGet(
+                            "/users/search?query=$encoded&app_name=$appName&limit=3",
+                            httpClient = searchClient,
+                        )
+                        json.decodeFromString<AudiusUserListResponse>(usersBody).data
+                            .filter { it.name.isNotBlank() }
+                            .map { u ->
+                                SearchArtistProfile(
+                                    id = "audius_art_${u.id}",
+                                    name = u.name.trim(),
+                                    avatarUrl = u.profilePicture?.large ?: u.profilePicture?.medium ?: u.profilePicture?.small,
+                                    sourceLabel = "Audius",
+                                    followersCount = 0,
+                                )
+                            }
+                    }.getOrDefault(emptyList())
+                }.orEmpty()
+            }
+
+            val allCandidates = spDeferred.await() + scDeferred.await() + audiusDeferred.await()
+            val merged = LinkedHashMap<String, SearchArtistProfile>()
+            for (cand in allCandidates) {
+                val key = normalizeStrictToken(cand.name)
+                if (key.isBlank()) continue
+                val relevant = key == normQuery ||
+                    key == normExpanded ||
+                    key.startsWith(normQuery) ||
+                    key.startsWith(normExpanded) ||
+                    (normQuery.length >= 3 && key.contains(normQuery)) ||
+                    (normExpanded.length >= 3 && key.contains(normExpanded))
+                if (!relevant) continue
+
+                val existing = merged[key]
+                if (existing == null) {
+                    merged[key] = cand
+                } else {
+                    merged[key] = existing.copy(
+                        avatarUrl = existing.avatarUrl ?: cand.avatarUrl,
+                        followersCount = maxOf(existing.followersCount, cand.followersCount),
+                        spotifyId = existing.spotifyId ?: cand.spotifyId,
+                        soundCloudUrl = existing.soundCloudUrl ?: cand.soundCloudUrl,
+                        sourceLabel = if (existing.sourceLabel.contains(cand.sourceLabel)) {
+                            existing.sourceLabel
+                        } else {
+                            "${existing.sourceLabel} • ${cand.sourceLabel}"
+                        },
+                    )
+                }
+            }
+
+            merged.values.sortedByDescending { profile ->
+                val normName = normalizeStrictToken(profile.name)
+                val exactBonus = when {
+                    normName == normQuery || normName == normExpanded -> 10_000_000L
+                    normName.startsWith(normQuery) || normName.startsWith(normExpanded) -> 1_000_000L
+                    else -> 100_000L
+                }
+                exactBonus + profile.followersCount.coerceAtMost(999_999)
+            }.take(limit)
+        }
+    }
+
+    suspend fun fetchArtistCatalog(
+        artistName: String,
+        seedTrack: TrackEntity? = null,
+        knownSpotifyArtistId: String? = null,
+        knownSoundCloudUrl: String? = null,
+        onPartialResult: suspend (ArtistCatalogResult) -> Unit = {},
+    ): ArtistCatalogResult = withContext(Dispatchers.IO) {
+        val cleanName = normalizeArtistDisplayName(artistName).ifBlank { artistName.trim() }
+        val expanded = expandRussianArtistAliases(cleanName)
+        val cacheKey = listOfNotNull(
+            knownSpotifyArtistId?.takeIf { it.isNotBlank() },
+            knownSoundCloudUrl?.takeIf { it.isNotBlank() },
+            normalizeStrictToken(expanded.ifBlank { cleanName }),
+        ).joinToString("|")
+        val now = System.currentTimeMillis()
+        if (cacheKey.isNotBlank()) {
+            artistCatalogCache[cacheKey]?.let { (ts, cached) ->
+                if (now - ts < searchCacheTtlMs && (cached.tracks.isNotEmpty() || cached.albums.isNotEmpty())) {
+                    onPartialResult(cached)
+                    return@withContext cached
+                }
+            }
+        }
+
+        val scSeedUrl = knownSoundCloudUrl?.takeIf { it.isNotBlank() }
+            ?: seedTrack?.sourceUri?.takeIf { it.contains("soundcloud.com/", true) }?.let { trackUrl ->
+                Regex("""(https?://(?:m\.)?soundcloud\.com/[^/?#]+)""", RegexOption.IGNORE_CASE)
+                    .find(trackUrl)?.groupValues?.get(1)
+            }
+
+        coroutineScope {
+            val localTracksDeferred = async { dao.getAllTracksOnce() }
+
+            @Volatile
+            var spInfo: SpotifyArtistInfo? = null
+            @Volatile
+            var spTracks: List<TrackEntity> = emptyList()
+            @Volatile
+            var spAlbums: List<ArtistAlbumItem> = emptyList()
+
+            @Volatile
+            var scProfile: SoundCloudArtistProfile? = null
+            @Volatile
+            var scChannelTracks: List<TrackEntity> = emptyList()
+            @Volatile
+            var scChannelAlbums: List<ArtistAlbumItem> = emptyList()
+
+            @Volatile
+            var scSearchTracks: List<TrackEntity> = emptyList()
+
+            @Volatile
+            var audiusAvatar: String? = null
+            @Volatile
+            var audiusTracks: List<TrackEntity> = emptyList()
+            @Volatile
+            var audiusAlbums: List<ArtistAlbumItem> = emptyList()
+
+            val buildMutex = Mutex()
+            suspend fun buildMergedSnapshot(
+                localTracks: List<TrackEntity>,
+                ytFallbackTracks: List<TrackEntity> = emptyList(),
+            ): ArtistCatalogResult {
+                val targetNames = listOfNotNull(
+                    cleanName,
+                    expanded,
+                    spInfo?.name,
+                    scProfile?.name,
+                ).map { it.trim() }.filter { it.isNotBlank() }.distinct()
+
+                val strictScSearchTracks = scSearchTracks.filter { isTrackByArtist(it, targetNames) }
+                val persistedById = localTracks.associateBy { it.id }
+
+                val mergedTracks = LinkedHashMap<String, TrackEntity>()
+                val seenTitleKeys = HashSet<String>()
+
+                fun appendTrackUnique(candidate: TrackEntity) {
+                    val track = persistedById[candidate.id] ?: candidate
+                    val titleKey = normalizeStrictToken(track.title)
+                    if (titleKey.isNotBlank() && seenTitleKeys.add(titleKey)) {
+                        mergedTracks.putIfAbsent(track.id, track)
+                    }
+                }
+
+                if (seedTrack != null && isTrackByArtist(seedTrack, targetNames)) {
+                    appendTrackUnique(seedTrack)
+                }
+                spTracks.forEach(::appendTrackUnique)
+                scChannelTracks.forEach(::appendTrackUnique)
+
+                val secondaryRemote = (audiusTracks + strictScSearchTracks + ytFallbackTracks)
+                    .map { persistedById[it.id] ?: it }
+                    .sortedByDescending { track -> artistMatchScore(track, targetNames) }
+                secondaryRemote.forEach(::appendTrackUnique)
+
+                localTracks.filter { isTrackByArtist(it, targetNames) }.forEach(::appendTrackUnique)
+
+                val allTracksList = mergedTracks.values.toList()
+                val mergedAlbums = (spAlbums + scChannelAlbums + audiusAlbums)
+                    .filter { album ->
+                        targetNames.any { target ->
+                            isArtistNameMatch(album.artist, target) ||
+                                album.id.startsWith("sp_alb_") ||
+                                album.id.startsWith("sc_alb_")
+                        }
+                    }
+                    .distinctBy { normalizeStrictToken(it.title) }
+                    .take(20)
+
+                val displayArtistName = spInfo?.name?.takeIf { it.isNotBlank() }
+                    ?: scProfile?.name?.takeIf { it.isNotBlank() }
+                    ?: cleanName
+
+                val resolvedAvatar = spInfo?.avatarUrl
+                    ?: scProfile?.avatarUrl
+                    ?: audiusAvatar
+                    ?: allTracksList.firstNotNullOfOrNull { it.coverArtPath?.takeIf { path -> path.startsWith("http") } }
+                    ?: seedTrack?.coverArtPath
+
+                return ArtistCatalogResult(
+                    artistName = displayArtistName,
+                    avatarUrl = resolvedAvatar,
+                    tracks = allTracksList,
+                    albums = mergedAlbums,
+                )
+            }
+
+            suspend fun emitProgressSnapshot() {
+                val localTracks = localTracksDeferred.await()
+                val snapshot = buildMutex.withLock {
+                    buildMergedSnapshot(localTracks)
+                }
+                if (snapshot.tracks.isNotEmpty() || snapshot.albums.isNotEmpty() || !snapshot.avatarUrl.isNullOrBlank()) {
+                    onPartialResult(snapshot)
+                }
+            }
+
+            val spotifyJob = launch {
+                val res = withTimeoutOrNull(7000L) {
+                    SpotifyCatalogClient.fetchArtistCatalog(
+                        artistQuery = expanded,
+                        preferredDisplayName = cleanName,
+                        knownSpotifyArtistId = knownSpotifyArtistId,
+                    )
+                }
+                if (res != null) {
+                    spInfo = res.first
+                    spTracks = res.second
+                    spAlbums = res.third
+                    if (res.second.isNotEmpty() || res.third.isNotEmpty()) {
+                        emitProgressSnapshot()
+                    }
+                }
+            }
+
+            val scCatalogJob = launch {
+                val res = withTimeoutOrNull(7000L) {
+                    FullStreamResolver.fetchSoundCloudArtistCatalog(
+                        artistName = expanded,
+                        limit = 25,
+                        knownUserUrl = scSeedUrl,
+                    )
+                }
+                if (res != null) {
+                    scProfile = res.first
+                    scChannelTracks = res.second
+                    scChannelAlbums = res.third
+                    if (res.second.isNotEmpty() || res.third.isNotEmpty()) {
+                        emitProgressSnapshot()
+                    }
+                }
+            }
+
+            val scSearchJob = launch {
+                val res = withTimeoutOrNull(4500L) {
+                    FullStreamResolver.searchSoundCloud(query = expanded, limit = 14)
+                }.orEmpty()
+                if (res.isNotEmpty()) {
+                    scSearchTracks = res
+                    emitProgressSnapshot()
+                }
+            }
+
+            val audiusJob = launch {
+                val res = withTimeoutOrNull(4000L) {
+                    runCatching {
+                        val encoded = URLEncoder.encode(expanded, "UTF-8")
+                        val usersBody = executeGet(
+                            "/users/search?query=$encoded&app_name=$appName&limit=4",
+                            httpClient = searchClient,
+                        )
+                        val users = json.decodeFromString<AudiusUserListResponse>(usersBody).data
+                        val normNeedle = normalizeStrictToken(expanded)
+                        val matchedUser = users.firstOrNull {
+                            val nn = normalizeStrictToken(it.name)
+                            val nh = normalizeStrictToken(it.handle)
+                            nn == normNeedle || nh == normNeedle
+                        }
+
+                        if (matchedUser != null && matchedUser.id.isNotBlank()) {
+                            coroutineScope {
+                                val tracksDef = async {
+                                    runCatching {
+                                        val tBody = executeGet(
+                                            "/users/${matchedUser.id}/tracks?app_name=$appName&limit=20",
+                                            httpClient = searchClient,
+                                        )
+                                        json.decodeFromString<AudiusTrackListResponse>(tBody).data
+                                            .filter { it.id.isNotBlank() && it.title.isNotBlank() && it.duration >= 30 }
+                                            .map { dtoToEntity(it, forceLiked = false) }
+                                    }.getOrDefault(emptyList())
+                                }
+                                val albumsDef = async {
+                                    runCatching {
+                                        val plBody = executeGet(
+                                            "/users/${matchedUser.id}/playlists?app_name=$appName&limit=10",
+                                            httpClient = searchClient,
+                                        )
+                                        json.decodeFromString<AudiusPlaylistListResponse>(plBody).data
+                                            .filter { it.id.isNotBlank() && it.playlistName.isNotBlank() }
+                                            .map { pl ->
+                                                ArtistAlbumItem(
+                                                    id = "audius_alb_${pl.id}",
+                                                    title = pl.playlistName,
+                                                    artist = matchedUser.name.ifBlank { cleanName },
+                                                    sourceUrl = "audius_pl:${pl.id}",
+                                                    artworkUrl = pl.artwork?.large ?: pl.artwork?.medium ?: pl.artwork?.small,
+                                                    trackCount = 0,
+                                                )
+                                            }
+                                    }.getOrDefault(emptyList())
+                                }
+                                val avatar = matchedUser.profilePicture?.large
+                                    ?: matchedUser.profilePicture?.medium
+                                    ?: matchedUser.profilePicture?.small
+                                Triple(avatar, tracksDef.await(), albumsDef.await())
+                            }
+                        } else {
+                            Triple(null, emptyList(), emptyList())
+                        }
+                    }.getOrDefault(Triple(null, emptyList(), emptyList()))
+                }
+                if (res != null) {
+                    audiusAvatar = res.first
+                    audiusTracks = res.second
+                    audiusAlbums = res.third
+                    if (res.second.isNotEmpty() || res.third.isNotEmpty()) {
+                        emitProgressSnapshot()
+                    }
+                }
+            }
+
+            spotifyJob.join()
+            scCatalogJob.join()
+
+            // Cross-link: if SoundCloud web-profile includes a Spotify artist URL and Spotify search missed it, load Spotify now!
+            if (spTracks.isEmpty() && !scProfile?.linkedSpotifyArtistId.isNullOrBlank() && knownSpotifyArtistId == null) {
+                val linked = withTimeoutOrNull(5500L) {
+                    SpotifyCatalogClient.fetchArtistCatalog(
+                        artistQuery = expanded,
+                        preferredDisplayName = scProfile?.name ?: cleanName,
+                        knownSpotifyArtistId = scProfile?.linkedSpotifyArtistId,
+                    )
+                }
+                if (linked != null) {
+                    spInfo = linked.first
+                    spTracks = linked.second
+                    spAlbums = linked.third
+                    emitProgressSnapshot()
+                }
+            }
+
+            scSearchJob.join()
+            audiusJob.join()
+
+            val targetNames = listOfNotNull(
+                cleanName,
+                expanded,
+                spInfo?.name,
+                scProfile?.name,
+            ).map { it.trim() }.filter { it.isNotBlank() }.distinct()
+
+            val strictScSearchTracks = scSearchTracks.filter { isTrackByArtist(it, targetNames) }
+            val preCount = spTracks.size + scChannelTracks.size + strictScSearchTracks.size + audiusTracks.size
+            val strictYtFallbackTracks = if (preCount < 4) {
+                withTimeoutOrNull(4500L) {
+                    FullStreamResolver.searchYouTubeMusic(query = expanded, limit = 14)
+                        .filter { isTrackByArtist(it, targetNames) }
+                }.orEmpty()
+            } else {
+                emptyList()
+            }
+
+            val localTracks = localTracksDeferred.await()
+            val finalCatalog = buildMutex.withLock {
+                buildMergedSnapshot(localTracks, strictYtFallbackTracks)
+            }
+            if (cacheKey.isNotBlank() && (finalCatalog.tracks.isNotEmpty() || finalCatalog.albums.isNotEmpty())) {
+                artistCatalogCache[cacheKey] = System.currentTimeMillis() to finalCatalog
+            }
+            finalCatalog
+        }
+    }
+
+    suspend fun fetchAlbumTracks(album: ArtistAlbumItem): List<TrackEntity> = withContext(Dispatchers.IO) {
+        if (album.tracks.isNotEmpty()) return@withContext album.tracks
+        val tracks = when {
+            album.sourceUrl.contains("open.spotify.com/album/", ignoreCase = true) -> {
+                SpotifyCatalogClient.fetchAlbumTracks(
+                    albumUrl = album.sourceUrl,
+                    artistHint = album.artist,
+                    albumTitle = album.title,
+                    coverUrl = album.artworkUrl,
+                )
+            }
+            album.sourceUrl.startsWith("audius_pl:") -> {
+                val playlistId = album.sourceUrl.removePrefix("audius_pl:")
+                runCatching {
+                    val body = executeGet("/playlists/$playlistId/tracks?app_name=$appName")
+                    json.decodeFromString<AudiusTrackListResponse>(body).data
+                        .filter { it.id.isNotBlank() && it.title.isNotBlank() }
+                        .map { dtoToEntity(it, forceLiked = false).copy(albumTitle = album.title) }
+                }.getOrDefault(emptyList())
+            }
+            else -> {
+                FullStreamResolver.fetchPlaylistTracks(
+                    playlistUrl = album.sourceUrl,
+                    artistHint = album.artist,
+                    fallbackCoverUrl = album.artworkUrl,
+                    albumTitleHint = album.title,
+                )
+            }
+        }
+        val existingById = dao.getAllTracksOnce().associateBy { it.id }
+        tracks.map { incoming ->
+            val existing = existingById[incoming.id]
+            (existing ?: incoming).let { base ->
+                if (base.albumTitle.isNullOrBlank()) base.copy(albumTitle = album.title) else base
+            }
+        }
+    }
+
+    private fun normalizeArtistDisplayName(raw: String): String {
+        return raw.trim()
+            .split(Regex("\\s*(?:,|&|feat\\.|ft\\.|x|\\s+feat\\s+)\\s*", RegexOption.IGNORE_CASE))
+            .firstOrNull()
+            ?.trim()
+            ?.ifBlank { raw.trim() }
+            ?: raw.trim()
+    }
+
+    private fun normalizeStrictToken(raw: String): String =
+        raw.lowercase().replace(Regex("[^\\p{L}\\p{Nd}]"), "")
+
+    private fun isArtistNameMatch(candidateArtistField: String, targetArtist: String): Boolean {
+        val normTarget = normalizeStrictToken(targetArtist)
+        if (normTarget.isBlank()) return false
+        val cleanedField = candidateArtistField
+            .replace(Regex("\\s*-\\s*Topic$", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("\\s+(?:Official|VEVO)$", RegexOption.IGNORE_CASE), "")
+        val rawParts = cleanedField
+            .split(Regex("\\s*(?:,|&|/|;|feat\\.|ft\\.|featuring|\\s+x\\s+|\\s+feat\\s+|\\s+with\\s+)\\s*", RegexOption.IGNORE_CASE))
+            .map { normalizeStrictToken(it) }
+            .filter { it.isNotBlank() }
+        val fullNorm = normalizeStrictToken(cleanedField)
+        return fullNorm == normTarget || rawParts.any { it == normTarget }
+    }
+
+    internal fun isTrackByArtist(track: TrackEntity, targetNames: List<String>): Boolean {
+        val combinedLower = "${track.title} ${track.artist}".lowercase()
+        val suspiciousNoise = combinedLower.contains("реакция") ||
+            combinedLower.contains("reaction") ||
+            combinedLower.contains("karaoke") ||
+            combinedLower.contains("караоке") ||
+            combinedLower.contains("type beat") ||
+            combinedLower.contains("кавер") ||
+            combinedLower.contains("tribute")
+        if (suspiciousNoise && targetNames.none { it.lowercase().contains("cover") }) {
+            return false
+        }
+        return targetNames.any { target -> isArtistNameMatch(track.artist, target) }
+    }
+
+    private fun artistMatchScore(track: TrackEntity, targetNames: List<String>): Int {
+        val artistNorm = normalizeStrictToken(track.artist)
+        var best = 0
+        for (target in targetNames) {
+            val needle = normalizeStrictToken(target)
+            if (needle.isBlank()) continue
+            val score = when {
+                artistNorm == needle -> 120
+                isArtistNameMatch(track.artist, target) -> 90
+                else -> 0
+            }
+            if (score > best) best = score
+        }
+        if (track.id.startsWith("sp_")) best += 20
+        return best
+    }
+
+    internal suspend fun upsertPreservingLocalState(incoming: List<TrackEntity>) {
         if (incoming.isEmpty()) return
         val existingById = dao.getAllTracksOnce().associateBy { it.id }
         val merged = incoming.map { track ->
             val existing = existingById[track.id]
             if (existing != null) {
+                val mergedCover = if (existing.isUserUpload) {
+                    existing.coverArtPath ?: track.coverArtPath
+                } else {
+                    FullStreamResolver.upgradeArtworkUrl(track.coverArtPath ?: existing.coverArtPath)
+                }
                 track.copy(
                     title = existing.title,
                     artist = existing.artist,
-                    coverArtPath = existing.coverArtPath ?: track.coverArtPath,
+                    coverArtPath = mergedCover,
+                    albumTitle = existing.albumTitle ?: track.albumTitle,
                     isLiked = existing.isLiked || track.isLiked,
                     isCachedOffline = existing.isCachedOffline,
                     cachedFilePath = existing.cachedFilePath,

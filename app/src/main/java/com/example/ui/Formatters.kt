@@ -21,6 +21,8 @@ fun formatBytesMb(bytes: Long): String {
     }
 }
 
+fun formatFileSize(bytes: Long): String = formatBytesMb(bytes)
+
 fun formatCount(count: Int): String {
     return when {
         count >= 1000 -> String.format(Locale.getDefault(), "%.1fK", count / 1000f)

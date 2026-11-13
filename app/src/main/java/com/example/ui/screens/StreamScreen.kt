@@ -1,6 +1,12 @@
 package com.example.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -12,7 +18,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -26,11 +31,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
-import androidx.compose.material.icons.rounded.UploadFile
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -38,17 +39,23 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -69,10 +76,9 @@ fun StreamScreen(
     onSearchQueryChange: (String) -> Unit,
     onCloseSearch: () -> Unit,
     onPlayTrack: (TrackEntity) -> Unit,
+    onPlayRecommendedTrack: (TrackEntity) -> Unit,
     onToggleLike: (TrackEntity) -> Unit,
     onOpenTrackOptions: (TrackEntity) -> Unit,
-    onOpenUploadSheet: () -> Unit,
-    onRefreshTrending: () -> Unit,
     bottomContentPadding: Dp,
     modifier: Modifier = Modifier,
 ) {
@@ -80,8 +86,10 @@ fun StreamScreen(
     val haptics = rememberSoundLapaHaptics()
     val listState = rememberLazyListState()
     val trendingRowState = rememberLazyListState()
+    val recommendedRowState = rememberLazyListState()
 
     val currentOnPlayTrack by rememberUpdatedState(onPlayTrack)
+    val currentOnPlayRecommendedTrack by rememberUpdatedState(onPlayRecommendedTrack)
     val currentOnToggleLike by rememberUpdatedState(onToggleLike)
     val currentOnOpenTrackOptions by rememberUpdatedState(onOpenTrackOptions)
 
@@ -103,7 +111,12 @@ fun StreamScreen(
             verticalArrangement = Arrangement.spacedBy(18.dp),
         ) {
             item(key = "expandable_search") {
-                AnimatedVisibility(visible = state.isSearchActive) {
+                val slideEase = remember { CubicBezierEasing(0.22f, 1f, 0.36f, 1f) }
+                AnimatedVisibility(
+                    visible = state.isSearchActive,
+                    enter = expandVertically(tween(240, easing = slideEase)) + fadeIn(tween(180)),
+                    exit = shrinkVertically(tween(200, easing = slideEase)) + fadeOut(tween(150)),
+                ) {
                     CompactSearchField(
                         query = state.searchQuery,
                         placeholder = strings.searchPlaceholder,
@@ -138,38 +151,40 @@ fun StreamScreen(
                 }
             }
 
-            if (state.quickPickRows.isNotEmpty() && !state.isSearchActive && state.selectedFilter == "Все") {
-                item(key = "quick_picks_grid", contentType = "quick_picks") {
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text(
-                            text = strings.quickPicks,
-                            style = MaterialTheme.typography.titleLarge,
-                            color = MaterialTheme.colorScheme.onBackground,
-                        )
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            state.quickPickRows.forEach { pair ->
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                ) {
-                                    pair.forEach { track ->
-                                        val isCurrentPlaying =
-                                            state.currentTrackId == track.id && state.isPlaying
-                                        val onQuickPickClick = remember(track) {
-                                            {
-                                                haptics.tap()
-                                                currentOnPlayTrack(track)
+            if (!state.isSearchActive && state.selectedFilter == "Все") {
+                if (state.quickPickRows.isNotEmpty()) {
+                    item(key = "quick_picks_grid", contentType = "quick_picks") {
+                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Text(
+                                text = strings.quickPicks,
+                                style = MaterialTheme.typography.titleLarge,
+                                color = MaterialTheme.colorScheme.onBackground,
+                            )
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                state.quickPickRows.forEach { pair ->
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    ) {
+                                        pair.forEach { track ->
+                                            val isCurrentPlaying =
+                                                state.currentTrackId == track.id && state.isPlaying
+                                            val onQuickPickClick = remember(track) {
+                                                {
+                                                    haptics.tap()
+                                                    currentOnPlayTrack(track)
+                                                }
                                             }
+                                            QuickPickGridCard(
+                                                track = track,
+                                                isCurrentPlaying = isCurrentPlaying,
+                                                onClick = onQuickPickClick,
+                                                modifier = Modifier.weight(1f),
+                                            )
                                         }
-                                        QuickPickGridCard(
-                                            track = track,
-                                            isCurrentPlaying = isCurrentPlaying,
-                                            onClick = onQuickPickClick,
-                                            modifier = Modifier.weight(1f),
-                                        )
-                                    }
-                                    if (pair.size == 1) {
-                                        Spacer(modifier = Modifier.weight(1f))
+                                        if (pair.size == 1) {
+                                            Spacer(modifier = Modifier.weight(1f))
+                                        }
                                     }
                                 }
                             }
@@ -177,57 +192,72 @@ fun StreamScreen(
                     }
                 }
 
-                item(key = "trending_carousel", contentType = "trending_carousel") {
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                        ) {
+                if (state.trendingCarousel.isNotEmpty()) {
+                    item(key = "trending_carousel", contentType = "trending_carousel") {
+                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                             Text(
                                 text = strings.trending,
                                 style = MaterialTheme.typography.titleLarge,
                                 color = MaterialTheme.colorScheme.onBackground,
                             )
-                            IconButton(
-                                onClick = onRefreshTrending,
-                                enabled = !state.isRefreshingTrending,
-                                modifier = Modifier.size(32.dp),
+                            LazyRow(
+                                state = trendingRowState,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
                             ) {
-                                if (state.isRefreshingTrending) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(16.dp),
-                                        strokeWidth = 2.dp,
-                                        color = MaterialTheme.colorScheme.primary,
-                                    )
-                                } else {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Refresh,
-                                        contentDescription = strings.trending,
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.size(20.dp),
+                                items(
+                                    items = state.trendingCarousel,
+                                    key = { "trend_${it.id}" },
+                                    contentType = { "trending_card" },
+                                ) { track ->
+                                    val isCurrent = state.currentTrackId == track.id
+                                    val onTrendingClick = remember(track) {
+                                        { currentOnPlayTrack(track) }
+                                    }
+                                    TrendingSquareCard(
+                                        track = track,
+                                        isCurrent = isCurrent,
+                                        onClick = onTrendingClick,
                                     )
                                 }
                             }
                         }
-                        LazyRow(
-                            state = trendingRowState,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    }
+                }
+
+                if (state.recommendedTracks.isNotEmpty()) {
+                    item(key = "recommendations_carousel", contentType = "recommendations_carousel") {
+                        Column(
+                            modifier = Modifier.testTag("home_recommendations_section"),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
-                            items(
-                                items = state.trendingCarousel,
-                                key = { "trend_${it.id}" },
-                                contentType = { "trending_card" },
-                            ) { track ->
-                                val isCurrent = state.currentTrackId == track.id
-                                val onTrendingClick = remember(track) {
-                                    { currentOnPlayTrack(track) }
+                            Text(
+                                text = strings.recommendedForYou,
+                                style = MaterialTheme.typography.titleLarge,
+                                color = MaterialTheme.colorScheme.onBackground,
+                            )
+
+                            LazyRow(
+                                state = recommendedRowState,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            ) {
+                                items(
+                                    items = state.recommendedTracks,
+                                    key = { "rec_${it.id}" },
+                                    contentType = { "recommended_card" },
+                                ) { track ->
+                                    val isCurrent = state.currentTrackId == track.id
+                                    val onRecommendedClick = remember(track) {
+                                        {
+                                            haptics.tap()
+                                            currentOnPlayRecommendedTrack(track)
+                                        }
+                                    }
+                                    TrendingSquareCard(
+                                        track = track,
+                                        isCurrent = isCurrent,
+                                        onClick = onRecommendedClick,
+                                    )
                                 }
-                                TrendingSquareCard(
-                                    track = track,
-                                    isCurrent = isCurrent,
-                                    onClick = onTrendingClick,
-                                )
                             }
                         }
                     }
@@ -307,35 +337,6 @@ fun StreamScreen(
                     )
                 }
             }
-
-            // Button to upload user's own tracks at the very bottom of Home
-            item(key = "bottom_upload_cta") {
-                Spacer(modifier = Modifier.height(6.dp))
-                Button(
-                    onClick = onOpenUploadSheet,
-                    shape = CircleShape,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primary,
-                        contentColor = MaterialTheme.colorScheme.onPrimary,
-                    ),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(52.dp)
-                        .testTag("home_bottom_upload_button"),
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.UploadFile,
-                        contentDescription = null,
-                        modifier = Modifier.size(20.dp),
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = strings.uploadOwnTracks,
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold,
-                    )
-                }
-            }
         }
     }
 }
@@ -349,6 +350,16 @@ private fun CompactSearchField(
     onQueryChange: (String) -> Unit,
     onClose: () -> Unit,
 ) {
+    var isFocused by remember { mutableStateOf(false) }
+    var textFieldValue by remember {
+        mutableStateOf(TextFieldValue(text = query, selection = TextRange(query.length)))
+    }
+    LaunchedEffect(query, isFocused) {
+        if (!isFocused && query != textFieldValue.text) {
+            textFieldValue = TextFieldValue(text = query, selection = TextRange(query.length))
+        }
+    }
+
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -378,7 +389,7 @@ private fun CompactSearchField(
                 )
             }
             Box(modifier = Modifier.weight(1f)) {
-                if (query.isEmpty()) {
+                if (textFieldValue.text.isEmpty()) {
                     Text(
                         text = placeholder,
                         style = MaterialTheme.typography.bodyMedium,
@@ -386,18 +397,29 @@ private fun CompactSearchField(
                     )
                 }
                 BasicTextField(
-                    value = query,
-                    onValueChange = onQueryChange,
+                    value = textFieldValue,
+                    onValueChange = { next ->
+                        val textChanged = next.text != textFieldValue.text
+                        textFieldValue = next
+                        if (textChanged) {
+                            onQueryChange(next.text)
+                        }
+                    },
                     singleLine = true,
                     textStyle = MaterialTheme.typography.bodyLarge.copy(
                         color = MaterialTheme.colorScheme.onSurface,
                     ),
                     cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .onFocusChanged { isFocused = it.isFocused },
                 )
             }
             IconButton(
-                onClick = onClose,
+                onClick = {
+                    textFieldValue = TextFieldValue("")
+                    onClose()
+                },
                 modifier = Modifier.size(24.dp),
             ) {
                 Icon(
@@ -452,7 +474,7 @@ private fun TrendingSquareCard(
 ) {
     Column(
         modifier = Modifier
-            .width(136.dp)
+            .width(152.dp)
             .clip(RoundedCornerShape(20.dp))
             .clickable(onClick = onClick)
             .padding(4.dp),
@@ -460,9 +482,9 @@ private fun TrendingSquareCard(
     ) {
         TrackCoverArtwork(
             track = track,
-            modifier = Modifier.size(128.dp),
+            modifier = Modifier.size(144.dp),
             cornerRadius = 18.dp,
-            targetSizePx = 260,
+            targetSizePx = 540,
         )
         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(

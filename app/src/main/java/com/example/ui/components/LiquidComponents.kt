@@ -1,9 +1,13 @@
 package com.example.ui.components
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -23,18 +27,21 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.GraphicEq
-import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.Info
-import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
-import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.SkipNext
+import androidx.compose.material.icons.rounded.SkipPrevious
+import androidx.compose.material.icons.rounded.Wifi
+import androidx.compose.material.icons.rounded.WifiOff
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -52,11 +59,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -64,6 +74,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.data.local.TrackEntity
@@ -80,6 +91,7 @@ fun SystemUtilityTopBar(
     onSettingsClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val uriHandler = LocalUriHandler.current
     val accent = MaterialTheme.colorScheme.primary
     val onSurfaceVariant = MaterialTheme.colorScheme.onSurfaceVariant
     val creatorLabel = remember(accent, onSurfaceVariant) {
@@ -101,26 +113,23 @@ fun SystemUtilityTopBar(
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
         Surface(
+            onClick = { runCatching { uriHandler.openUri("https://t.me/tylerw1nston") } },
             shape = CircleShape,
             color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
-            modifier = Modifier
-                .border(
-                    width = 1.dp,
-                    color = accent.copy(alpha = 0.28f),
-                    shape = CircleShape,
-                )
-                .testTag("top_creator_badge"),
+            modifier = Modifier.testTag("top_creator_badge"),
         ) {
             Row(
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Icon(
-                    imageVector = Icons.Rounded.GraphicEq,
-                    contentDescription = null,
-                    tint = accent,
-                    modifier = Modifier.size(16.dp),
+                Image(
+                    painter = painterResource(R.drawable.soundlapa_brand_logo),
+                    contentDescription = "SoundLapa Logo",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .size(24.dp)
+                        .clip(CircleShape),
                 )
                 Text(
                     text = creatorLabel,
@@ -168,9 +177,154 @@ fun SystemUtilityTopBar(
     }
 }
 
+@Composable
+fun NetworkReconnectedBanner(
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val strings = LocalAppStrings.current
+    val accent = MaterialTheme.colorScheme.primary
+
+    Surface(
+        onClick = onDismiss,
+        modifier = modifier
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .border(
+                width = 1.dp,
+                color = accent.copy(alpha = 0.55f),
+                shape = CircleShape,
+            )
+            .testTag("network_reconnected_banner"),
+        shape = CircleShape,
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        tonalElevation = 8.dp,
+        shadowElevation = 10.dp,
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 11.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .clip(CircleShape)
+                    .background(accent.copy(alpha = 0.16f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Wifi,
+                    contentDescription = strings.networkReconnectedMessage,
+                    tint = accent,
+                    modifier = Modifier.size(17.dp),
+                )
+            }
+            Text(
+                text = strings.networkReconnectedMessage,
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+@Composable
+fun OfflineNetworkErrorBanner(
+    offlineTracksCount: Int,
+    onGoToDownloadedTracks: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val strings = LocalAppStrings.current
+    val haptics = rememberSoundLapaHaptics()
+    val errorTint = MaterialTheme.colorScheme.error
+
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp)
+            .border(
+                width = 1.dp,
+                color = errorTint.copy(alpha = 0.45f),
+                shape = RoundedCornerShape(18.dp),
+            )
+            .testTag("offline_error_banner"),
+        shape = RoundedCornerShape(18.dp),
+        color = errorTint.copy(alpha = 0.14f),
+        contentColor = MaterialTheme.colorScheme.onSurface,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.WifiOff,
+                    contentDescription = strings.offlineErrorTitle,
+                    tint = errorTint,
+                    modifier = Modifier.size(22.dp),
+                )
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Text(
+                        text = strings.offlineErrorTitle,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = if (offlineTracksCount > 0) {
+                            strings.offlineErrorWithDownloadsMessage(offlineTracksCount)
+                        } else {
+                            strings.offlineErrorNoDownloadsMessage
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
+            if (offlineTracksCount > 0) {
+                Button(
+                    onClick = {
+                        haptics.tap()
+                        onGoToDownloadedTracks()
+                    },
+                    shape = CircleShape,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary,
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("offline_banner_go_downloaded_button"),
+                ) {
+                    Text(
+                        text = strings.offlineGoToDownloadedAction,
+                        style = MaterialTheme.typography.labelLarge,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+    }
+}
+
 private val QuickPickShape = RoundedCornerShape(15.dp)
 private val TrackRowShape = RoundedCornerShape(18.dp)
 private val TrackThumbOverlayShape = RoundedCornerShape(14.dp)
+private val MiniPlayerShape = RoundedCornerShape(22.dp)
 
 @Composable
 fun QuickPickGridCard(
@@ -182,7 +336,7 @@ fun QuickPickGridCard(
     Surface(
         modifier = modifier
             .fillMaxWidth()
-            .height(58.dp)
+            .height(64.dp)
             .testTag("quick_pick_${track.id}"),
         onClick = onClick,
         shape = QuickPickShape,
@@ -193,9 +347,9 @@ fun QuickPickGridCard(
         ) {
             TrackCoverArtwork(
                 track = track,
-                modifier = Modifier.size(58.dp),
+                modifier = Modifier.size(64.dp),
                 cornerRadius = 15.dp,
-                targetSizePx = 140,
+                targetSizePx = 256,
             )
             Spacer(modifier = Modifier.width(10.dp))
             Text(
@@ -221,6 +375,8 @@ fun TrackRowItem(
     onLikeClick: () -> Unit,
     onMoreClick: () -> Unit,
     modifier: Modifier = Modifier,
+    compact: Boolean = false,
+    onRemoveFromPlaylistClick: (() -> Unit)? = null,
 ) {
     val strings = LocalAppStrings.current
     val subtitle = remember(track.artist, track.durationMs) {
@@ -231,26 +387,29 @@ fun TrackRowItem(
     } else {
         Color.Transparent
     }
+    val thumbSize = if (compact) 48.dp else 62.dp
+    val thumbRadius = if (compact) 11.dp else 15.dp
+    val verticalPad = if (compact) 5.dp else 8.dp
 
     Row(
         modifier = modifier
             .fillMaxWidth()
             .background(rowBackground, TrackRowShape)
             .clickable(onClick = onPlayClick)
-            .padding(horizontal = 8.dp, vertical = 8.dp)
+            .padding(horizontal = 8.dp, vertical = verticalPad)
             .testTag("track_row_${track.id}"),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        horizontalArrangement = Arrangement.spacedBy(if (compact) 10.dp else 12.dp),
     ) {
         Box(
-            modifier = Modifier.size(54.dp),
+            modifier = Modifier.size(thumbSize),
             contentAlignment = Alignment.Center,
         ) {
             TrackCoverArtwork(
                 track = track,
                 modifier = Modifier.matchParentSize(),
-                cornerRadius = 14.dp,
-                targetSizePx = 140,
+                cornerRadius = thumbRadius,
+                targetSizePx = if (compact) 192 else 256,
             )
             if (isCurrentTrack) {
                 Box(
@@ -263,7 +422,7 @@ fun TrackRowItem(
                         imageVector = if (isPlaying) Icons.Rounded.GraphicEq else Icons.Rounded.PlayArrow,
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(24.dp),
+                        modifier = Modifier.size(if (compact) 20.dp else 24.dp),
                     )
                 }
             }
@@ -271,7 +430,8 @@ fun TrackRowItem(
 
         Column(
             modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(3.dp),
+            horizontalAlignment = Alignment.Start,
+            verticalArrangement = Arrangement.spacedBy(if (compact) 2.dp else 3.dp),
         ) {
             Text(
                 text = track.title,
@@ -290,20 +450,49 @@ fun TrackRowItem(
             )
         }
 
-        Box(
-            modifier = Modifier
-                .size(48.dp)
-                .clip(CircleShape)
-                .clickable(onClick = onLikeClick)
-                .testTag("track_like_${track.id}"),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                imageVector = if (track.isLiked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
-                contentDescription = strings.cdLikeTrack,
-                tint = if (track.isLiked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(20.dp),
-            )
+        if (onRemoveFromPlaylistClick != null) {
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(CircleShape)
+                    .clickable(onClick = onRemoveFromPlaylistClick)
+                    .testTag("track_remove_${track.id}"),
+                contentAlignment = Alignment.Center,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(24.dp)
+                        .border(
+                            width = 1.4.dp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f),
+                            shape = CircleShape,
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Close,
+                        contentDescription = strings.removeFromPlaylist,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(14.dp),
+                    )
+                }
+            }
+        } else {
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(CircleShape)
+                    .clickable(onClick = onLikeClick)
+                    .testTag("track_like_${track.id}"),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = if (track.isLiked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+                    contentDescription = strings.cdLikeTrack,
+                    tint = if (track.isLiked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
         }
 
         Box(
@@ -330,6 +519,7 @@ fun FloatingMiniPlayer(
     isPlaying: Boolean,
     positionFlow: StateFlow<Long>,
     durationMs: Long,
+    onPrevious: () -> Unit,
     onTogglePlayPause: () -> Unit,
     onNext: () -> Unit,
     onExpand: () -> Unit,
@@ -343,11 +533,11 @@ fun FloatingMiniPlayer(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 12.dp)
-                .clip(RoundedCornerShape(22.dp))
+                .clip(MiniPlayerShape)
                 .clickable(onClick = onExpand)
                 .testTag("floating_mini_player"),
-            shape = RoundedCornerShape(22.dp),
-            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.94f),
+            shape = MiniPlayerShape,
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.86f),
             tonalElevation = 8.dp,
             shadowElevation = 8.dp,
         ) {
@@ -355,17 +545,19 @@ fun FloatingMiniPlayer(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                        .padding(start = 10.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     TrackCoverArtwork(
                         track = track,
-                        modifier = Modifier.size(42.dp),
-                        cornerRadius = 13.dp,
+                        modifier = Modifier.size(46.dp),
+                        cornerRadius = 14.dp,
+                        targetSizePx = 220,
                     )
                     Column(
                         modifier = Modifier.weight(1f),
+                        horizontalAlignment = Alignment.Start,
                         verticalArrangement = Arrangement.spacedBy(2.dp),
                     ) {
                         Text(
@@ -384,32 +576,51 @@ fun FloatingMiniPlayer(
                         )
                     }
 
-                    IconButton(
-                        onClick = onTogglePlayPause,
-                        modifier = Modifier
-                            .minimumInteractiveComponentSize()
-                            .testTag("mini_player_play_pause"),
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(0.dp),
                     ) {
-                        Icon(
-                            imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                            contentDescription = stringResource(R.string.cd_play_pause),
-                            tint = MaterialTheme.colorScheme.onSurface,
-                            modifier = Modifier.size(28.dp),
-                        )
-                    }
+                        IconButton(
+                            onClick = onPrevious,
+                            modifier = Modifier
+                                .minimumInteractiveComponentSize()
+                                .testTag("mini_player_previous"),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.SkipPrevious,
+                                contentDescription = stringResource(R.string.cd_previous_track),
+                                tint = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.size(24.dp),
+                            )
+                        }
 
-                    IconButton(
-                        onClick = onNext,
-                        modifier = Modifier
-                            .minimumInteractiveComponentSize()
-                            .testTag("mini_player_next"),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.SkipNext,
-                            contentDescription = stringResource(R.string.cd_next_track),
-                            tint = MaterialTheme.colorScheme.onSurface,
-                            modifier = Modifier.size(26.dp),
-                        )
+                        IconButton(
+                            onClick = onTogglePlayPause,
+                            modifier = Modifier
+                                .minimumInteractiveComponentSize()
+                                .testTag("mini_player_play_pause"),
+                        ) {
+                            Icon(
+                                imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                                contentDescription = stringResource(R.string.cd_play_pause),
+                                tint = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.size(28.dp),
+                            )
+                        }
+
+                        IconButton(
+                            onClick = onNext,
+                            modifier = Modifier
+                                .minimumInteractiveComponentSize()
+                                .testTag("mini_player_next"),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.SkipNext,
+                                contentDescription = stringResource(R.string.cd_next_track),
+                                tint = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.size(24.dp),
+                            )
+                        }
                     }
                 }
 
@@ -483,22 +694,22 @@ fun LiquidBottomNavBar(
     Surface(
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
-        color = if (isDark) Color(0xEE100F16) else MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
-        tonalElevation = 8.dp,
+        color = if (isDark) Color(0xEC0E0D14) else MaterialTheme.colorScheme.surface.copy(alpha = 0.95f),
+        tonalElevation = 6.dp,
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .windowInsetsPadding(WindowInsets.navigationBars)
-                .padding(horizontal = 24.dp, vertical = 8.dp),
+                .padding(horizontal = 24.dp, vertical = 6.dp),
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically,
         ) {
             NavTabItem(
                 selected = selectedTab == SoundLapaTab.HOME,
                 label = strings.tabHome,
-                selectedIcon = Icons.Rounded.Home,
-                unselectedIcon = Icons.Rounded.Home,
+                selectedIconRes = R.drawable.ic_nav_home_filled,
+                unselectedIconRes = R.drawable.ic_nav_home_outline,
                 testTag = "nav_tab_home",
                 onClick = { onSelectTab(SoundLapaTab.HOME) },
                 modifier = Modifier.weight(1f),
@@ -506,8 +717,8 @@ fun LiquidBottomNavBar(
             NavTabItem(
                 selected = selectedTab == SoundLapaTab.SEARCH,
                 label = strings.tabSearch,
-                selectedIcon = Icons.Rounded.Search,
-                unselectedIcon = Icons.Rounded.Search,
+                selectedIconRes = R.drawable.ic_nav_search_filled,
+                unselectedIconRes = R.drawable.ic_nav_search_outline,
                 testTag = "nav_tab_search",
                 onClick = { onSelectTab(SoundLapaTab.SEARCH) },
                 modifier = Modifier.weight(1f),
@@ -515,8 +726,8 @@ fun LiquidBottomNavBar(
             NavTabItem(
                 selected = selectedTab == SoundLapaTab.LIBRARY,
                 label = strings.tabLibrary,
-                selectedIcon = Icons.Rounded.LibraryMusic,
-                unselectedIcon = Icons.Rounded.LibraryMusic,
+                selectedIconRes = R.drawable.ic_nav_library_filled,
+                unselectedIconRes = R.drawable.ic_nav_library_outline,
                 testTag = "nav_tab_library",
                 onClick = { onSelectTab(SoundLapaTab.LIBRARY) },
                 modifier = Modifier.weight(1f),
@@ -529,53 +740,63 @@ fun LiquidBottomNavBar(
 private fun NavTabItem(
     selected: Boolean,
     label: String,
-    selectedIcon: androidx.compose.ui.graphics.vector.ImageVector,
-    unselectedIcon: androidx.compose.ui.graphics.vector.ImageVector,
+    selectedIconRes: Int,
+    unselectedIconRes: Int,
     testTag: String,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val accent = MaterialTheme.colorScheme.primary
-    val selectedBrush = remember(accent) {
-        Brush.horizontalGradient(
-            listOf(accent.copy(alpha = 0.24f), accent.copy(alpha = 0.12f)),
-        )
-    }
+    val iconScale by animateFloatAsState(
+        targetValue = if (selected) 1.08f else 0.96f,
+        animationSpec = spring(dampingRatio = 0.7f, stiffness = 480f),
+        label = "navIconScale",
+    )
+    val iconTint by animateColorAsState(
+        targetValue = if (selected) accent else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
+        animationSpec = tween(180),
+        label = "navIconTint",
+    )
+    val labelColor by animateColorAsState(
+        targetValue = if (selected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.70f),
+        animationSpec = tween(180),
+        label = "navLabelColor",
+    )
+
     Column(
         modifier = modifier
-            .clip(RoundedCornerShape(20.dp))
+            .clip(RoundedCornerShape(18.dp))
             .clickable(onClick = onClick)
             .padding(vertical = 6.dp)
             .testTag(testTag),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(3.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         Box(
             modifier = Modifier
-                .clip(CircleShape)
-                .then(
-                    if (selected) {
-                        Modifier
-                            .background(selectedBrush)
-                            .border(1.dp, accent.copy(alpha = 0.4f), CircleShape)
-                    } else {
-                        Modifier
-                    },
-                )
-                .padding(horizontal = 20.dp, vertical = 4.dp),
+                .clip(RoundedCornerShape(14.dp))
+                .background(if (selected) accent.copy(alpha = 0.13f) else Color.Transparent)
+                .padding(horizontal = 16.dp, vertical = 4.dp),
+            contentAlignment = Alignment.Center,
         ) {
             Icon(
-                imageVector = if (selected) selectedIcon else unselectedIcon,
+                painter = painterResource(if (selected) selectedIconRes else unselectedIconRes),
                 contentDescription = label,
-                tint = if (selected) accent else MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(22.dp),
+                tint = iconTint,
+                modifier = Modifier
+                    .size(22.dp)
+                    .scale(iconScale),
             )
         }
         Text(
             text = label,
             style = MaterialTheme.typography.labelMedium,
-            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-            color = if (selected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 11.sp,
+            lineHeight = 13.sp,
+            fontWeight = FontWeight.Bold,
+            color = labelColor,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
     }
 }
@@ -598,36 +819,48 @@ fun LiquidNavigationRail(
             onClick = { onSelectTab(SoundLapaTab.HOME) },
             icon = {
                 Icon(
-                    Icons.Rounded.Home,
+                    painter = painterResource(
+                        if (selectedTab == SoundLapaTab.HOME) R.drawable.ic_nav_home_filled
+                        else R.drawable.ic_nav_home_outline,
+                    ),
                     contentDescription = strings.tabHome,
+                    modifier = Modifier.size(22.dp),
                 )
             },
             label = { Text(strings.tabHome) },
-            colors = NavigationRailItemDefaults.colors(indicatorColor = accent.copy(alpha = 0.25f)),
+            colors = NavigationRailItemDefaults.colors(indicatorColor = accent.copy(alpha = 0.18f)),
         )
         NavigationRailItem(
             selected = selectedTab == SoundLapaTab.SEARCH,
             onClick = { onSelectTab(SoundLapaTab.SEARCH) },
             icon = {
                 Icon(
-                    Icons.Rounded.Search,
+                    painter = painterResource(
+                        if (selectedTab == SoundLapaTab.SEARCH) R.drawable.ic_nav_search_filled
+                        else R.drawable.ic_nav_search_outline,
+                    ),
                     contentDescription = strings.tabSearch,
+                    modifier = Modifier.size(22.dp),
                 )
             },
             label = { Text(strings.tabSearch) },
-            colors = NavigationRailItemDefaults.colors(indicatorColor = accent.copy(alpha = 0.25f)),
+            colors = NavigationRailItemDefaults.colors(indicatorColor = accent.copy(alpha = 0.18f)),
         )
         NavigationRailItem(
             selected = selectedTab == SoundLapaTab.LIBRARY,
             onClick = { onSelectTab(SoundLapaTab.LIBRARY) },
             icon = {
                 Icon(
-                    Icons.Rounded.LibraryMusic,
+                    painter = painterResource(
+                        if (selectedTab == SoundLapaTab.LIBRARY) R.drawable.ic_nav_library_filled
+                        else R.drawable.ic_nav_library_outline,
+                    ),
                     contentDescription = strings.tabLibrary,
+                    modifier = Modifier.size(22.dp),
                 )
             },
             label = { Text(strings.tabLibrary) },
-            colors = NavigationRailItemDefaults.colors(indicatorColor = accent.copy(alpha = 0.25f)),
+            colors = NavigationRailItemDefaults.colors(indicatorColor = accent.copy(alpha = 0.18f)),
         )
     }
 }

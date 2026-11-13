@@ -22,8 +22,10 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.History
+import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -34,18 +36,31 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import coil.compose.SubcomposeAsyncImage
+import coil.request.ImageRequest
 import com.example.data.local.TrackEntity
+import com.example.data.remote.SearchArtistProfile
 import com.example.ui.MainUiState
 import com.example.ui.components.TrackRowItem
 import com.example.ui.components.rememberSoundLapaHaptics
@@ -62,13 +77,33 @@ fun SearchScreen(
     onPlayTrack: (TrackEntity, List<TrackEntity>) -> Unit,
     onToggleLike: (TrackEntity) -> Unit,
     onOpenTrackOptions: (TrackEntity) -> Unit,
+    onOpenArtistProfile: (SearchArtistProfile) -> Unit = {},
     bottomContentPadding: Dp,
     modifier: Modifier = Modifier,
 ) {
     val strings = LocalAppStrings.current
     val haptics = rememberSoundLapaHaptics()
     val focusManager = LocalFocusManager.current
-    val trimmedQuery = state.searchQuery.trim()
+    var isFocused by remember { mutableStateOf(false) }
+    var textFieldValue by remember {
+        mutableStateOf(
+            TextFieldValue(
+                text = state.searchQuery,
+                selection = TextRange(state.searchQuery.length),
+            ),
+        )
+    }
+
+    LaunchedEffect(state.searchQuery, isFocused) {
+        if (!isFocused && state.searchQuery != textFieldValue.text) {
+            textFieldValue = TextFieldValue(
+                text = state.searchQuery,
+                selection = TextRange(state.searchQuery.length),
+            )
+        }
+    }
+
+    val trimmedQuery = textFieldValue.text.trim()
 
     Box(
         modifier = modifier.fillMaxSize(),
@@ -114,7 +149,7 @@ fun SearchScreen(
                     }
 
                     Box(modifier = Modifier.weight(1f)) {
-                        if (state.searchQuery.isEmpty()) {
+                        if (textFieldValue.text.isEmpty()) {
                             Text(
                                 text = strings.searchPlaceholder,
                                 style = MaterialTheme.typography.bodyLarge,
@@ -124,8 +159,14 @@ fun SearchScreen(
                             )
                         }
                         BasicTextField(
-                            value = state.searchQuery,
-                            onValueChange = onQueryChange,
+                            value = textFieldValue,
+                            onValueChange = { next ->
+                                val textChanged = next.text != textFieldValue.text
+                                textFieldValue = next
+                                if (textChanged) {
+                                    onQueryChange(next.text)
+                                }
+                            },
                             singleLine = true,
                             textStyle = MaterialTheme.typography.bodyLarge.copy(
                                 color = MaterialTheme.colorScheme.onSurface,
@@ -134,20 +175,22 @@ fun SearchScreen(
                             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                             keyboardActions = KeyboardActions(
                                 onSearch = {
-                                    onSubmitSearch(state.searchQuery)
+                                    onSubmitSearch(textFieldValue.text)
                                     focusManager.clearFocus()
                                 },
                             ),
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .onFocusChanged { isFocused = it.isFocused }
                                 .testTag("search_tab_text_field"),
                         )
                     }
 
-                    if (state.searchQuery.isNotEmpty()) {
+                    if (textFieldValue.text.isNotEmpty()) {
                         IconButton(
                             onClick = {
                                 haptics.tick()
+                                textFieldValue = TextFieldValue("")
                                 onClearQuery()
                             },
                             modifier = Modifier
@@ -243,6 +286,10 @@ fun SearchScreen(
                                     .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
                                     .clickable {
                                         haptics.tick()
+                                        textFieldValue = TextFieldValue(
+                                            text = historyQuery,
+                                            selection = TextRange(historyQuery.length),
+                                        )
                                         focusManager.clearFocus()
                                         onSubmitSearch(historyQuery)
                                     }
@@ -294,7 +341,7 @@ fun SearchScreen(
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                if (state.searchScreenResults.isEmpty() && !state.audius.isSearching) {
+                if (state.searchScreenResults.isEmpty() && state.searchArtistProfiles.isEmpty() && !state.audius.isSearching) {
                     Surface(
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(22.dp),
@@ -325,6 +372,22 @@ fun SearchScreen(
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         items(
+                            items = state.searchArtistProfiles,
+                            key = { "artist_${it.id}" },
+                            contentType = { "artist_profile" },
+                        ) { profile ->
+                            ArtistSearchResultCard(
+                                profile = profile,
+                                subtitle = "${strings.artistSearchProfileSubtitle} • ${profile.sourceLabel}",
+                                onClick = {
+                                    haptics.tick()
+                                    focusManager.clearFocus()
+                                    onOpenArtistProfile(profile)
+                                },
+                            )
+                        }
+
+                        items(
                             items = state.searchScreenResults,
                             key = { "search_${it.id}" },
                             contentType = { "track_row" },
@@ -352,6 +415,98 @@ fun SearchScreen(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun ArtistSearchResultCard(
+    profile: SearchArtistProfile,
+    subtitle: String,
+    onClick: () -> Unit,
+) {
+    val context = LocalContext.current
+    val primary = MaterialTheme.colorScheme.primary
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(22.dp))
+            .clickable(onClick = onClick)
+            .testTag("search_artist_card_${profile.id}"),
+        shape = RoundedCornerShape(22.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.68f),
+        contentColor = MaterialTheme.colorScheme.onSurface,
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(54.dp)
+                    .clip(CircleShape)
+                    .background(primary.copy(alpha = 0.16f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (!profile.avatarUrl.isNullOrBlank()) {
+                    SubcomposeAsyncImage(
+                        model = ImageRequest.Builder(context)
+                            .data(profile.avatarUrl)
+                            .crossfade(true)
+                            .build(),
+                        contentDescription = profile.name,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clip(CircleShape),
+                        error = {
+                            Icon(
+                                imageVector = Icons.Rounded.Person,
+                                contentDescription = null,
+                                tint = primary,
+                                modifier = Modifier.size(26.dp),
+                            )
+                        },
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.Rounded.Person,
+                        contentDescription = null,
+                        tint = primary,
+                        modifier = Modifier.size(26.dp),
+                    )
+                }
+            }
+
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Text(
+                    text = profile.name,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+
+            Icon(
+                imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                contentDescription = profile.name,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

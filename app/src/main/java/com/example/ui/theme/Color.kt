@@ -2,7 +2,8 @@ package com.example.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-// Brand & Signature Accents (anchored to logo.jpg terracotta #9C2B00 + SoundCloud flame)
+// Default Emerald Green & Brand Accents
+val SoundLapaEmerald = Color(0xFF10B981)
 val SoundLapaFlame = Color(0xFFFF5500)
 val SoundLapaTerracotta = Color(0xFF9C2B00)
 val SoundLapaAmber = Color(0xFFFF9248)

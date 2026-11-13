@@ -8,6 +8,7 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,6 +19,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
@@ -27,6 +29,7 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.AddCircleOutline
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Favorite
@@ -35,11 +38,14 @@ import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.Repeat
 import androidx.compose.material.icons.rounded.RepeatOne
+import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -60,6 +66,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -76,7 +84,6 @@ import com.example.ui.i18n.LocalAppStrings
 import com.example.ui.shaders.FloatingCoverBackdrop
 import com.example.ui.shaders.LiquidGlassCard
 import com.example.ui.shaders.TrackCoverArtwork
-import com.example.ui.shaders.liquidShaderTransition
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlin.math.abs
@@ -87,6 +94,8 @@ fun NowPlayingSheet(
     playback: PlaybackUiState,
     positionFlow: StateFlow<Long>,
     isInPlaylist: Boolean = false,
+    nextTrack: TrackEntity? = null,
+    queueCount: Int = 0,
     onCollapse: () -> Unit,
     onTogglePlayPause: () -> Unit,
     onPrevious: () -> Unit,
@@ -97,6 +106,9 @@ fun NowPlayingSheet(
     onToggleLike: () -> Unit,
     onOpenTrackOptions: () -> Unit,
     onAddToPlaylist: () -> Unit,
+    onOpenQueue: () -> Unit = {},
+    onShareTrack: () -> Unit = {},
+    onOpenArtistProfile: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     BackHandler(onBack = onCollapse)
@@ -116,7 +128,17 @@ fun NowPlayingSheet(
     Box(
         modifier = modifier
             .fillMaxSize()
-            .liquidShaderTransition(playback.transitionCounter),
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) {
+                        awaitPointerEvent(PointerEventPass.Main).changes.forEach { change ->
+                            if (!change.isConsumed) {
+                                change.consume()
+                            }
+                        }
+                    }
+                }
+            },
     ) {
         // Looping floating track cover artwork as atmospheric backdrop
         FloatingCoverBackdrop(
@@ -170,7 +192,7 @@ fun NowPlayingSheet(
                         maxLines = 1,
                     )
                     Text(
-                        text = track.title,
+                        text = track.albumTitle?.takeIf { it.isNotBlank() } ?: strings.singleReleaseLabel,
                         style = MaterialTheme.typography.labelLarge,
                         color = Color.White,
                         maxLines = 1,
@@ -195,17 +217,17 @@ fun NowPlayingSheet(
                 }
             }
 
-            // Cover Art centered above controls (auto-scales smoothly on any screen height)
+            // Cover Art centered above controls (enlarged & auto-scales smoothly on any screen height)
             Box(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .padding(vertical = 12.dp),
+                    .padding(vertical = 4.dp),
                 contentAlignment = Alignment.Center,
             ) {
                 LiquidGlassCard(
                     modifier = Modifier
-                        .sizeIn(maxWidth = 284.dp, maxHeight = 284.dp)
+                        .sizeIn(maxWidth = 344.dp, maxHeight = 344.dp)
                         .aspectRatio(1f)
                         .scale(artworkScale),
                     shape = RoundedCornerShape(30.dp),
@@ -215,13 +237,14 @@ fun NowPlayingSheet(
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
-                            .padding(7.dp),
+                            .padding(5.dp),
                     ) {
                         TrackCoverArtwork(
                             track = track,
                             modifier = Modifier.fillMaxSize(),
-                            cornerRadius = 24.dp,
-                            targetSizePx = 640,
+                            cornerRadius = 25.dp,
+                            targetSizePx = 1080,
+                            crossfade = true,
                         )
                     }
                 }
@@ -239,6 +262,7 @@ fun NowPlayingSheet(
                 ) {
                     Column(
                         modifier = Modifier.weight(1f),
+                        horizontalAlignment = Alignment.Start,
                         verticalArrangement = Arrangement.spacedBy(3.dp),
                     ) {
                         Text(
@@ -249,13 +273,33 @@ fun NowPlayingSheet(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
-                        Text(
-                            text = track.artist,
-                            style = MaterialTheme.typography.titleMedium,
-                            color = Color.White.copy(alpha = 0.80f),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
+                        Row(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(10.dp))
+                                .clickable {
+                                    haptics.tick()
+                                    onOpenArtistProfile()
+                                }
+                                .padding(top = 2.dp, bottom = 2.dp, end = 4.dp)
+                                .testTag("player_artist_profile_button"),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(2.dp),
+                        ) {
+                            Text(
+                                text = track.artist,
+                                style = MaterialTheme.typography.titleMedium,
+                                color = Color.White.copy(alpha = 0.86f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false),
+                            )
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                                contentDescription = strings.artistProfileMenu,
+                                tint = Color.White.copy(alpha = 0.68f),
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
                     }
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -330,7 +374,9 @@ fun NowPlayingSheet(
                             haptics.tap()
                             onPrevious()
                         },
-                        modifier = Modifier.size(52.dp),
+                        modifier = Modifier
+                            .size(52.dp)
+                            .testTag("full_player_previous"),
                     ) {
                         Icon(
                             imageVector = Icons.Rounded.SkipPrevious,
@@ -349,6 +395,13 @@ fun NowPlayingSheet(
                             .testTag("full_player_play_pause"),
                         contentAlignment = Alignment.Center,
                     ) {
+                        if (playback.isBuffering) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(64.dp),
+                                strokeWidth = 2.5.dp,
+                                color = themeAccent,
+                            )
+                        }
                         IconButton(
                             onClick = {
                                 haptics.tap()
@@ -370,7 +423,9 @@ fun NowPlayingSheet(
                             haptics.tap()
                             onNext()
                         },
-                        modifier = Modifier.size(52.dp),
+                        modifier = Modifier
+                            .size(52.dp)
+                            .testTag("full_player_next"),
                     ) {
                         Icon(
                             imageVector = Icons.Rounded.SkipNext,
@@ -404,7 +459,110 @@ fun NowPlayingSheet(
                 }
             }
 
-            Spacer(modifier = Modifier.height(62.dp))
+            Spacer(modifier = Modifier.height(44.dp))
+
+            NowPlayingBottomDock(
+                nextTrack = nextTrack,
+                queueCount = queueCount,
+                onOpenQueue = {
+                    haptics.tick()
+                    onOpenQueue()
+                },
+                onShareTrack = {
+                    haptics.tick()
+                    onShareTrack()
+                },
+            )
+
+            Spacer(modifier = Modifier.height(4.dp))
+        }
+    }
+}
+
+@Composable
+private fun NowPlayingBottomDock(
+    nextTrack: TrackEntity?,
+    queueCount: Int,
+    onOpenQueue: () -> Unit,
+    onShareTrack: () -> Unit,
+) {
+    val strings = LocalAppStrings.current
+    val pillShape = RoundedCornerShape(18.dp)
+    val glassBg = Color.White.copy(alpha = 0.11f)
+    val glassBorder = Color.White.copy(alpha = 0.16f)
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        // Queue / Up Next interactive glass pill
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .heightIn(min = 48.dp)
+                .clip(pillShape)
+                .background(glassBg)
+                .border(1.dp, glassBorder, pillShape)
+                .clickable(onClick = onOpenQueue)
+                .padding(horizontal = 10.dp, vertical = 7.dp)
+                .testTag("player_queue_pill"),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            if (nextTrack != null) {
+                TrackCoverArtwork(
+                    track = nextTrack,
+                    modifier = Modifier.size(32.dp),
+                    cornerRadius = 10.dp,
+                    targetSizePx = 140,
+                )
+            } else {
+                Icon(
+                    imageVector = Icons.Rounded.QueueMusic,
+                    contentDescription = null,
+                    tint = Color.White.copy(alpha = 0.88f),
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+            Text(
+                text = if (nextTrack != null) {
+                    strings.nextInQueueLabel(nextTrack.title)
+                } else {
+                    strings.queueButtonLabel(queueCount)
+                },
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Medium,
+                color = Color.White.copy(alpha = 0.92f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Icon(
+                imageVector = Icons.Rounded.QueueMusic,
+                contentDescription = strings.queueSheetTitle,
+                tint = Color.White.copy(alpha = 0.72f),
+                modifier = Modifier.size(18.dp),
+            )
+        }
+
+        // Share track button
+        Box(
+            modifier = Modifier
+                .size(48.dp)
+                .clip(CircleShape)
+                .background(glassBg)
+                .border(1.dp, glassBorder, CircleShape)
+                .clickable(onClick = onShareTrack)
+                .testTag("player_share_button"),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.Share,
+                contentDescription = strings.shareTrackAction,
+                tint = Color.White.copy(alpha = 0.90f),
+                modifier = Modifier.size(20.dp),
+            )
         }
     }
 }

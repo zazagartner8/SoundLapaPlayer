@@ -41,6 +41,11 @@ interface SoundLapaDao {
     )
     suspend fun updateCacheStatus(id: String, isCached: Boolean, cachedPath: String?, sizeBytes: Long)
 
+    @Query(
+        "UPDATE tracks SET isCachedOffline = 0, cachedFilePath = NULL, fileSizeBytes = 0 WHERE isUserUpload = 0 AND sourceUri IS NOT NULL"
+    )
+    suspend fun clearStreamedTracksCacheStatus()
+
     @Query("UPDATE tracks SET title = :title, artist = :artist, coverArtPath = :coverArtPath WHERE id = :id")
     suspend fun updateTrackMetadata(id: String, title: String, artist: String, coverArtPath: String?)
 
@@ -62,13 +67,22 @@ interface SoundLapaDao {
     @Query("SELECT * FROM playlists ORDER BY createdAt DESC")
     fun observePlaylistsWithTracks(): Flow<List<PlaylistWithTracks>>
 
+    @Query("SELECT * FROM playlists ORDER BY createdAt DESC")
+    fun observeAllPlaylists(): Flow<List<PlaylistEntity>>
+
+    @Query("SELECT * FROM playlist_tracks ORDER BY playlistId ASC, position ASC, addedAt ASC")
+    fun observeOrderedPlaylistRefs(): Flow<List<PlaylistTrackCrossRef>>
+
+    @Query("SELECT COALESCE(MAX(position), -1) FROM playlist_tracks WHERE playlistId = :playlistId")
+    suspend fun getMaxPlaylistTrackPosition(playlistId: String): Int
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertPlaylist(playlist: PlaylistEntity)
 
     @Query("DELETE FROM playlists WHERE id = :playlistId")
     suspend fun deletePlaylist(playlistId: String)
 
-    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun addTrackToPlaylist(ref: PlaylistTrackCrossRef)
 
     @Query("DELETE FROM playlist_tracks WHERE playlistId = :playlistId AND trackId = :trackId")

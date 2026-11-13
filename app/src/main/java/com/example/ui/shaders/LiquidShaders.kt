@@ -1,6 +1,5 @@
 package com.example.ui.shaders
 
-import android.graphics.RenderEffect
 import android.graphics.RuntimeShader
 import android.os.Build
 import androidx.annotation.RequiresApi
@@ -29,11 +28,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.composed
 import androidx.compose.ui.draw.BlurredEdgeTreatment
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
@@ -42,7 +38,6 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ShaderBrush
 import androidx.compose.ui.graphics.Shape
-import androidx.compose.ui.graphics.asComposeRenderEffect
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
@@ -81,11 +76,7 @@ private const val LIQUID_AURORA_AGSL = """
         float d1 = exp(-3.4 * length(p - c1));
         float d2 = exp(-3.8 * length(p - c2));
 
-        // Transition shockwave shimmer when switching tracks
-        float radial = length(p);
-        float ripple = sin(radial * 18.0 - uTransition * 10.0) * exp(-radial * 2.2) * uTransition * 0.35;
-
-        float mixA = clamp(0.45 + 0.35 * liquid + d1 * 0.65 + ripple, 0.0, 1.0);
+        float mixA = clamp(0.45 + 0.35 * liquid + d1 * 0.65, 0.0, 1.0);
         float mixB = clamp(0.35 - 0.28 * liquid + d2 * 0.70, 0.0, 1.0);
 
         half3 col = mix(uBaseColor.rgb, uColorA.rgb, half(mixA * (0.48 + 0.22 * uEnergy)));
@@ -96,29 +87,6 @@ private const val LIQUID_AURORA_AGSL = """
         col += half3(caustic);
 
         return half4(col, 1.0);
-    }
-"""
-
-private const val LIQUID_TRANSITION_AGSL = """
-    uniform shader composable;
-    uniform float2 uResolution;
-    uniform float uProgress;
-
-    half4 main(float2 fragCoord) {
-        if (uProgress <= 0.001) {
-            return composable.eval(fragCoord);
-        }
-        float2 uv = fragCoord / max(uResolution, float2(1.0, 1.0));
-        float2 centered = uv - 0.5;
-        float dist = length(centered);
-        float wave = sin(dist * 24.0 - (1.0 - uProgress) * 14.0);
-        float2 offset = normalize(centered + float2(0.0001)) * wave * uProgress * 14.0;
-        float2 sampleCoord = clamp(fragCoord + offset, float2(0.0), uResolution - float2(1.0));
-        half4 base = composable.eval(sampleCoord);
-        // Slight chromatic liquid edge sheen during transition
-        float2 shift = offset * 0.45;
-        half4 shifted = composable.eval(clamp(sampleCoord + shift, float2(0.0), uResolution - float2(1.0)));
-        return half4(mix(base.r, shifted.r, half(uProgress * 0.35)), base.g, mix(base.b, shifted.b, half(uProgress * 0.35)), base.a);
     }
 """
 
@@ -150,8 +118,8 @@ fun FloatingCoverBackdrop(
         Brush.verticalGradient(
             colors = listOf(
                 Color.Black.copy(alpha = 0.18f),
-                Color.Black.copy(alpha = 0.28f),
-                Color.Black.copy(alpha = 0.52f),
+                Color.Black.copy(alpha = 0.26f),
+                Color.Black.copy(alpha = 0.48f),
             ),
         )
     }
@@ -180,17 +148,17 @@ fun FloatingCoverBackdrop(
                         translationX = driftX
                         translationY = driftY
                         rotationZ = sin(phase) * 4.0f * motionEnergy
-                        alpha = 0.62f
+                        alpha = 0.40f
                     }
                     .blur(
-                        radius = 28.dp,
+                        radius = 26.dp,
                         edgeTreatment = BlurredEdgeTreatment.Rectangle,
                     ),
             ) {
                 TrackCoverArtwork(
                     track = targetTrack,
                     cornerRadius = 0.dp,
-                    targetSizePx = 500,
+                    targetSizePx = 280,
                     crossfade = true,
                     modifier = Modifier.fillMaxSize(),
                 )
@@ -356,44 +324,6 @@ private fun FallbackAuroraCanvas(
     }
 }
 
-fun Modifier.liquidShaderTransition(triggerKey: Any): Modifier = composed {
-    val progress = remember { Animatable(0f) }
-    var lastTriggerKey by remember { mutableStateOf(triggerKey) }
-    LaunchedEffect(triggerKey) {
-        if (lastTriggerKey != triggerKey) {
-            lastTriggerKey = triggerKey
-            progress.snapTo(1f)
-            progress.animateTo(
-                targetValue = 0f,
-                animationSpec = tween(durationMillis = 360, easing = FastOutSlowInEasing),
-            )
-        }
-    }
-
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-        val shader = remember { RuntimeShader(LIQUID_TRANSITION_AGSL) }
-        this.graphicsLayer {
-            val p = progress.value
-            if (p > 0.002f && size.width > 1f && size.height > 1f) {
-                shader.setFloatUniform("uResolution", size.width, size.height)
-                shader.setFloatUniform("uProgress", p)
-                renderEffect = RenderEffect
-                    .createRuntimeShaderEffect(shader, "composable")
-                    .asComposeRenderEffect()
-            } else {
-                renderEffect = null
-            }
-        }
-    } else {
-        this.graphicsLayer {
-            val scale = 1f - progress.value * 0.025f
-            scaleX = scale
-            scaleY = scale
-            alpha = 1f - progress.value * 0.18f
-        }
-    }
-}
-
 @Composable
 fun LiquidGlassCard(
     modifier: Modifier = Modifier,
@@ -405,40 +335,44 @@ fun LiquidGlassCard(
 ) {
     val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
 
-    val fillBrush = if (isDark) {
-        Brush.linearGradient(
-            colors = listOf(
-                Color.White.copy(alpha = 0.15f),
-                accentTint.copy(alpha = 0.07f),
-                Color.White.copy(alpha = 0.05f),
-            ),
-        )
-    } else {
-        Brush.linearGradient(
-            colors = listOf(
-                Color.White.copy(alpha = 0.86f),
-                accentTint.copy(alpha = 0.08f),
-                Color.White.copy(alpha = 0.62f),
-            ),
-        )
+    val fillBrush = remember(isDark, accentTint) {
+        if (isDark) {
+            Brush.linearGradient(
+                colors = listOf(
+                    Color.White.copy(alpha = 0.15f),
+                    accentTint.copy(alpha = 0.07f),
+                    Color.White.copy(alpha = 0.05f),
+                ),
+            )
+        } else {
+            Brush.linearGradient(
+                colors = listOf(
+                    Color.White.copy(alpha = 0.86f),
+                    accentTint.copy(alpha = 0.08f),
+                    Color.White.copy(alpha = 0.62f),
+                ),
+            )
+        }
     }
 
-    val specularBorderBrush = if (isDark) {
-        Brush.linearGradient(
-            colors = listOf(
-                Color.White.copy(alpha = 0.42f),
-                Color.White.copy(alpha = 0.14f),
-                accentTint.copy(alpha = 0.26f),
-            ),
-        )
-    } else {
-        Brush.linearGradient(
-            colors = listOf(
-                Color.White.copy(alpha = 0.95f),
-                Color(0x2816131A),
-                accentTint.copy(alpha = 0.30f),
-            ),
-        )
+    val specularBorderBrush = remember(isDark, accentTint) {
+        if (isDark) {
+            Brush.linearGradient(
+                colors = listOf(
+                    Color.White.copy(alpha = 0.42f),
+                    Color.White.copy(alpha = 0.14f),
+                    accentTint.copy(alpha = 0.26f),
+                ),
+            )
+        } else {
+            Brush.linearGradient(
+                colors = listOf(
+                    Color.White.copy(alpha = 0.95f),
+                    Color(0x2816131A),
+                    accentTint.copy(alpha = 0.30f),
+                ),
+            )
+        }
     }
 
     Surface(

@@ -33,13 +33,17 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.DarkMode
+import androidx.compose.material.icons.rounded.DataSaverOn
+import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.LightMode
 import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.PlaylistAdd
 import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material.icons.rounded.Translate
+import androidx.compose.material.icons.rounded.UploadFile
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -76,6 +80,7 @@ import androidx.compose.ui.unit.sp
 import androidx.documentfile.provider.DocumentFile
 import com.example.ui.MainUiState
 import com.example.ui.components.rememberSoundLapaHaptics
+import com.example.ui.formatFileSize
 import com.example.ui.i18n.AppLanguage
 import com.example.ui.i18n.LocalAppStrings
 import com.example.ui.theme.LiquidCyan
@@ -83,10 +88,10 @@ import com.example.ui.theme.LiquidMint
 import com.example.ui.theme.LiquidRose
 
 private val PresetAccentColors = listOf(
-    0xFFFF5500L, // Flame Orange
+    0xFF10B981L, // Emerald Green (Default)
     0xFF00D2E6L, // Electric Cyan
     0xFF8B5CF6L, // Neon Violet
-    0xFF10B981L, // Emerald Mint
+    0xFFFF5500L, // Flame Orange
     0xFFF43F5EL, // Crimson Rose
     0xFFF59E0BL, // Solar Gold
     0xFF3B82F6L, // Cobalt Blue
@@ -104,6 +109,10 @@ fun SettingsScreen(
     onChangeSmoothTransitionDuration: (Int) -> Unit,
     onToggleAutoUpload: (Boolean) -> Unit,
     onToggleAutoCache: (Boolean) -> Unit,
+    onToggleDataSaver: (Boolean) -> Unit,
+    onClearCache: () -> Unit,
+    onImportFromInput: (String, String?) -> Unit,
+    onImportFromFile: (Uri, String?) -> Unit,
     onSetAutoUploadFolder: (Uri, String?) -> Unit,
     onClearAutoUploadFolder: () -> Unit,
     onSyncAudiusAccount: (String) -> Unit,
@@ -120,6 +129,8 @@ fun SettingsScreen(
     var handleInput by remember(state.settings.audiusHandle) {
         mutableStateOf(state.settings.audiusHandle.orEmpty())
     }
+    var importTextInput by remember { mutableStateOf("") }
+    var importPlaylistName by remember { mutableStateOf("") }
 
     val initialHsv = remember {
         val hsv = FloatArray(3)
@@ -149,6 +160,14 @@ fun SettingsScreen(
             }
             val folderName = DocumentFile.fromTreeUri(context, treeUri)?.name
             onSetAutoUploadFolder(treeUri, folderName)
+        }
+    }
+
+    val playlistFileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) {
+            onImportFromFile(uri, importPlaylistName.takeIf { it.isNotBlank() })
         }
     }
 
@@ -192,19 +211,12 @@ fun SettingsScreen(
                             tint = MaterialTheme.colorScheme.onSurface,
                         )
                     }
-                    Column {
-                        Text(
-                            text = strings.settingsTitle,
-                            style = MaterialTheme.typography.headlineSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onBackground,
-                        )
-                        Text(
-                            text = strings.settingsSubtitle,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
+                    Text(
+                        text = strings.settingsTitle,
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onBackground,
+                    )
                 }
 
                 LazyColumn(
@@ -669,6 +681,233 @@ fun SettingsScreen(
                                     ),
                                 )
                             }
+
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                Row(
+                                    modifier = Modifier.weight(1f).padding(end = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.DataSaverOn,
+                                        contentDescription = null,
+                                        tint = accent,
+                                        modifier = Modifier.size(20.dp),
+                                    )
+                                    Column {
+                                        Text(
+                                            text = strings.settingsDataSaverTitle,
+                                            style = MaterialTheme.typography.titleSmall,
+                                            color = MaterialTheme.colorScheme.onSurface,
+                                        )
+                                        Text(
+                                            text = strings.settingsDataSaverSubtitle,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                }
+                                Switch(
+                                    checked = state.settings.dataSaverEnabled,
+                                    onCheckedChange = {
+                                        haptics.tick()
+                                        onToggleDataSaver(it)
+                                    },
+                                    colors = SwitchDefaults.colors(
+                                        checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
+                                        checkedTrackColor = accent,
+                                    ),
+                                    modifier = Modifier.testTag("settings_data_saver_switch"),
+                                )
+                            }
+                        }
+                    }
+
+                    // 4. Storage & Cache Management Card
+                    item(key = "storage_section") {
+                        SettingsCard(
+                            icon = Icons.Rounded.DeleteSweep,
+                            title = strings.settingsStorageSection,
+                            accent = accent,
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                Column(
+                                    modifier = Modifier.weight(1f).padding(end = 12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
+                                    Text(
+                                        text = strings.settingsCacheSizeLabel(formatFileSize(state.cacheSizeBytes)),
+                                        style = MaterialTheme.typography.titleSmall,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                    )
+                                    state.cacheStatusMessage?.let { freed ->
+                                        Text(
+                                            text = strings.settingsCacheClearedResult(freed),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = LiquidMint,
+                                        )
+                                    }
+                                }
+
+                                OutlinedButton(
+                                    onClick = {
+                                        haptics.confirm()
+                                        onClearCache()
+                                    },
+                                    enabled = !state.isClearingCache,
+                                    shape = CircleShape,
+                                    modifier = Modifier.testTag("settings_clear_cache_button"),
+                                ) {
+                                    if (state.isClearingCache) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(16.dp),
+                                            strokeWidth = 2.dp,
+                                            color = accent,
+                                        )
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(strings.settingsClearingCacheLabel)
+                                    } else {
+                                        Icon(
+                                            imageVector = Icons.Rounded.DeleteSweep,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp),
+                                        )
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(strings.settingsClearCacheButton)
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // 5. External Playlist & Track Import Card (Spotify, YouTube, SoundCloud, CSV/M3U)
+                    item(key = "import_section") {
+                        SettingsCard(
+                            icon = Icons.Rounded.PlaylistAdd,
+                            title = strings.settingsImportSection,
+                            accent = accent,
+                        ) {
+                            Text(
+                                text = strings.settingsImportHint,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+
+                            OutlinedTextField(
+                                value = importTextInput,
+                                onValueChange = { importTextInput = it },
+                                label = { Text(strings.settingsImportInputLabel) },
+                                placeholder = { Text(strings.settingsImportInputPlaceholder) },
+                                minLines = 2,
+                                maxLines = 4,
+                                shape = RoundedCornerShape(18.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("settings_import_input"),
+                            )
+
+                            OutlinedTextField(
+                                value = importPlaylistName,
+                                onValueChange = { importPlaylistName = it },
+                                label = { Text(strings.settingsImportPlaylistNameLabel) },
+                                placeholder = { Text(strings.settingsImportPlaylistNamePlaceholder) },
+                                singleLine = true,
+                                shape = RoundedCornerShape(18.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("settings_import_playlist_name"),
+                            )
+
+                            state.importStatusMessage?.let { msg ->
+                                Text(
+                                    text = msg,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (msg.startsWith("✓")) LiquidMint else LiquidRose,
+                                )
+                            }
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Button(
+                                    onClick = {
+                                        haptics.confirm()
+                                        onImportFromInput(
+                                            importTextInput,
+                                            importPlaylistName.takeIf { it.isNotBlank() },
+                                        )
+                                    },
+                                    enabled = importTextInput.isNotBlank() && !state.isImportingPlaylist,
+                                    shape = CircleShape,
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = accent,
+                                        contentColor = MaterialTheme.colorScheme.onPrimary,
+                                    ),
+                                    modifier = Modifier.testTag("settings_import_link_button"),
+                                ) {
+                                    if (state.isImportingPlaylist) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(16.dp),
+                                            strokeWidth = 2.dp,
+                                            color = MaterialTheme.colorScheme.onPrimary,
+                                        )
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(strings.settingsImportingLabel)
+                                    } else {
+                                        Text(strings.settingsImportFromLinkButton)
+                                    }
+                                }
+
+                                OutlinedButton(
+                                    onClick = {
+                                        haptics.tick()
+                                        playlistFileLauncher.launch(
+                                            arrayOf(
+                                                "text/csv",
+                                                "text/comma-separated-values",
+                                                "text/tab-separated-values",
+                                                "text/plain",
+                                                "application/json",
+                                                "application/vnd.ms-excel",
+                                                "audio/x-mpegurl",
+                                                "application/vnd.apple.mpegurl",
+                                                "audio/mpegurl",
+                                            ),
+                                        )
+                                    },
+                                    enabled = !state.isImportingPlaylist,
+                                    shape = CircleShape,
+                                    modifier = Modifier.testTag("settings_import_file_button"),
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.UploadFile,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp),
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(strings.settingsImportFromFileButton)
+                                }
+                            }
+
+                            Text(
+                                text = strings.settingsImportPublicNotice,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontSize = 11.sp,
+                                lineHeight = 15.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.80f),
+                                modifier = Modifier.testTag("settings_import_public_notice"),
+                            )
                         }
                     }
 

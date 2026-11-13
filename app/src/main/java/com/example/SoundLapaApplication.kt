@@ -9,6 +9,8 @@ import com.example.audio.AudioCacheManager
 import com.example.data.local.SoundLapaDatabase
 import com.example.data.local.SoundLapaPreferences
 import com.example.data.remote.AudiusRepository
+import com.example.data.remote.FullStreamResolver
+import com.example.data.remote.PlaylistImporter
 import com.example.player.PlaybackController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -24,6 +26,7 @@ class SoundLapaApplication : Application(), ImageLoaderFactory {
     val preferences by lazy { SoundLapaPreferences(this) }
     val audioCacheManager by lazy { AudioCacheManager(this, dao) }
     val audiusRepository by lazy { AudiusRepository(this, dao) }
+    val playlistImporter by lazy { PlaylistImporter(this, dao, audiusRepository) }
     val playbackController by lazy { PlaybackController(this, dao, preferences, appScope) }
 
     override fun newImageLoader(): ImageLoader {
@@ -46,7 +49,9 @@ class SoundLapaApplication : Application(), ImageLoaderFactory {
 
     override fun onCreate() {
         super.onCreate()
-        appScope.launch {
+        FullStreamResolver.configureHttpCache(cacheDir)
+        FullStreamResolver.warmUpAsync()
+        appScope.launch(Dispatchers.IO) {
             audioCacheManager.seedStarterLibraryIfEmpty()
         }
     }

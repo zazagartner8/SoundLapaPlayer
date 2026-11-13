@@ -1,17 +1,21 @@
 package com.example.ui
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -24,7 +28,15 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.WifiOff
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
@@ -54,6 +66,8 @@ import com.example.ui.components.EditTrackDialog
 import com.example.ui.components.FloatingMiniPlayer
 import com.example.ui.components.LiquidBottomNavBar
 import com.example.ui.components.LiquidNavigationRail
+import com.example.ui.components.OfflineNetworkErrorBanner
+import com.example.ui.components.QueueBottomSheet
 import com.example.ui.components.SystemUtilityTopBar
 import com.example.ui.components.TrackOptionsBottomSheet
 import com.example.ui.components.UploadTracksBottomSheet
@@ -61,11 +75,14 @@ import com.example.ui.components.rememberSoundLapaHaptics
 import com.example.ui.i18n.LocalAppStrings
 import com.example.ui.i18n.stringsForLanguage
 import com.example.ui.screens.AboutScreen
+import com.example.ui.screens.ArtistProfileScreen
 import com.example.ui.screens.LibraryScreen
 import com.example.ui.screens.NowPlayingSheet
 import com.example.ui.screens.SearchScreen
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.screens.StreamScreen
+import com.example.ui.shaders.LocalDataSaverEnabled
+import com.example.ui.theme.LiquidRose
 import com.example.ui.theme.SoundLapaTheme
 import kotlinx.serialization.Serializable
 
@@ -78,6 +95,14 @@ object SearchRoute
 @Serializable
 object LibraryRoute
 
+private val SilkyEaseOut = CubicBezierEasing(0.22f, 1f, 0.36f, 1f)
+
+private fun tabIndexForRoute(route: String?): Int = when {
+    route?.contains("SearchRoute") == true -> 1
+    route?.contains("LibraryRoute") == true -> 2
+    else -> 0
+}
+
 @Composable
 fun SoundLapaApp(
     viewModel: SoundLapaViewModel = viewModel(),
@@ -85,6 +110,9 @@ fun SoundLapaApp(
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val homeState by viewModel.homeUiState.collectAsStateWithLifecycle()
     val isPlayerExpanded by viewModel.isPlayerExpanded.collectAsStateWithLifecycle()
+    val artistProfile by viewModel.artistProfileState.collectAsStateWithLifecycle()
+    val queueTracks by viewModel.playbackController.queueTracks.collectAsStateWithLifecycle()
+    val requestedLibrarySection by viewModel.requestedLibrarySection.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -94,9 +122,11 @@ fun SoundLapaApp(
     var showSettingsSheet by remember { mutableStateOf(false) }
     var showAboutScreen by remember { mutableStateOf(false) }
     var showUploadSheet by remember { mutableStateOf(false) }
+    var showQueueSheet by remember { mutableStateOf(false) }
     var optionsMenuTrack by remember { mutableStateOf<TrackEntity?>(null) }
     var editingTrack by remember { mutableStateOf<TrackEntity?>(null) }
     var playlistPickerTrack by remember { mutableStateOf<TrackEntity?>(null) }
+    var pendingDeleteTrack by remember { mutableStateOf<TrackEntity?>(null) }
 
     val notificationLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
@@ -119,6 +149,7 @@ fun SoundLapaApp(
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
+                viewModel.refreshConnectivity()
                 viewModel.syncAutoUploadFolderIfEnabled()
             }
         }
@@ -137,6 +168,9 @@ fun SoundLapaApp(
 
     fun navigateToTab(tab: SoundLapaTab) {
         haptics.tick()
+        if (artistProfile.isVisible) {
+            viewModel.closeArtistProfile()
+        }
         val route: Any = when (tab) {
             SoundLapaTab.HOME -> HomeRoute
             SoundLapaTab.SEARCH -> SearchRoute
@@ -149,6 +183,14 @@ fun SoundLapaApp(
         }
     }
 
+    fun openDownloadedTracksOffline() {
+        viewModel.setPlayerExpanded(false)
+        showSettingsSheet = false
+        showAboutScreen = false
+        viewModel.requestOpenDownloadedTracksSection()
+        navigateToTab(SoundLapaTab.LIBRARY)
+    }
+
     val appStrings = remember(state.settings.appLanguage) {
         stringsForLanguage(state.settings.appLanguage)
     }
@@ -157,7 +199,10 @@ fun SoundLapaApp(
         darkTheme = state.settings.darkLiquidGlass,
         accentColor = Color(state.settings.accentColorArgb),
     ) {
-        CompositionLocalProvider(LocalAppStrings provides appStrings) {
+        CompositionLocalProvider(
+            LocalAppStrings provides appStrings,
+            LocalDataSaverEnabled provides state.settings.dataSaverEnabled,
+        ) {
             val playerTransition = remember { MutableTransitionState(false) }
             playerTransition.targetState = isPlayerExpanded && state.currentTrack != null
             val settingsTransition = remember { MutableTransitionState(false) }
@@ -212,25 +257,57 @@ fun SoundLapaApp(
                                 },
                                 onSettingsClick = {
                                     haptics.tick()
+                                    viewModel.refreshCacheSize()
                                     showSettingsSheet = true
                                 },
                             )
+
+                            AnimatedVisibility(visible = !state.isOnline) {
+                                OfflineNetworkErrorBanner(
+                                    offlineTracksCount = state.offlineTracksCount,
+                                    onGoToDownloadedTracks = ::openDownloadedTracksOffline,
+                                )
+                            }
 
                             NavHost(
                                 navController = navController,
                                 startDestination = HomeRoute,
                                 modifier = Modifier.weight(1f),
                                 enterTransition = {
-                                    fadeIn(animationSpec = tween(170, easing = FastOutSlowInEasing))
+                                    val from = tabIndexForRoute(initialState.destination.route)
+                                    val to = tabIndexForRoute(targetState.destination.route)
+                                    val dir = if (to >= from) 1 else -1
+                                    slideInHorizontally(
+                                        animationSpec = tween(290, easing = SilkyEaseOut),
+                                    ) { fullWidth -> dir * fullWidth } +
+                                        fadeIn(animationSpec = tween(210, easing = FastOutSlowInEasing))
                                 },
                                 exitTransition = {
-                                    fadeOut(animationSpec = tween(140, easing = FastOutSlowInEasing))
+                                    val from = tabIndexForRoute(initialState.destination.route)
+                                    val to = tabIndexForRoute(targetState.destination.route)
+                                    val dir = if (to >= from) 1 else -1
+                                    slideOutHorizontally(
+                                        animationSpec = tween(290, easing = SilkyEaseOut),
+                                    ) { fullWidth -> -dir * (fullWidth / 3) } +
+                                        fadeOut(animationSpec = tween(170, easing = FastOutSlowInEasing))
                                 },
                                 popEnterTransition = {
-                                    fadeIn(animationSpec = tween(170, easing = FastOutSlowInEasing))
+                                    val from = tabIndexForRoute(initialState.destination.route)
+                                    val to = tabIndexForRoute(targetState.destination.route)
+                                    val dir = if (to >= from) 1 else -1
+                                    slideInHorizontally(
+                                        animationSpec = tween(290, easing = SilkyEaseOut),
+                                    ) { fullWidth -> dir * fullWidth } +
+                                        fadeIn(animationSpec = tween(210, easing = FastOutSlowInEasing))
                                 },
                                 popExitTransition = {
-                                    fadeOut(animationSpec = tween(140, easing = FastOutSlowInEasing))
+                                    val from = tabIndexForRoute(initialState.destination.route)
+                                    val to = tabIndexForRoute(targetState.destination.route)
+                                    val dir = if (to >= from) 1 else -1
+                                    slideOutHorizontally(
+                                        animationSpec = tween(290, easing = SilkyEaseOut),
+                                    ) { fullWidth -> -dir * (fullWidth / 3) } +
+                                        fadeOut(animationSpec = tween(170, easing = FastOutSlowInEasing))
                                 },
                             ) {
                                 composable<HomeRoute> {
@@ -244,10 +321,12 @@ fun SoundLapaApp(
                                             ensureNotificationPermissionOnce()
                                             viewModel.playOrToggleTrack(track)
                                         },
+                                        onPlayRecommendedTrack = { track ->
+                                            ensureNotificationPermissionOnce()
+                                            viewModel.playOrToggleTrack(track, homeState.recommendedTracks)
+                                        },
                                         onToggleLike = viewModel::toggleLike,
                                         onOpenTrackOptions = { optionsMenuTrack = it },
-                                        onOpenUploadSheet = { showUploadSheet = true },
-                                        onRefreshTrending = viewModel::refreshAudiusTrending,
                                         bottomContentPadding = bottomOverlaySpace,
                                     )
                                 }
@@ -267,6 +346,15 @@ fun SoundLapaApp(
                                         },
                                         onToggleLike = viewModel::toggleLike,
                                         onOpenTrackOptions = { optionsMenuTrack = it },
+                                        onOpenArtistProfile = { profile ->
+                                            viewModel.saveCurrentSearchToHistory()
+                                            viewModel.openArtistProfile(
+                                                artistName = profile.name,
+                                                seedTrack = profile.seedTrack,
+                                                spotifyId = profile.spotifyId,
+                                                soundCloudUrl = profile.soundCloudUrl,
+                                            )
+                                        },
                                         bottomContentPadding = bottomOverlaySpace,
                                     )
                                 }
@@ -274,6 +362,8 @@ fun SoundLapaApp(
                                 composable<LibraryRoute> {
                                     LibraryScreen(
                                         state = state,
+                                        requestedSection = requestedLibrarySection,
+                                        onConsumeRequestedSection = viewModel::consumeRequestedLibrarySection,
                                         onCreatePlaylist = { name, desc ->
                                             viewModel.createPlaylist(name, desc)
                                         },
@@ -289,12 +379,51 @@ fun SoundLapaApp(
                                         onRemoveTrackFromPlaylist = viewModel::removeTrackFromPlaylist,
                                         onToggleLike = viewModel::toggleLike,
                                         onOpenTrackOptions = { optionsMenuTrack = it },
-                                        onSyncAudiusAccount = viewModel::syncAudiusAccount,
-                                        onDisconnectAudius = viewModel::disconnectAudiusAccount,
+                                        onOpenUploadSheet = { showUploadSheet = true },
                                         bottomContentPadding = bottomOverlaySpace,
                                     )
                                 }
                             }
+                        }
+
+                        androidx.compose.animation.AnimatedVisibility(
+                            visible = artistProfile.isVisible,
+                            enter = slideInHorizontally(
+                                initialOffsetX = { it },
+                                animationSpec = tween(310, easing = SilkyEaseOut),
+                            ) + fadeIn(animationSpec = tween(200, easing = FastOutSlowInEasing)),
+                            exit = slideOutHorizontally(
+                                targetOffsetX = { it },
+                                animationSpec = tween(260, easing = SilkyEaseOut),
+                            ) + fadeOut(animationSpec = tween(180, easing = FastOutSlowInEasing)),
+                        ) {
+                            ArtistProfileScreen(
+                                state = artistProfile,
+                                currentTrackId = state.playback.currentTrackId,
+                                isPlaying = state.playback.isPlaying,
+                                bottomContentPadding = bottomOverlaySpace,
+                                onClose = viewModel::closeArtistProfile,
+                                onPlayAll = {
+                                    ensureNotificationPermissionOnce()
+                                    viewModel.playArtistTracks(shuffled = false)
+                                },
+                                onShufflePlay = {
+                                    ensureNotificationPermissionOnce()
+                                    viewModel.playArtistTracks(shuffled = true)
+                                },
+                                onPlayTrack = { track, queue ->
+                                    ensureNotificationPermissionOnce()
+                                    viewModel.playOrToggleTrack(track, queue)
+                                },
+                                onToggleLike = viewModel::toggleLike,
+                                onOpenTrackOptions = { optionsMenuTrack = it },
+                                onOpenAlbum = viewModel::openArtistAlbum,
+                                onCloseAlbum = viewModel::closeArtistAlbum,
+                                onPlayAlbum = { albumTracks, startTrack ->
+                                    ensureNotificationPermissionOnce()
+                                    viewModel.playAlbumTracks(albumTracks, startTrack)
+                                },
+                            )
                         }
 
                         Column(
@@ -307,14 +436,21 @@ fun SoundLapaApp(
                                     positionFlow = viewModel.playbackPositionMs,
                                     durationMs = state.playback.durationMs.takeIf { it > 0L }
                                         ?: state.currentTrack?.durationMs ?: 0L,
+                                    onPrevious = {
+                                        haptics.tap()
+                                        viewModel.playbackController.skipPrevious()
+                                    },
                                     onTogglePlayPause = {
                                         haptics.tap()
                                         ensureNotificationPermissionOnce()
                                         val current = state.currentTrack
-                                        if (state.playback.currentTrackId == null && current != null) {
+                                        if (current != null &&
+                                            (state.playback.currentTrackId == null ||
+                                                !viewModel.playbackController.isTrackActiveInController(current.id))
+                                        ) {
                                             viewModel.playOrToggleTrack(current)
                                         } else {
-                                            viewModel.playbackController.togglePlayPause()
+                                            viewModel.playbackController.togglePlayPause(current)
                                         }
                                     },
                                     onNext = {
@@ -340,17 +476,17 @@ fun SoundLapaApp(
                 }
             }
 
-            // Full-Screen Liquid Glass Now Playing Sheet with snappy slide
+            // Full-Screen Now Playing Sheet with silky slide
             AnimatedVisibility(
                 visibleState = playerTransition,
                 enter = slideInVertically(
                     initialOffsetY = { it },
-                    animationSpec = tween(280, easing = FastOutSlowInEasing),
-                ),
+                    animationSpec = tween(320, easing = SilkyEaseOut),
+                ) + fadeIn(animationSpec = tween(180)),
                 exit = slideOutVertically(
                     targetOffsetY = { it },
-                    animationSpec = tween(240, easing = FastOutSlowInEasing),
-                ),
+                    animationSpec = tween(260, easing = FastOutSlowInEasing),
+                ) + fadeOut(animationSpec = tween(160)),
             ) {
                 state.currentTrack?.let { track ->
                     val isInPlaylist = remember(state.playlists, track.id) {
@@ -358,18 +494,29 @@ fun SoundLapaApp(
                             pl.tracks.any { it.id == track.id }
                         }
                     }
+                    val activeQueue = remember(queueTracks, state.tracks) {
+                        queueTracks.ifEmpty { state.tracks }
+                    }
+                    val nextTrack = remember(activeQueue, track.id) {
+                        val idx = activeQueue.indexOfFirst { it.id == track.id }
+                        if (idx >= 0 && idx + 1 < activeQueue.size) activeQueue[idx + 1] else null
+                    }
                     NowPlayingSheet(
                         track = track,
                         playback = state.playback,
                         positionFlow = viewModel.playbackPositionMs,
                         isInPlaylist = isInPlaylist,
+                        nextTrack = nextTrack,
+                        queueCount = activeQueue.size,
                         onCollapse = { viewModel.setPlayerExpanded(false) },
                         onTogglePlayPause = {
                             ensureNotificationPermissionOnce()
-                            if (state.playback.currentTrackId == null) {
+                            if (state.playback.currentTrackId == null ||
+                                !viewModel.playbackController.isTrackActiveInController(track.id)
+                            ) {
                                 viewModel.playOrToggleTrack(track)
                             } else {
-                                viewModel.playbackController.togglePlayPause()
+                                viewModel.playbackController.togglePlayPause(track)
                             }
                         },
                         onPrevious = viewModel.playbackController::skipPrevious,
@@ -382,26 +529,53 @@ fun SoundLapaApp(
                         onToggleLike = { viewModel.toggleLike(track) },
                         onOpenTrackOptions = { optionsMenuTrack = track },
                         onAddToPlaylist = { playlistPickerTrack = track },
+                        onOpenQueue = { showQueueSheet = true },
+                        onShareTrack = {
+                            val shareText = buildString {
+                                append("${track.artist} — ${track.title}")
+                                val link = track.sourceUri?.takeIf { it.startsWith("http") }
+                                if (link != null) {
+                                    append("\n")
+                                    append(link)
+                                }
+                            }
+                            runCatching {
+                                val intent = Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(Intent.EXTRA_SUBJECT, "${track.artist} — ${track.title}")
+                                    putExtra(Intent.EXTRA_TEXT, shareText)
+                                }
+                                context.startActivity(
+                                    Intent.createChooser(intent, appStrings.shareTrackChooserTitle),
+                                )
+                            }
+                        },
+                        onOpenArtistProfile = {
+                            viewModel.setPlayerExpanded(false)
+                            viewModel.openArtistProfile(track.artist, track)
+                        },
                     )
                 }
             }
 
-            // Full-Screen Settings Page with snappy slide transition
+            // Full-Screen Settings Page with horizontal slide transition
             AnimatedVisibility(
                 visibleState = settingsTransition,
-                enter = slideInVertically(
-                    initialOffsetY = { it },
-                    animationSpec = tween(260, easing = FastOutSlowInEasing),
-                ),
-                exit = slideOutVertically(
-                    targetOffsetY = { it },
-                    animationSpec = tween(220, easing = FastOutSlowInEasing),
-                ),
+                enter = slideInHorizontally(
+                    initialOffsetX = { it },
+                    animationSpec = tween(310, easing = SilkyEaseOut),
+                ) + fadeIn(animationSpec = tween(200, easing = FastOutSlowInEasing)),
+                exit = slideOutHorizontally(
+                    targetOffsetX = { it },
+                    animationSpec = tween(260, easing = SilkyEaseOut),
+                ) + fadeOut(animationSpec = tween(180, easing = FastOutSlowInEasing)),
             ) {
                 SettingsScreen(
                     state = state,
                     onClose = {
                         viewModel.clearAudiusStatus()
+                        viewModel.clearCacheMessage()
+                        viewModel.clearImportStatus()
                         showSettingsSheet = false
                     },
                     onSelectLanguage = viewModel::setAppLanguage,
@@ -411,6 +585,10 @@ fun SoundLapaApp(
                     onChangeSmoothTransitionDuration = viewModel::setSmoothTransitionDurationSec,
                     onToggleAutoUpload = viewModel::setAutoUploadEnabled,
                     onToggleAutoCache = viewModel::setAutoCacheOnPlay,
+                    onToggleDataSaver = viewModel::setDataSaverEnabled,
+                    onClearCache = viewModel::clearAppCache,
+                    onImportFromInput = viewModel::importExternalPlaylistFromInput,
+                    onImportFromFile = viewModel::importExternalPlaylistFromFile,
                     onSetAutoUploadFolder = viewModel::setAutoUploadFolder,
                     onClearAutoUploadFolder = viewModel::clearAutoUploadFolder,
                     onSyncAudiusAccount = viewModel::syncAudiusAccount,
@@ -418,17 +596,17 @@ fun SoundLapaApp(
                 )
             }
 
-            // Full-Screen About App Page with snappy slide transition
+            // Full-Screen About App Page with horizontal slide transition
             AnimatedVisibility(
                 visibleState = aboutTransition,
-                enter = slideInVertically(
-                    initialOffsetY = { it },
-                    animationSpec = tween(240, easing = FastOutSlowInEasing),
-                ),
-                exit = slideOutVertically(
-                    targetOffsetY = { it },
-                    animationSpec = tween(200, easing = FastOutSlowInEasing),
-                ),
+                enter = slideInHorizontally(
+                    initialOffsetX = { it },
+                    animationSpec = tween(310, easing = SilkyEaseOut),
+                ) + fadeIn(animationSpec = tween(200, easing = FastOutSlowInEasing)),
+                exit = slideOutHorizontally(
+                    targetOffsetX = { it },
+                    animationSpec = tween(260, easing = SilkyEaseOut),
+                ) + fadeOut(animationSpec = tween(180, easing = FastOutSlowInEasing)),
             ) {
                 AboutScreen(
                     onClose = { showAboutScreen = false },
@@ -446,8 +624,36 @@ fun SoundLapaApp(
                 } else null,
                 onAddToPlaylistClick = { playlistPickerTrack = track },
                 onDeleteClick = if (track.isUserUpload) {
-                    { viewModel.deleteTrack(track) }
+                    { pendingDeleteTrack = track }
                 } else null,
+                onOpenArtistProfile = {
+                    viewModel.setPlayerExpanded(false)
+                    viewModel.openArtistProfile(track.artist, track)
+                },
+            )
+        }
+
+        pendingDeleteTrack?.let { trackToDelete ->
+            AlertDialog(
+                onDismissRequest = { pendingDeleteTrack = null },
+                title = { Text(appStrings.confirmDeleteTitle) },
+                text = { Text(appStrings.confirmDeleteTrackMessage(trackToDelete.title)) },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            haptics.confirm()
+                            viewModel.deleteTrack(trackToDelete)
+                            pendingDeleteTrack = null
+                        },
+                    ) {
+                        Text(appStrings.deleteConfirmAction, color = LiquidRose)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { pendingDeleteTrack = null }) {
+                        Text(appStrings.cancel)
+                    }
+                },
             )
         }
 
@@ -479,6 +685,19 @@ fun SoundLapaApp(
             )
         }
 
+        if (showQueueSheet) {
+            val activeQueue = queueTracks.ifEmpty { state.tracks }
+            QueueBottomSheet(
+                queueTracks = activeQueue,
+                currentTrackId = state.currentTrack?.id,
+                onSelectTrack = { chosen ->
+                    ensureNotificationPermissionOnce()
+                    viewModel.playOrToggleTrack(chosen, activeQueue)
+                },
+                onDismiss = { showQueueSheet = false },
+            )
+        }
+
         if (showUploadSheet) {
             UploadTracksBottomSheet(
                 state = state,
@@ -496,6 +715,57 @@ fun SoundLapaApp(
                 onCancelDraft = viewModel::cancelStagedDraft,
                 onSetAutoUploadFolder = viewModel::setAutoUploadFolder,
                 onSyncNow = { viewModel.syncAutoUploadFolderNow() },
+            )
+        }
+
+        if (state.showOfflineDialog && !state.isOnline) {
+            val blockedTitle = state.offlineDialogTrackTitle
+            val message = when {
+                blockedTitle != null && state.offlineTracksCount > 0 ->
+                    appStrings.offlineTrackRequiresNetworkMessage(blockedTitle)
+                state.offlineTracksCount > 0 ->
+                    appStrings.offlineErrorWithDownloadsMessage(state.offlineTracksCount)
+                else ->
+                    appStrings.offlineErrorNoDownloadsMessage
+            }
+            AlertDialog(
+                onDismissRequest = viewModel::dismissOfflineDialog,
+                icon = {
+                    Icon(
+                        imageVector = Icons.Rounded.WifiOff,
+                        contentDescription = appStrings.offlineErrorTitle,
+                        tint = MaterialTheme.colorScheme.error,
+                    )
+                },
+                title = { Text(appStrings.offlineErrorTitle) },
+                text = { Text(message) },
+                confirmButton = {
+                    if (state.offlineTracksCount > 0) {
+                        Button(
+                            onClick = {
+                                haptics.confirm()
+                                openDownloadedTracksOffline()
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.primary,
+                                contentColor = MaterialTheme.colorScheme.onPrimary,
+                            ),
+                        ) {
+                            Text(appStrings.offlineGoToDownloadedAction)
+                        }
+                    } else {
+                        TextButton(onClick = viewModel::dismissOfflineDialog) {
+                            Text(appStrings.close)
+                        }
+                    }
+                },
+                dismissButton = {
+                    if (state.offlineTracksCount > 0) {
+                        TextButton(onClick = viewModel::dismissOfflineDialog) {
+                            Text(appStrings.close)
+                        }
+                    }
+                },
             )
         }
         }

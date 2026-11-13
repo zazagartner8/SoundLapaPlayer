@@ -17,8 +17,8 @@ android {
     applicationId = "com.aistudio.soundlapa.x7k9m2"
     minSdk = 24
     targetSdk = 36
-    versionCode = 7
-    versionName = "1.6"
+    versionCode = 9
+    versionName = "2.5-stable"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

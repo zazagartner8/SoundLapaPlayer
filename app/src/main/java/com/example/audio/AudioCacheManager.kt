@@ -5,8 +5,10 @@ import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.documentfile.provider.DocumentFile
+import coil.imageLoader
 import com.example.data.local.SoundLapaDao
 import com.example.data.local.TrackEntity
+import com.example.data.remote.FullStreamResolver
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -21,6 +23,7 @@ data class ImportPreviewMetadata(
     val uri: Uri,
     val title: String,
     val artist: String,
+    val albumTitle: String?,
     val durationMs: Long,
     val fileSizeBytes: Long,
     val extension: String,
@@ -73,9 +76,10 @@ class AudioCacheManager(
                 fileSizeBytes = targetFile.length(),
                 playCount = preset.playCount,
                 likeCount = preset.likeCount,
-                isLiked = index % 2 == 0,
+                isLiked = false,
                 description = preset.description,
                 createdAt = createdAt,
+                albumTitle = "SoundLapa Originals",
             )
         }
 
@@ -104,6 +108,7 @@ class AudioCacheManager(
         val ext = displayName.substringAfterLast('.', "mp3").lowercase()
         var title = baseTitle
         var artist = "Мой канал"
+        var albumTitle: String? = null
         var durationMs = 0L
 
         val retriever = MediaMetadataRetriever()
@@ -115,6 +120,8 @@ class AudioCacheManager(
             retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST)
                 ?.takeIf { it.isNotBlank() }
                 ?.let { artist = it }
+            albumTitle = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM)
+                ?.takeIf { it.isNotBlank() }
             durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
                 ?.toLongOrNull() ?: 0L
         } catch (_: Exception) {
@@ -128,6 +135,7 @@ class AudioCacheManager(
             uri = uri,
             title = title,
             artist = artist,
+            albumTitle = albumTitle,
             durationMs = durationMs.coerceAtLeast(1000L),
             fileSizeBytes = sizeBytes,
             extension = ext,
@@ -215,6 +223,7 @@ class AudioCacheManager(
                 if (isAutoImported) "Авто-загружено в офлайн-кэш SoundLapa" else "Загружено пользователем"
             },
             createdAt = System.currentTimeMillis(),
+            albumTitle = preview.albumTitle,
         )
 
         dao.upsertTrack(track)
@@ -328,6 +337,78 @@ class AudioCacheManager(
         track.cachedFilePath?.let { runCatching { File(it).delete() } }
         track.coverArtPath?.let { runCatching { File(it).delete() } }
         dao.deleteTrackById(track.id)
+    }
+
+    suspend fun calculateCacheSizeBytes(): Long = withContext(Dispatchers.IO) {
+        val allTracks = dao.getAllTracksOnce()
+        val protectedAudioPaths = allTracks
+            .filter { it.isUserUpload || it.sourceUri == null }
+            .mapNotNull { it.cachedFilePath }
+            .toHashSet()
+        val protectedCoverPaths = allTracks
+            .filter { it.isUserUpload }
+            .mapNotNull { it.coverArtPath }
+            .toHashSet()
+
+        val tempCacheBytes = directorySizeBytes(context.cacheDir)
+        val audioCacheBytes = audioCacheDir.listFiles()
+            ?.filter { it.isFile && it.absolutePath !in protectedAudioPaths }
+            ?.sumOf { it.length() }
+            ?: 0L
+        val coverCacheBytes = coverCacheDir.listFiles()
+            ?.filter { it.isFile && it.absolutePath !in protectedCoverPaths }
+            ?.sumOf { it.length() }
+            ?: 0L
+
+        tempCacheBytes + audioCacheBytes + coverCacheBytes
+    }
+
+    suspend fun clearAppCache(): Long = withContext(Dispatchers.IO) {
+        val sizeBefore = calculateCacheSizeBytes()
+        val allTracks = dao.getAllTracksOnce()
+        val protectedAudioPaths = allTracks
+            .filter { it.isUserUpload || it.sourceUri == null }
+            .mapNotNull { it.cachedFilePath }
+            .toHashSet()
+        val protectedCoverPaths = allTracks
+            .filter { it.isUserUpload }
+            .mapNotNull { it.coverArtPath }
+            .toHashSet()
+
+        // 1. Clear streamed audio cache & orphaned audio files (keep user uploads and built-in wavs)
+        audioCacheDir.listFiles()?.forEach { file ->
+            if (file.isFile && file.absolutePath !in protectedAudioPaths) {
+                runCatching { file.delete() }
+            }
+        }
+        // 2. Clear orphaned cover files
+        coverCacheDir.listFiles()?.forEach { file ->
+            if (file.isFile && file.absolutePath !in protectedCoverPaths) {
+                runCatching { file.delete() }
+            }
+        }
+        // 3. Reset Room cache flags for streamed tracks
+        runCatching { dao.clearStreamedTracksCacheStatus() }
+
+        // 4. Clear Coil image caches & app cacheDir
+        runCatching {
+            context.imageLoader.diskCache?.clear()
+            context.imageLoader.memoryCache?.clear()
+        }
+        context.cacheDir.listFiles()?.forEach { child ->
+            runCatching { child.deleteRecursively() }
+        }
+        FullStreamResolver.clearStreamCache()
+
+        sizeBefore
+    }
+
+    private fun directorySizeBytes(dir: File?): Long {
+        if (dir == null || !dir.exists()) return 0L
+        if (dir.isFile) return dir.length()
+        return dir.listFiles()?.sumOf { child ->
+            if (child.isDirectory) directorySizeBytes(child) else child.length()
+        } ?: 0L
     }
 
     private fun extractWaveformPeaks(file: File, seed: Int): List<Float> {

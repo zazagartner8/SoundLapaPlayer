@@ -31,6 +31,7 @@ data class TrackEntity(
     val isLiked: Boolean = false,
     val description: String = "",
     val createdAt: Long = System.currentTimeMillis(),
+    val albumTitle: String? = null,
 ) {
     fun waveformPeaks(): List<Float> = runCatching {
         Json.decodeFromString<List<Float>>(waveformJson)

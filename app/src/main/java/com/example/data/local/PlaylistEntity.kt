@@ -16,6 +16,7 @@ data class PlaylistEntity(
     val name: String,
     val description: String = "",
     val createdAt: Long = System.currentTimeMillis(),
+    val coverArtPath: String? = null,
 )
 
 @Entity(
@@ -41,6 +42,7 @@ data class PlaylistTrackCrossRef(
     val playlistId: String,
     val trackId: String,
     val addedAt: Long = System.currentTimeMillis(),
+    val position: Int = 0,
 )
 
 @Immutable

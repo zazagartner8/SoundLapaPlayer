@@ -7,13 +7,18 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
@@ -22,34 +27,61 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import coil.size.Precision
 import com.example.data.local.TrackEntity
+import com.example.data.remote.FullStreamResolver
 import java.io.File
 
 private val PlaceholderTrackBg = Color(0xFF1A1624)
+
+val LocalDataSaverEnabled = staticCompositionLocalOf { false }
 
 @Composable
 fun TrackCoverArtwork(
     track: TrackEntity,
     modifier: Modifier = Modifier,
     cornerRadius: Dp = 20.dp,
-    targetSizePx: Int = 180,
+    targetSizePx: Int = 320,
     crossfade: Boolean = false,
 ) {
     val context = LocalContext.current
-    val coverPath = track.coverArtPath
+    val dataSaver = LocalDataSaverEnabled.current
+    val effectiveSizePx = if (dataSaver) minOf(targetSizePx, 360) else targetSizePx
+    val rawCoverPath = track.coverArtPath
+    val upgradedCoverPath = remember(rawCoverPath, dataSaver) {
+        if (rawCoverPath != null && (rawCoverPath.startsWith("http://") || rawCoverPath.startsWith("https://"))) {
+            FullStreamResolver.upgradeArtworkUrl(rawCoverPath, dataSaver = dataSaver)
+        } else {
+            rawCoverPath
+        }
+    }
+    var useFallbackUrl by remember(upgradedCoverPath) { mutableStateOf(false) }
+    val activeCoverPath = remember(upgradedCoverPath, rawCoverPath, useFallbackUrl) {
+        if (useFallbackUrl) {
+            FullStreamResolver.fallbackArtworkUrl(upgradedCoverPath) ?: rawCoverPath
+        } else {
+            upgradedCoverPath
+        }
+    }
     val shape = remember(cornerRadius) { RoundedCornerShape(cornerRadius) }
 
-    val imageModel = remember(coverPath, targetSizePx, crossfade) {
-        if (coverPath.isNullOrBlank()) {
+    val imageModel = remember(activeCoverPath, effectiveSizePx, crossfade) {
+        if (activeCoverPath.isNullOrBlank()) {
             null
         } else {
-            val isRemoteUrl = coverPath.startsWith("http://") || coverPath.startsWith("https://")
-            val data: Any = if (isRemoteUrl) coverPath else File(coverPath)
+            val isRemoteUrl = activeCoverPath.startsWith("http://") || activeCoverPath.startsWith("https://")
+            val data: Any = if (isRemoteUrl) activeCoverPath else File(activeCoverPath)
             ImageRequest.Builder(context)
                 .data(data)
-                .size(targetSizePx)
-                .precision(Precision.INEXACT)
+                .size(effectiveSizePx)
+                .precision(if (effectiveSizePx >= 480) Precision.EXACT else Precision.INEXACT)
                 .allowHardware(true)
                 .crossfade(if (crossfade) 160 else 0)
+                .listener(
+                    onError = { _, _ ->
+                        if (!useFallbackUrl && FullStreamResolver.fallbackArtworkUrl(upgradedCoverPath) != null) {
+                            useFallbackUrl = true
+                        }
+                    },
+                )
                 .build()
         }
     }
@@ -59,6 +91,7 @@ fun TrackCoverArtwork(
             model = imageModel,
             contentDescription = track.title,
             contentScale = ContentScale.Crop,
+            filterQuality = if (effectiveSizePx <= 320) FilterQuality.Medium else FilterQuality.High,
             modifier = modifier
                 .clip(shape)
                 .background(PlaceholderTrackBg),

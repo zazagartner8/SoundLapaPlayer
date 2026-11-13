@@ -4,8 +4,10 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.os.Build
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -33,7 +35,6 @@ import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Code
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.FolderCopy
-import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.QueueMusic
@@ -60,12 +61,16 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.BuildConfig
+import com.example.R
 import com.example.ui.components.rememberSoundLapaHaptics
 import com.example.ui.i18n.LocalAppStrings
 import kotlinx.coroutines.delay
@@ -79,6 +84,7 @@ fun AboutScreen(
 
     val strings = LocalAppStrings.current
     val context = LocalContext.current
+    val uriHandler = LocalUriHandler.current
     val haptics = rememberSoundLapaHaptics()
     val accent = MaterialTheme.colorScheme.primary
     var copiedFeedback by remember { mutableStateOf(false) }
@@ -92,7 +98,7 @@ fun AboutScreen(
 
     val versionSummary = remember {
         buildString {
-            appendLine("SoundLapa v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})")
+            appendLine("SoundLapa v${BuildConfig.VERSION_NAME}")
             appendLine("Package: ${BuildConfig.APPLICATION_ID}")
             appendLine("Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
             append("Engine: AndroidX Media3 / ExoPlayer • Compose Material 3")
@@ -149,21 +155,12 @@ fun AboutScreen(
                             tint = MaterialTheme.colorScheme.onSurface,
                         )
                     }
-                    Column {
-                        Text(
-                            text = strings.aboutAppTitle,
-                            style = MaterialTheme.typography.headlineSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onBackground,
-                        )
-                        Text(
-                            text = strings.aboutSubtitle,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
+                    Text(
+                        text = strings.aboutAppTitle,
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onBackground,
+                    )
                 }
 
                 LazyColumn(
@@ -193,20 +190,19 @@ fun AboutScreen(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(14.dp),
                                 ) {
-                                    Box(
+                                    Image(
+                                        painter = painterResource(R.drawable.soundlapa_brand_logo),
+                                        contentDescription = "SoundLapa Logo",
+                                        contentScale = ContentScale.Crop,
                                         modifier = Modifier
-                                            .size(60.dp)
+                                            .size(62.dp)
                                             .clip(RoundedCornerShape(22.dp))
-                                            .background(accent),
-                                        contentAlignment = Alignment.Center,
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Rounded.GraphicEq,
-                                            contentDescription = null,
-                                            tint = MaterialTheme.colorScheme.onPrimary,
-                                            modifier = Modifier.size(34.dp),
-                                        )
-                                    }
+                                            .border(
+                                                width = 1.5.dp,
+                                                color = accent.copy(alpha = 0.55f),
+                                                shape = RoundedCornerShape(22.dp),
+                                            ),
+                                    )
 
                                     Column(
                                         modifier = Modifier.weight(1f),
@@ -241,7 +237,7 @@ fun AboutScreen(
                                         ),
                                     ) {
                                         Text(
-                                            text = "v${BuildConfig.VERSION_NAME} • ${strings.aboutBuildLabel} ${BuildConfig.VERSION_CODE}",
+                                            text = "v${BuildConfig.VERSION_NAME}",
                                             style = MaterialTheme.typography.labelLarge,
                                             fontWeight = FontWeight.Bold,
                                             color = accent,
@@ -250,8 +246,10 @@ fun AboutScreen(
                                     }
 
                                     Surface(
+                                        onClick = { runCatching { uriHandler.openUri("https://t.me/tylerw1nston") } },
                                         shape = CircleShape,
                                         color = MaterialTheme.colorScheme.surface.copy(alpha = 0.65f),
+                                        modifier = Modifier.testTag("about_creator_badge"),
                                     ) {
                                         Text(
                                             text = "by @TylerW1nston",
@@ -353,8 +351,7 @@ fun AboutScreen(
                             accent = accent,
                         ) {
                             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                AboutSpecRow(strings.appVersionLabel, BuildConfig.VERSION_NAME, accent)
-                                AboutSpecRow(strings.aboutBuildLabel, BuildConfig.VERSION_CODE.toString(), accent)
+                                AboutSpecRow(strings.appVersionLabel, "v${BuildConfig.VERSION_NAME}", accent)
                                 AboutSpecRow(strings.aboutSpecAudioEngineLabel, "AndroidX Media3 / ExoPlayer", accent)
                                 AboutSpecRow(strings.aboutSpecUiStackLabel, "Jetpack Compose + Material 3", accent)
                                 AboutSpecRow(strings.aboutSpecStorageLabel, "Room SQLite + DataStore", accent)
@@ -376,7 +373,17 @@ fun AboutScreen(
                             accent = accent,
                         ) {
                             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                AboutSpecRow(strings.aboutCreditCreatorLabel, strings.aboutCreditCreatorValue, accent)
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .clickable {
+                                            runCatching { uriHandler.openUri("https://t.me/tylerw1nston") }
+                                        }
+                                        .padding(vertical = 2.dp),
+                                ) {
+                                    AboutSpecRow(strings.aboutCreditCreatorLabel, strings.aboutCreditCreatorValue, accent)
+                                }
                                 AboutSpecRow(strings.aboutCreditStreamingLabel, strings.aboutCreditStreamingValue, accent)
                                 AboutSpecRow(strings.aboutCreditUiLabel, strings.aboutCreditUiValue, accent)
                             }
