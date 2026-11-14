@@ -70,7 +70,7 @@ val SoundLapaShapes = Shapes(
 @Composable
 fun SoundLapaTheme(
     darkTheme: Boolean = true,
-    accentColor: Color = SoundLapaEmerald,
+    accentColor: Color = SoundLapaPurple,
     content: @Composable () -> Unit,
 ) {
     val colorScheme = remember(darkTheme, accentColor) {

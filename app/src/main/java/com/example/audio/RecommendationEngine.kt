@@ -228,74 +228,61 @@ object RecommendationEngine {
         }
 
         val hasPersonalSignals = artistWeights.isNotEmpty() || genreWeights.isNotEmpty() || tokenWeights.isNotEmpty()
-        val recentTopIds = listeningHistory.take(2).mapTo(HashSet()) { it.trackId }
 
-        val scored = allTracks.map { track ->
-            val plays = track.playCount.coerceAtLeast(0)
-            val likes = track.likeCount.coerceAtLeast(0)
-            val popularityScore = ln((plays + 1).toDouble()).toFloat() * 14f +
-                ln((likes + 1).toDouble()).toFloat() * 5f +
-                when {
-                    plays >= 100_000 -> 26f
-                    plays >= 10_000 -> 14f
-                    plays >= 1_000 -> 6f
-                    else -> 0f
-                }
-
-            var score = popularityScore
-            if (track.isUserUpload && plays < 10) {
-                score -= 40f
-            }
-
-            if (hasPersonalSignals) {
-                val normArtist = normalizeKey(track.artist)
-                val normGenre = normalizeKey(track.genre)
-                val trackTokens = tokenize("${track.title} ${track.artist}")
-                val artistTokens = tokenize(track.artist)
-
-                val directArtistWeight = artistWeights[normArtist] ?: 0f
-                val artistTokenOverlap = artistTokens.sumOf { (tokenWeights[it] ?: 0f).toDouble() }.toFloat()
-                val genreWeight = genreWeights[normGenre] ?: 0f
-                val tokenMatchScore = trackTokens.sumOf { (tokenWeights[it] ?: 0f).toDouble() }.toFloat()
-
-                val tasteSimilarity = directArtistWeight * 22f +
-                    artistTokenOverlap * 12f +
-                    genreWeight * 18f +
-                    tokenMatchScore * 9f
-
-                // Reward tracks that are BOTH genuinely popular AND match the user's taste
-                val popularityGate = if (plays >= 500 || likes >= 20) 1.0f else 0.35f
-                score += tasteSimilarity * popularityGate
-
-                if (track.id in recentTopIds) {
-                    score -= 18f
-                }
-            }
-
-            track to score
-        }.sortedByDescending { it.second }
+        // Rank candidates primarily by real Spotify play counts (and verified stream counts),
+        // giving a slight tie-break / selection preference to Spotify-verified and taste-matching popular hits.
+        val rankedCandidates = allTracks
+            .filter { !(it.isUserUpload && it.playCount < 10) }
+            .sortedWith(
+                compareByDescending<TrackEntity> {
+                    val isSpotifyStat = it.id.startsWith("sp_") || it.description.contains("Spotify", ignoreCase = true)
+                    if (isSpotifyStat && it.playCount >= 10_000) 1 else 0
+                }.thenByDescending { track ->
+                    val tasteBoost = if (hasPersonalSignals) {
+                        val normArtist = normalizeKey(track.artist)
+                        val normGenre = normalizeKey(track.genre)
+                        val directArtist = artistWeights[normArtist] ?: 0f
+                        val genreWeight = genreWeights[normGenre] ?: 0f
+                        if (track.playCount >= 50_000 && (directArtist > 0f || genreWeight > 0f)) {
+                            (track.playCount * 0.12).toLong()
+                        } else {
+                            0L
+                        }
+                    } else {
+                        0L
+                    }
+                    track.playCount.toLong() + tasteBoost
+                }.thenByDescending { it.likeCount },
+            )
 
         val picked = mutableListOf<TrackEntity>()
+        val seenTitles = HashSet<String>()
         val artistCounts = HashMap<String, Int>()
-        for ((track, _) in scored) {
+        for (track in rankedCandidates) {
             if (picked.size >= limit) break
-            val key = normalizeKey(track.artist).ifBlank { track.id }
-            val count = artistCounts[key] ?: 0
+            val titleKey = normalizeKey(track.title)
+            if (titleKey.isNotBlank() && !seenTitles.add(titleKey)) continue
+            val artistKey = normalizeKey(track.artist.substringBefore(",").trim()).ifBlank { track.id }
+            val count = artistCounts[artistKey] ?: 0
             if (count < 2) {
                 picked += track
-                artistCounts[key] = count + 1
+                artistCounts[artistKey] = count + 1
             }
         }
         if (picked.size < limit) {
             val pickedIds = picked.mapTo(HashSet()) { it.id }
-            for ((track, _) in scored) {
+            for (track in rankedCandidates) {
                 if (picked.size >= limit) break
                 if (track.id !in pickedIds) {
                     picked += track
                 }
             }
         }
-        return picked
+        // Final Trending display order strictly sorted from highest playCount to lowest
+        return picked.sortedWith(
+            compareByDescending<TrackEntity> { it.playCount }
+                .thenByDescending { it.likeCount },
+        )
     }
 
     private fun addArtistSignal(

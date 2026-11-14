@@ -1,6 +1,8 @@
 package com.example.audio
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.provider.OpenableColumns
@@ -88,18 +90,51 @@ class AudioCacheManager(
 
     suspend fun saveCustomCover(trackId: String, imageUri: Uri): String? = withContext(Dispatchers.IO) {
         val coverFile = File(coverCacheDir, "${trackId}_${System.currentTimeMillis()}.jpg")
-        val copied = runCatching {
-            context.contentResolver.openInputStream(imageUri)?.use { input ->
-                FileOutputStream(coverFile).use { output ->
-                    input.copyTo(output, bufferSize = 16 * 1024)
-                }
-            }
-            coverFile.exists() && coverFile.length() > 0L
+        val saved = runCatching {
+            val rawBytes = context.contentResolver.openInputStream(imageUri)?.use { it.readBytes() }
+                ?: return@runCatching false
+            writeCompressedCoverBytes(rawBytes, coverFile)
         }.getOrDefault(false)
-        if (copied) coverFile.absolutePath else {
+        if (saved) coverFile.absolutePath else {
             coverFile.delete()
             null
         }
+    }
+
+    private fun writeCompressedCoverBytes(rawBytes: ByteArray, destFile: File, maxDimPx: Int = 360): Boolean {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, bounds)
+        val w = bounds.outWidth
+        val h = bounds.outHeight
+        if (w <= 0 || h <= 0) {
+            FileOutputStream(destFile).use { it.write(rawBytes) }
+            return destFile.exists() && destFile.length() > 0L
+        }
+        var sample = 1
+        while (maxOf(w / sample, h / sample) > maxDimPx) {
+            sample *= 2
+        }
+        val decoded = BitmapFactory.decodeByteArray(
+            rawBytes,
+            0,
+            rawBytes.size,
+            BitmapFactory.Options().apply { inSampleSize = sample },
+        ) ?: return false
+        val scaleRatio = maxOf(decoded.width, decoded.height).toFloat() / maxDimPx.toFloat()
+        val finalBmp = if (scaleRatio > 1.15f) {
+            val newW = (decoded.width / scaleRatio).toInt().coerceAtLeast(1)
+            val newH = (decoded.height / scaleRatio).toInt().coerceAtLeast(1)
+            Bitmap.createScaledBitmap(decoded, newW, newH, true).also {
+                if (it != decoded) decoded.recycle()
+            }
+        } else {
+            decoded
+        }
+        FileOutputStream(destFile).use { out ->
+            finalBmp.compress(Bitmap.CompressFormat.JPEG, 76, out)
+        }
+        finalBmp.recycle()
+        return destFile.exists() && destFile.length() > 0L
     }
 
     suspend fun inspectUriMetadata(uri: Uri): ImportPreviewMetadata = withContext(Dispatchers.IO) {
@@ -148,8 +183,8 @@ class AudioCacheManager(
         artistOverride: String? = null,
         genre: String = "Мои треки",
         description: String = "",
-        accentColorHex: Long = 0xFFFF5500,
-        secondaryColorHex: Long = 0xFF9C2B00,
+        accentColorHex: Long = 0xFF8B5CF6L,
+        secondaryColorHex: Long = 0xFFA78BFAL,
         isAutoImported: Boolean = false,
     ): TrackEntity? = withContext(Dispatchers.IO) {
         val uriString = uri.toString()
@@ -190,8 +225,11 @@ class AudioCacheManager(
             val embeddedPic = retriever.embeddedPicture
             if (embeddedPic != null && embeddedPic.isNotEmpty()) {
                 val coverFile = File(coverCacheDir, "$trackId.jpg")
-                FileOutputStream(coverFile).use { it.write(embeddedPic) }
-                coverPath = coverFile.absolutePath
+                if (writeCompressedCoverBytes(embeddedPic, coverFile)) {
+                    coverPath = coverFile.absolutePath
+                } else {
+                    coverFile.delete()
+                }
             }
         } catch (_: Exception) {
             // Keep metadata fallback
@@ -236,10 +274,10 @@ class AudioCacheManager(
 
         val supportedExtensions = setOf("mp3", "wav", "m4a", "aac", "ogg", "flac", "opus")
         val palettePairs = listOf(
-            0xFFFF5500L to 0xFF9C2B00L,
-            0xFF5CE1E6L to 0xFFA78BFAL,
-            0xFFFF9248L to 0xFFFB7185L,
+            0xFF8B5CF6L to 0xFFA78BFAL,
+            0xFF5CE1E6L to 0xFF8B5CF6L,
             0xFF34D399L to 0xFF5CE1E6L,
+            0xFFFF9248L to 0xFFFB7185L,
         )
 
         var scanned = 0

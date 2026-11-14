@@ -5,21 +5,37 @@ import android.net.Uri
 import androidx.compose.runtime.Immutable
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.BuildConfig
 import com.example.SoundLapaApplication
 import com.example.audio.AutoSyncResult
 import com.example.audio.ImportPreviewMetadata
 import com.example.audio.RecommendationEngine
+import com.example.data.local.LocalBugReport
 import com.example.data.local.PlaylistEntity
 import com.example.data.local.PlaylistTrackCrossRef
 import com.example.data.local.PlaylistWithTracks
 import com.example.data.local.SoundLapaSettings
 import com.example.data.local.TrackEntity
 import com.example.data.remote.ArtistAlbumItem
+import com.example.data.remote.AvatarModerationService
+import com.example.data.remote.AvatarModerationVerdict
+import com.example.data.remote.CloudBugReport
+import com.example.data.remote.CloudLibraryRepository
+import com.example.data.remote.CloudSavedTrack
+import com.example.data.remote.CloudStorageStats
+import com.example.data.remote.CloudUserPlaylist
+import com.example.data.remote.CloudUserProfile
+import com.example.data.remote.DEFAULT_CLOUD_QUOTA_BYTES
+import com.example.data.remote.DEVELOPER_REPORTS_PASSWORD
+import com.example.data.remote.estimateBugReportBytes
+import com.example.data.remote.estimateUserCloudStorageBytes
 import com.example.data.remote.FullStreamResolver
 import com.example.data.remote.NetworkConnectivityObserver
 import com.example.data.remote.SearchArtistProfile
 import com.example.data.remote.isTrackPlayableOffline
 import com.example.player.PlaybackUiState
+import com.example.ui.components.compressAvatarToDataUrl
+import com.example.ui.components.decodeAvatarBitmapForModeration
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -85,10 +101,58 @@ data class HomeUiState(
     val searchQuery: String = "",
     val isSearching: Boolean = false,
     val isRefreshingTrending: Boolean = false,
+    val isRefreshingHome: Boolean = false,
     val currentTrackId: String? = null,
     val isPlaying: Boolean = false,
     val isOnline: Boolean = true,
     val offlineTracksCount: Int = 0,
+)
+
+@Immutable
+data class CloudSyncUiState(
+    val userId: String? = null,
+    val displayName: String? = null,
+    val email: String? = null,
+    val photoUrl: String? = null,
+    val bio: String? = null,
+    val avatarBlocked: Boolean = false,
+    val isGuest: Boolean = false,
+    val isSyncing: Boolean = false,
+    val isSavingProfile: Boolean = false,
+    val syncedTracksCount: Int = 0,
+    val syncedPlaylistsCount: Int = 0,
+    val statusMessage: String? = null,
+    val profileStatusMessage: String? = null,
+)
+
+@Immutable
+data class BugReportItemUi(
+    val reportId: String,
+    val docId: String = "",
+    val reporterName: String,
+    val reporterAvatarUrl: String? = null,
+    val message: String,
+    val appVersion: String,
+    val createdAtMs: Long,
+)
+
+@Immutable
+data class BugReportUiState(
+    val isSubmitting: Boolean = false,
+    val statusMessage: String? = null,
+    val savedOfflineOnly: Boolean = false,
+)
+
+@Immutable
+data class DeveloperModeUiState(
+    val isUnlocked: Boolean = false,
+    val wrongPasswordError: Boolean = false,
+    val isLoadingReports: Boolean = false,
+    val isLoadingStorageStats: Boolean = false,
+    val deletingReportIds: Set<String> = emptySet(),
+    val reports: List<BugReportItemUi> = emptyList(),
+    val cloudStorageStats: CloudStorageStats = CloudStorageStats(),
+    val errorMessage: String? = null,
 )
 
 @Immutable
@@ -106,6 +170,9 @@ data class MainUiState(
     val settings: SoundLapaSettings = SoundLapaSettings(),
     val upload: UploadUiState = UploadUiState(),
     val audius: AudiusUiState = AudiusUiState(),
+    val cloudSync: CloudSyncUiState = CloudSyncUiState(),
+    val bugReport: BugReportUiState = BugReportUiState(),
+    val developerMode: DeveloperModeUiState = DeveloperModeUiState(),
     val cacheSizeBytes: Long = 0L,
     val isClearingCache: Boolean = false,
     val cacheStatusMessage: String? = null,
@@ -122,7 +189,7 @@ data class ArtistProfileUiState(
     val isVisible: Boolean = false,
     val artistName: String = "",
     val avatarUrl: String? = null,
-    val accentColorHex: Long = 0xFF10B981L,
+    val accentColorHex: Long = 0xFF8B5CF6L,
     val secondaryColorHex: Long = 0xFF5CE1E6L,
     val isLoading: Boolean = false,
     val tracks: List<TrackEntity> = emptyList(),
@@ -132,7 +199,15 @@ data class ArtistProfileUiState(
     val isLoadingAlbum: Boolean = false,
 )
 
-class SoundLapaViewModel(application: Application) : AndroidViewModel(application) {
+class SoundLapaViewModel(
+    application: Application,
+    private val cloudRepository: CloudLibraryRepository? = null,
+    private val cloudUserId: String? = null,
+    cloudDisplayName: String? = null,
+    cloudEmail: String? = null,
+    private val cloudPhotoUrl: String? = null,
+    private val isGuestMode: Boolean = false,
+) : AndroidViewModel(application) {
 
     private val app = application as SoundLapaApplication
     private val dao = app.dao
@@ -148,7 +223,29 @@ class SoundLapaViewModel(application: Application) : AndroidViewModel(applicatio
     private val _isSearchActive = MutableStateFlow(false)
     private val _uploadState = MutableStateFlow(UploadUiState())
     private val _audiusState = MutableStateFlow(AudiusUiState())
+    private val _cloudSyncState = MutableStateFlow(
+        CloudSyncUiState(
+            userId = cloudUserId,
+            displayName = if (isGuestMode) {
+                null
+            } else {
+                preferences.currentSettings().customDisplayName ?: cloudDisplayName
+            },
+            email = if (isGuestMode) null else cloudEmail,
+            photoUrl = if (isGuestMode || preferences.currentSettings().avatarModerationBlocked) {
+                null
+            } else {
+                preferences.currentSettings().customAvatarData ?: cloudPhotoUrl
+            },
+            bio = if (isGuestMode) null else preferences.currentSettings().customBio,
+            avatarBlocked = !isGuestMode && preferences.currentSettings().avatarModerationBlocked,
+            isGuest = isGuestMode,
+        ),
+    )
+    private val _bugReportState = MutableStateFlow(BugReportUiState())
+    private val _developerModeState = MutableStateFlow(DeveloperModeUiState())
     private val _isRefreshingRecommendations = MutableStateFlow(false)
+    private val _isRefreshingHome = MutableStateFlow(false)
     private val _cacheSizeBytes = MutableStateFlow(0L)
     private val _isClearingCache = MutableStateFlow(false)
     private val _cacheStatusMessage = MutableStateFlow<String?>(null)
@@ -172,11 +269,14 @@ class SoundLapaViewModel(application: Application) : AndroidViewModel(applicatio
 
     private var lastAutoSeedKey: String? = null
     private var initialPrefetchDone: Boolean = false
+    private var lastAutoSyncedTreeUri: String? = null
 
     private var searchJob: Job? = null
     private var artistProfileJob: Job? = null
     private var albumLoadJob: Job? = null
     private var reconnectedBannerJob: Job? = null
+    private var settingsSyncJob: Job? = null
+    private var metricsSyncJob: Job? = null
 
     val availableFilters = listOf(
         "Все",
@@ -192,10 +292,10 @@ class SoundLapaViewModel(application: Application) : AndroidViewModel(applicatio
     )
 
     val uploadPalettes = listOf(
-        0xFFFF5500L to 0xFF9C2B00L,
+        0xFF8B5CF6L to 0xFFA78BFAL,
         0xFF5CE1E6L to 0xFFA78BFAL,
-        0xFFFF9248L to 0xFFFB7185L,
         0xFF34D399L to 0xFF5CE1E6L,
+        0xFFFF9248L to 0xFFFB7185L,
     )
 
     private data class TracksFilterSnapshot(
@@ -218,6 +318,9 @@ class SoundLapaViewModel(application: Application) : AndroidViewModel(applicatio
         val isOnline: Boolean,
         val showOfflineDialog: Boolean,
         val offlineDialogTrackTitle: String?,
+        val cloudSync: CloudSyncUiState,
+        val bugReport: BugReportUiState,
+        val developerMode: DeveloperModeUiState,
     )
 
     private val offlineUiFlow = combine(
@@ -235,6 +338,9 @@ class SoundLapaViewModel(application: Application) : AndroidViewModel(applicatio
         _isImportingPlaylist,
         _importStatusMessage,
         offlineUiFlow,
+        _cloudSyncState,
+        _bugReportState,
+        _developerModeState,
     ) { values ->
         val cacheBytes = values[0] as Long
         val clearing = values[1] as Boolean
@@ -243,6 +349,9 @@ class SoundLapaViewModel(application: Application) : AndroidViewModel(applicatio
         val importMsg = values[4] as String?
         @Suppress("UNCHECKED_CAST")
         val offline = values[5] as Triple<Boolean, Boolean, String?>
+        val cloudSync = values[6] as CloudSyncUiState
+        val bugReport = values[7] as BugReportUiState
+        val developerMode = values[8] as DeveloperModeUiState
         UtilityStatusSnapshot(
             cacheSizeBytes = cacheBytes,
             isClearingCache = clearing,
@@ -252,8 +361,52 @@ class SoundLapaViewModel(application: Application) : AndroidViewModel(applicatio
             isOnline = offline.first,
             showOfflineDialog = offline.second,
             offlineDialogTrackTitle = offline.third,
+            cloudSync = cloudSync,
+            bugReport = bugReport,
+            developerMode = developerMode,
         )
     }
+
+    private data class RecommendationSnapshot(
+        val quickPickRows: List<List<TrackEntity>>,
+        val trendingCarousel: List<TrackEntity>,
+        val recommendedTracks: List<TrackEntity>,
+        val recommendationSeedArtists: List<String>,
+        val homeRecTracks: List<TrackEntity>,
+    )
+
+    private val recommendationsFlow = combine(
+        dao.observeAllTracks(),
+        preferences.settings
+            .map { it.listeningHistory to it.searchHistory }
+            .distinctUntilChanged(),
+    ) { tracks, (listeningHistory, searchHistory) ->
+        val persistedById = tracks.associateBy { it.id }
+        val recResult = RecommendationEngine.computeRecommendations(
+            allTracks = tracks,
+            listeningHistory = listeningHistory,
+            searchHistory = searchHistory,
+            limit = tracks.size.coerceAtLeast(12),
+        )
+        val recentTracks = listeningHistory
+            .sortedByDescending { it.lastPlayedAtMs }
+            .mapNotNull { entry -> persistedById[entry.trackId] }
+            .distinctBy { it.id }
+            .take(4)
+        val trendingCarousel = RecommendationEngine.computeTrendingSimilarTracks(
+            allTracks = tracks,
+            listeningHistory = listeningHistory,
+            searchHistory = searchHistory,
+            limit = 6,
+        )
+        RecommendationSnapshot(
+            quickPickRows = recentTracks.chunked(2),
+            trendingCarousel = trendingCarousel,
+            recommendedTracks = recResult.tracks.take(12),
+            recommendationSeedArtists = recResult.topSeedArtists,
+            homeRecTracks = recResult.tracks,
+        )
+    }.flowOn(Dispatchers.Default)
 
     private val tracksAndFiltersFlow = combine(
         dao.observeAllTracks(),
@@ -261,7 +414,7 @@ class SoundLapaViewModel(application: Application) : AndroidViewModel(applicatio
         _searchQuery,
         _isSearchActive,
         _audiusState,
-        preferences.settings,
+        recommendationsFlow,
     ) { values ->
         @Suppress("UNCHECKED_CAST")
         val tracks = values[0] as List<TrackEntity>
@@ -269,7 +422,7 @@ class SoundLapaViewModel(application: Application) : AndroidViewModel(applicatio
         val query = values[2] as String
         val searchActive = values[3] as Boolean
         val audius = values[4] as AudiusUiState
-        val settings = values[5] as SoundLapaSettings
+        val recs = values[5] as RecommendationSnapshot
 
         val trimmedQuery = query.trim().lowercase()
         val homeQuery = if (searchActive) trimmedQuery else ""
@@ -310,37 +463,18 @@ class SoundLapaViewModel(application: Application) : AndroidViewModel(applicatio
             localMatches + resolvedSearchResults.filter { it.id !in localIds }
         }
 
-        val recResult = RecommendationEngine.computeRecommendations(
-            allTracks = tracks,
-            listeningHistory = settings.listeningHistory,
-            searchHistory = settings.searchHistory,
-            limit = tracks.size.coerceAtLeast(12),
-        )
-        val recentTracks = settings.listeningHistory
-            .sortedByDescending { it.lastPlayedAtMs }
-            .mapNotNull { entry -> persistedById[entry.trackId] }
-            .distinctBy { it.id }
-            .take(4)
-        val quickPickRows = recentTracks.chunked(2)
-        val trendingCarousel = RecommendationEngine.computeTrendingSimilarTracks(
-            allTracks = tracks,
-            listeningHistory = settings.listeningHistory,
-            searchHistory = settings.searchHistory,
-            limit = 6,
-        )
-        val recommendedTracks = recResult.tracks.take(12)
         val finalHomeTracks = if (!searchActive && filter == "Все") {
-            recResult.tracks
+            recs.homeRecTracks
         } else {
             mergedHome
         }
 
         TracksFilterSnapshot(
             allTracks = tracks,
-            quickPickRows = quickPickRows,
-            trendingCarousel = trendingCarousel,
-            recommendedTracks = recommendedTracks,
-            recommendationSeedArtists = recResult.topSeedArtists,
+            quickPickRows = recs.quickPickRows,
+            trendingCarousel = recs.trendingCarousel,
+            recommendedTracks = recs.recommendedTracks,
+            recommendationSeedArtists = recs.recommendationSeedArtists,
             filteredTracks = finalHomeTracks,
             searchScreenResults = searchScreenMatches,
             selectedFilter = filter,
@@ -354,6 +488,7 @@ class SoundLapaViewModel(application: Application) : AndroidViewModel(applicatio
         _audiusState,
         playbackController.playbackState,
         _isRefreshingRecommendations,
+        _isRefreshingHome,
         networkObserver.isOnline,
     ) { values ->
         val snapshot = values[0] as TracksFilterSnapshot
@@ -362,7 +497,8 @@ class SoundLapaViewModel(application: Application) : AndroidViewModel(applicatio
         val audius = values[3] as AudiusUiState
         val playback = values[4] as PlaybackUiState
         val refreshingRecs = values[5] as Boolean
-        val isOnline = values[6] as Boolean
+        val refreshingHome = values[6] as Boolean
+        val isOnline = values[7] as Boolean
         val offlineCount = snapshot.allTracks.count { isTrackPlayableOffline(it) }
         HomeUiState(
             quickPickRows = snapshot.quickPickRows,
@@ -376,6 +512,7 @@ class SoundLapaViewModel(application: Application) : AndroidViewModel(applicatio
             searchQuery = query,
             isSearching = audius.isSearching,
             isRefreshingTrending = audius.isRefreshingTrending,
+            isRefreshingHome = refreshingHome,
             currentTrackId = playback.currentTrackId,
             isPlaying = playback.isPlaying,
             isOnline = isOnline,
@@ -429,11 +566,16 @@ class SoundLapaViewModel(application: Application) : AndroidViewModel(applicatio
             ?: tracks.find { it.id == settings.lastPlayedTrackId }
             ?: tracks.firstOrNull()
 
-        val artistMatches = buildSearchArtistMatches(
-            rawQuery = _searchQuery.value,
-            remoteProfiles = audius.searchArtistProfiles,
-            allTracks = tracks + audius.searchResults,
-        )
+        val trimmedSearchQuery = _searchQuery.value.trim()
+        val artistMatches = if (trimmedSearchQuery.length >= 2) {
+            buildSearchArtistMatches(
+                rawQuery = trimmedSearchQuery,
+                remoteProfiles = audius.searchArtistProfiles,
+                allTracks = tracks + audius.searchResults,
+            )
+        } else {
+            emptyList()
+        }
 
         val offlineCount = tracks.count { isTrackPlayableOffline(it) }
 
@@ -451,6 +593,9 @@ class SoundLapaViewModel(application: Application) : AndroidViewModel(applicatio
             settings = settings,
             upload = upload,
             audius = audius,
+            cloudSync = utility.cloudSync,
+            bugReport = utility.bugReport,
+            developerMode = utility.developerMode,
             cacheSizeBytes = utility.cacheSizeBytes,
             isClearingCache = utility.isClearingCache,
             cacheStatusMessage = utility.cacheStatusMessage,
@@ -536,9 +681,57 @@ class SoundLapaViewModel(application: Application) : AndroidViewModel(applicatio
                 }
         }
         refreshCacheSize()
+        if (!isGuestMode && cloudRepository != null && !cloudUserId.isNullOrBlank()) {
+            viewModelScope.launch {
+                val previousUid = preferences.currentSettings().lastCloudUserId
+                val wasGuest = preferences.currentSettings().isGuestMode || previousUid.isNullOrBlank()
+                val isAccountSwitch = !previousUid.isNullOrBlank() && previousUid != cloudUserId
+                if (isAccountSwitch && !wasGuest) {
+                    kotlinx.coroutines.withContext(Dispatchers.IO) {
+                        dao.clearAllPlaylists()
+                        dao.clearAllTrackLikes()
+                    }
+                    preferences.setAvatarModerationBlocked(false)
+                    preferences.setCustomProfile(null, null, null)
+                }
+                if (preferences.currentSettings().isGuestMode) {
+                    preferences.setGuestMode(false)
+                }
+                preferences.setLastCloudUserId(cloudUserId)
+                // Always sync profile + settings + guest data on first login or transition from guest
+                if (!preferences.hasCompletedInitialCloudSync(cloudUserId) || isAccountSwitch || wasGuest) {
+                    syncCloudLibraryNow()
+                } else {
+                    val profileResult = cloudRepository.getUserProfile()
+                    profileResult.getOrNull()?.let { profile ->
+                        applyLoadedCloudProfileAndSettings(profile)
+                    }
+                    flushPendingBugReportsToCloud()
+                    val (savedCount, playlistsCount) = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                        val allTracks = dao.getAllTracksOnce()
+                        val playlists = dao.getAllPlaylistsOnce()
+                        val refs = dao.getAllPlaylistRefsOnce()
+                        val referencedIds = refs.mapTo(HashSet()) { it.trackId }
+                        val count = allTracks.count { it.isLiked || it.isUserUpload || it.id in referencedIds }
+                        count to playlists.size
+                    }
+                    _cloudSyncState.update {
+                        it.copy(
+                            userId = cloudUserId,
+                            syncedTracksCount = savedCount,
+                            syncedPlaylistsCount = playlistsCount,
+                        )
+                    }
+                }
+            }
+        }
         viewModelScope.launch {
-            val existingCount = kotlinx.coroutines.withContext(Dispatchers.IO) {
-                dao.getAllTracksOnce().size
+            val (existingCount, lastRefreshMs) = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                dao.getTrackCount() to preferences.currentSettings().lastTrendingRefreshMs
+            }
+            val twelveHoursMs = 12L * 3600_000L
+            if (existingCount >= 18 && System.currentTimeMillis() - lastRefreshMs < twelveHoursMs) {
+                return@launch
             }
             if (existingCount > 6) {
                 delay(1800L)
@@ -716,9 +909,621 @@ class SoundLapaViewModel(application: Application) : AndroidViewModel(applicatio
         if (!networkObserver.refresh()) return
         viewModelScope.launch {
             _audiusState.update { it.copy(isRefreshingTrending = true) }
-            audiusRepository.fetchTrendingTracks()
+            val seedArtists = preferences.currentSettings().listeningHistory
+                .take(3)
+                .map { it.artist }
+                .filter { it.isNotBlank() }
+                .distinct()
+            audiusRepository.fetchTrendingTracks(seedArtists = seedArtists)
+            preferences.setLastTrendingRefreshMs(System.currentTimeMillis())
             _audiusState.update { it.copy(isRefreshingTrending = false) }
             refreshCacheSize()
+        }
+    }
+
+    fun refreshHomeFeed() {
+        if (_isRefreshingHome.value) return
+        if (!networkObserver.refresh()) {
+            _offlineDialogTrackTitle.value = null
+            _showOfflineDialog.value = true
+            return
+        }
+        viewModelScope.launch {
+            _isRefreshingHome.value = true
+            val startedAt = System.currentTimeMillis()
+            try {
+                val settings = preferences.currentSettings()
+                val seedArtists = settings.listeningHistory
+                    .take(3)
+                    .map { it.artist }
+                    .filter { it.isNotBlank() }
+                    .distinct()
+                runCatching {
+                    audiusRepository.fetchTrendingTracks(seedArtists = seedArtists)
+                }
+                runCatching {
+                    val tracks = dao.getAllTracksOnce()
+                    val rec = RecommendationEngine.computeRecommendations(
+                        allTracks = tracks,
+                        listeningHistory = settings.listeningHistory,
+                        searchHistory = settings.searchHistory,
+                        limit = 12,
+                    )
+                    if (rec.onlineSeedQueries.isNotEmpty() && !settings.dataSaverEnabled) {
+                        audiusRepository.fetchSimilarTracksForQueries(
+                            queries = rec.onlineSeedQueries,
+                            perQueryLimit = 5,
+                        )
+                    }
+                }
+                preferences.setLastTrendingRefreshMs(System.currentTimeMillis())
+                refreshCacheSize()
+            } finally {
+                val elapsed = System.currentTimeMillis() - startedAt
+                if (elapsed < 380L) {
+                    delay(380L - elapsed)
+                }
+                _isRefreshingHome.value = false
+            }
+        }
+    }
+
+    private suspend fun applyLoadedCloudProfileAndSettings(profile: com.example.data.remote.CloudUserProfile) {
+        val local = preferences.currentSettings()
+        val resolvedName = profile.displayName.takeIf { it.isNotBlank() } ?: _cloudSyncState.value.displayName
+        val isBlocked = profile.avatarBlocked || local.avatarModerationBlocked
+        val resolvedPhoto = if (isBlocked) {
+            null
+        } else {
+            profile.photoUrl?.takeIf { it.isNotBlank() } ?: _cloudSyncState.value.photoUrl
+        }
+        val resolvedBio = profile.bio
+        if (isBlocked) {
+            preferences.setAvatarModerationBlocked(true)
+            if (!profile.avatarBlocked || !profile.photoUrl.isNullOrBlank()) {
+                cloudRepository?.revokeBlockedAvatar(
+                    email = profile.email ?: _cloudSyncState.value.email,
+                    displayName = resolvedName,
+                )
+            }
+        }
+        preferences.setCustomProfile(
+            displayName = resolvedName,
+            bio = resolvedBio,
+            avatarData = resolvedPhoto,
+        )
+        _cloudSyncState.update {
+            it.copy(
+                displayName = resolvedName,
+                photoUrl = resolvedPhoto,
+                bio = resolvedBio,
+                avatarBlocked = isBlocked,
+                email = profile.email ?: it.email,
+            )
+        }
+        val cloudSettings = profile.parsedSettings()
+        if (cloudSettings != null && (local.settingsUpdatedAtMs == 0L || cloudSettings.updatedAtMs >= local.settingsUpdatedAtMs)) {
+            FullStreamResolver.isDataSaverEnabled = cloudSettings.dataSaverEnabled
+            preferences.applySyncedAccountSettings(
+                appLanguage = cloudSettings.appLanguage,
+                darkLiquidGlass = cloudSettings.darkLiquidGlass,
+                accentColorArgb = cloudSettings.accentColorArgb,
+                smoothTransitionEnabled = cloudSettings.smoothTransitionEnabled,
+                smoothTransitionDurationSec = cloudSettings.smoothTransitionDurationSec,
+                hapticsEnabled = cloudSettings.hapticsEnabled,
+                hapticIntensity = cloudSettings.hapticIntensity,
+                autoCacheOnPlay = cloudSettings.autoCacheOnPlay,
+                dataSaverEnabled = cloudSettings.dataSaverEnabled,
+                autoUploadEnabled = cloudSettings.autoUploadEnabled,
+                updatedAtMs = cloudSettings.updatedAtMs,
+            )
+        }
+    }
+
+    private suspend fun flushPendingBugReportsToCloud() {
+        val repo = cloudRepository ?: return
+        val uid = cloudUserId?.takeIf { it.isNotBlank() } ?: return
+        val unsynced = preferences.currentSettings().pendingBugReports.filter { !it.isSyncedToCloud }
+        for (item in unsynced) {
+            val res = repo.submitBugReport(
+                CloudBugReport(
+                    reportId = item.reportId,
+                    userId = uid,
+                    reporterName = item.reporterName,
+                    reporterAvatarUrl = item.reporterAvatarUrl,
+                    message = item.message,
+                    appVersion = item.appVersion,
+                    createdAtMs = item.createdAtMs,
+                ),
+            )
+            if (res.isSuccess) {
+                preferences.markBugReportSynced(item.reportId)
+            }
+        }
+    }
+
+    fun syncCloudLibraryNow() {
+        val repo = cloudRepository ?: return
+        val uid = cloudUserId?.takeIf { it.isNotBlank() } ?: return
+        if (_cloudSyncState.value.isSyncing) return
+        viewModelScope.launch {
+            _cloudSyncState.update { it.copy(isSyncing = true, statusMessage = null) }
+            val currentState = _cloudSyncState.value
+            val localSettings = preferences.currentSettings()
+            val profileResult = repo.upsertUserProfile(
+                displayName = currentState.displayName,
+                email = currentState.email,
+                photoUrl = currentState.photoUrl ?: cloudPhotoUrl,
+                localSettings = localSettings,
+            )
+            profileResult.getOrNull()?.let { loadedProfile ->
+                applyLoadedCloudProfileAndSettings(loadedProfile)
+            }
+            val result = repo.syncWithLocalDatabase(dao)
+            flushPendingBugReportsToCloud()
+            if (result.isSuccess) {
+                preferences.markInitialCloudSyncCompleted(uid)
+            }
+            _cloudSyncState.update { state ->
+                result.fold(
+                    onSuccess = { summary ->
+                        state.copy(
+                            userId = uid,
+                            isSyncing = false,
+                            syncedTracksCount = summary.totalCloudTracks,
+                            syncedPlaylistsCount = summary.totalCloudPlaylists,
+                            statusMessage = null,
+                        )
+                    },
+                    onFailure = { err ->
+                        state.copy(
+                            userId = uid,
+                            isSyncing = false,
+                            statusMessage = err.localizedMessage,
+                        )
+                    },
+                )
+            }
+        }
+    }
+
+    fun updateAccountProfile(
+        displayName: String,
+        bio: String,
+        pickedAvatarUri: Uri?,
+        clearAvatar: Boolean = false,
+    ) {
+        val repo = cloudRepository ?: return
+        if (isGuestMode || cloudUserId.isNullOrBlank()) return
+        val cleanName = displayName.trim().ifBlank { "SoundLapa User" }.take(100)
+        val cleanBio = bio.trim().take(300)
+        viewModelScope.launch {
+            val alreadyBlocked = _cloudSyncState.value.avatarBlocked ||
+                preferences.currentSettings().avatarModerationBlocked
+            if (pickedAvatarUri != null && alreadyBlocked) {
+                preferences.setAvatarModerationBlocked(true)
+                preferences.setCustomProfile(
+                    displayName = _cloudSyncState.value.displayName,
+                    bio = _cloudSyncState.value.bio,
+                    avatarData = null,
+                )
+                _cloudSyncState.update {
+                    it.copy(
+                        photoUrl = null,
+                        avatarBlocked = true,
+                        isSavingProfile = false,
+                        profileStatusMessage = "blocked_18plus",
+                    )
+                }
+                return@launch
+            }
+
+            if (pickedAvatarUri != null) {
+                _cloudSyncState.update { it.copy(isSavingProfile = true, profileStatusMessage = "moderating") }
+                val moderationBitmap = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                    decodeAvatarBitmapForModeration(app, pickedAvatarUri)
+                }
+                if (moderationBitmap == null) {
+                    _cloudSyncState.update {
+                        it.copy(isSavingProfile = false, profileStatusMessage = "moderation_error")
+                    }
+                    return@launch
+                }
+                val verdict = try {
+                    AvatarModerationService.checkAvatarSafety(moderationBitmap)
+                } finally {
+                    moderationBitmap.recycle()
+                }
+                when (verdict) {
+                    is AvatarModerationVerdict.Flagged18Plus -> {
+                        preferences.setAvatarModerationBlocked(true)
+                        preferences.setCustomProfile(
+                            displayName = _cloudSyncState.value.displayName,
+                            bio = _cloudSyncState.value.bio,
+                            avatarData = null,
+                        )
+                        repo.revokeBlockedAvatar(
+                            email = _cloudSyncState.value.email,
+                            displayName = _cloudSyncState.value.displayName,
+                        )
+                        _cloudSyncState.update {
+                            it.copy(
+                                photoUrl = null,
+                                avatarBlocked = true,
+                                isSavingProfile = false,
+                                profileStatusMessage = "blocked_18plus",
+                            )
+                        }
+                        return@launch
+                    }
+                    is AvatarModerationVerdict.Error -> {
+                        _cloudSyncState.update {
+                            it.copy(
+                                isSavingProfile = false,
+                                profileStatusMessage = verdict.message.ifBlank { "moderation_error" },
+                            )
+                        }
+                        return@launch
+                    }
+                    AvatarModerationVerdict.Safe -> Unit
+                }
+            }
+
+            _cloudSyncState.update { it.copy(isSavingProfile = true, profileStatusMessage = "saving") }
+            val effectiveClear = clearAvatar || alreadyBlocked
+            val nextAvatarData = when {
+                effectiveClear -> null
+                pickedAvatarUri != null -> kotlinx.coroutines.withContext(Dispatchers.IO) {
+                    compressAvatarToDataUrl(app, pickedAvatarUri)
+                } ?: _cloudSyncState.value.photoUrl
+                else -> _cloudSyncState.value.photoUrl
+            }
+            val res = repo.updateUserCustomProfile(
+                displayName = cleanName,
+                bio = cleanBio,
+                photoUrl = nextAvatarData,
+                email = _cloudSyncState.value.email,
+                clearAvatar = effectiveClear,
+            )
+            res.onSuccess { updated ->
+                val effectiveBlocked = updated.avatarBlocked || alreadyBlocked
+                if (effectiveBlocked) {
+                    preferences.setAvatarModerationBlocked(true)
+                }
+                val finalPhoto = if (effectiveBlocked) null else updated.photoUrl
+                preferences.setCustomProfile(
+                    displayName = updated.displayName,
+                    bio = updated.bio,
+                    avatarData = finalPhoto,
+                )
+                _cloudSyncState.update {
+                    it.copy(
+                        displayName = updated.displayName,
+                        bio = updated.bio,
+                        photoUrl = finalPhoto,
+                        avatarBlocked = effectiveBlocked,
+                        isSavingProfile = false,
+                        profileStatusMessage = if (effectiveBlocked) "blocked_18plus" else "✓",
+                    )
+                }
+            }.onFailure { err ->
+                _cloudSyncState.update {
+                    it.copy(
+                        isSavingProfile = false,
+                        profileStatusMessage = err.localizedMessage ?: "Error",
+                    )
+                }
+            }
+        }
+    }
+
+    fun clearProfileStatusMessage() {
+        _cloudSyncState.update { it.copy(profileStatusMessage = null) }
+    }
+
+    fun submitBugReport(message: String) {
+        val clean = message.trim()
+        if (clean.isBlank()) return
+        viewModelScope.launch {
+            _bugReportState.update { it.copy(isSubmitting = true, statusMessage = null, savedOfflineOnly = false) }
+            val reportId = "rep_${UUID.randomUUID().toString().replace("-", "").take(20)}"
+            val now = System.currentTimeMillis()
+            val reporterName = if (isGuestMode) {
+                "Гость"
+            } else {
+                _cloudSyncState.value.displayName?.takeIf { it.isNotBlank() }
+                    ?: _cloudSyncState.value.email?.substringBefore('@')
+                    ?: "SoundLapa User"
+            }
+            val avatar = if (isGuestMode) null else _cloudSyncState.value.photoUrl
+            val localReport = LocalBugReport(
+                reportId = reportId,
+                reporterName = reporterName,
+                reporterAvatarUrl = avatar,
+                message = clean.take(2000),
+                appVersion = BuildConfig.VERSION_NAME,
+                createdAtMs = now,
+                isSyncedToCloud = false,
+            )
+            preferences.addLocalBugReport(localReport)
+
+            var syncedOnline = false
+            val repo = cloudRepository
+            val uid = cloudUserId
+            if (!isGuestMode && repo != null && !uid.isNullOrBlank()) {
+                val res = repo.submitBugReport(
+                    CloudBugReport(
+                        reportId = reportId,
+                        userId = uid,
+                        reporterName = reporterName,
+                        reporterAvatarUrl = avatar,
+                        message = clean.take(2000),
+                        appVersion = BuildConfig.VERSION_NAME,
+                        createdAtMs = now,
+                    ),
+                )
+                if (res.isSuccess) {
+                    syncedOnline = true
+                    preferences.markBugReportSynced(reportId)
+                }
+            }
+
+            _bugReportState.update {
+                it.copy(
+                    isSubmitting = false,
+                    statusMessage = "sent",
+                    savedOfflineOnly = !syncedOnline,
+                )
+            }
+            if (_developerModeState.value.isUnlocked) {
+                refreshDeveloperReports()
+            }
+        }
+    }
+
+    fun clearBugReportStatus() {
+        _bugReportState.update { it.copy(statusMessage = null, savedOfflineOnly = false) }
+    }
+
+    fun unlockDeveloperSection(passwordInput: String) {
+        if (passwordInput.trim() == DEVELOPER_REPORTS_PASSWORD) {
+            _developerModeState.update {
+                it.copy(
+                    isUnlocked = true,
+                    wrongPasswordError = false,
+                    errorMessage = null,
+                )
+            }
+            refreshDeveloperDashboard()
+        } else {
+            _developerModeState.update {
+                it.copy(
+                    isUnlocked = false,
+                    wrongPasswordError = true,
+                )
+            }
+        }
+    }
+
+    fun unlockDeveloperWithBiometrics() {
+        _developerModeState.update {
+            it.copy(
+                isUnlocked = true,
+                wrongPasswordError = false,
+                errorMessage = null,
+            )
+        }
+        refreshDeveloperDashboard()
+    }
+
+    fun lockDeveloperSection() {
+        _developerModeState.update {
+            it.copy(
+                isUnlocked = false,
+                wrongPasswordError = false,
+                errorMessage = null,
+            )
+        }
+    }
+
+    fun refreshDeveloperDashboard() {
+        refreshDeveloperReports()
+        refreshCloudStorageUsage()
+    }
+
+    fun refreshCloudStorageUsage() {
+        viewModelScope.launch {
+            _developerModeState.update { it.copy(isLoadingStorageStats = true) }
+            val repo = cloudRepository
+            val uid = cloudUserId
+            var stats: CloudStorageStats? = null
+
+            if (!isGuestMode && repo != null && !uid.isNullOrBlank()) {
+                // Ensure current user's snapshot is recorded in /cloud_metrics first
+                val profile = buildCurrentCloudProfileSnapshot(uid)
+                runCatching { repo.syncCloudMetricsFromLocal(dao, profile) }
+                stats = repo.fetchDeveloperCloudStorageStats(DEVELOPER_REPORTS_PASSWORD).getOrNull()
+            }
+
+            if (stats == null) {
+                stats = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                    computeLocalStorageStatsEstimate()
+                }
+            }
+
+            _developerModeState.update {
+                it.copy(
+                    isLoadingStorageStats = false,
+                    cloudStorageStats = stats,
+                )
+            }
+        }
+    }
+
+    private fun buildCurrentCloudProfileSnapshot(uid: String): CloudUserProfile {
+        val cs = _cloudSyncState.value
+        val s = preferences.currentSettings()
+        return CloudUserProfile(
+            docId = uid,
+            userId = uid,
+            displayName = cs.displayName ?: "SoundLapa User",
+            email = cs.email,
+            photoUrl = if (cs.avatarBlocked) null else cs.photoUrl,
+            bio = cs.bio,
+            avatarBlocked = cs.avatarBlocked,
+            settings = com.example.data.remote.CloudUserSettings.fromSoundLapaSettings(s).toMap(),
+        )
+    }
+
+    private suspend fun computeLocalStorageStatsEstimate(): CloudStorageStats {
+        val uid = cloudUserId ?: "guest_local"
+        val tracks = dao.getAllTracksOnce()
+        val playlists = dao.getAllPlaylistsOnce()
+        val refs = dao.getAllPlaylistRefsOnce()
+        val refIds = refs.mapTo(HashSet()) { it.trackId }
+        val personalTracks = tracks
+            .filter { it.isLiked || it.isUserUpload || it.id in refIds }
+            .map { CloudSavedTrack.fromTrackEntity(uid, it) }
+        val cloudPlaylists = playlists.map { CloudUserPlaylist.fromPlaylistEntity(uid, it) }
+        val pendingReports = preferences.currentSettings().pendingBugReports
+        val reportsBytes = pendingReports.sumOf { local ->
+            estimateBugReportBytes(
+                CloudBugReport(
+                    reportId = local.reportId,
+                    userId = uid,
+                    reporterName = local.reporterName,
+                    reporterAvatarUrl = local.reporterAvatarUrl,
+                    message = local.message,
+                    appVersion = local.appVersion,
+                    createdAtMs = local.createdAtMs,
+                ),
+            )
+        }
+        val userBytes = if (isGuestMode) {
+            0L
+        } else {
+            estimateUserCloudStorageBytes(
+                profile = buildCurrentCloudProfileSnapshot(uid),
+                tracks = personalTracks,
+                playlists = cloudPlaylists,
+                playlistItemsCount = refs.size,
+            )
+        }
+        return CloudStorageStats(
+            usedBytes = userBytes + reportsBytes,
+            quotaBytes = DEFAULT_CLOUD_QUOTA_BYTES,
+            activeUsersCount = if (isGuestMode) 0 else 1,
+            totalTracks = if (isGuestMode) 0 else personalTracks.size,
+            totalPlaylists = if (isGuestMode) 0 else cloudPlaylists.size,
+            totalBugReports = pendingReports.size,
+            isCloudLive = false,
+        )
+    }
+
+    fun refreshDeveloperReports() {
+        viewModelScope.launch {
+            _developerModeState.update { it.copy(isLoadingReports = true, errorMessage = null) }
+            val merged = LinkedHashMap<String, BugReportItemUi>()
+
+            val repo = cloudRepository
+            var cloudError: String? = null
+            if (!isGuestMode && repo != null && !cloudUserId.isNullOrBlank()) {
+                val res = repo.fetchDeveloperBugReports(DEVELOPER_REPORTS_PASSWORD)
+                res.onSuccess { cloudList ->
+                    cloudList.forEach { c ->
+                        merged[c.reportId] = BugReportItemUi(
+                            reportId = c.reportId,
+                            docId = c.docId.ifBlank { c.reportId },
+                            reporterName = c.reporterName.ifBlank { "User" },
+                            reporterAvatarUrl = c.reporterAvatarUrl,
+                            message = c.message,
+                            appVersion = c.appVersion,
+                            createdAtMs = c.createdAtMs,
+                        )
+                    }
+                }.onFailure { err ->
+                    cloudError = err.localizedMessage
+                }
+            }
+
+            preferences.currentSettings().pendingBugReports.forEach { local ->
+                if (!merged.containsKey(local.reportId)) {
+                    merged[local.reportId] = BugReportItemUi(
+                        reportId = local.reportId,
+                        docId = local.reportId,
+                        reporterName = local.reporterName,
+                        reporterAvatarUrl = local.reporterAvatarUrl,
+                        message = local.message,
+                        appVersion = local.appVersion,
+                        createdAtMs = local.createdAtMs,
+                    )
+                }
+            }
+
+            val sorted = merged.values.sortedByDescending { it.createdAtMs }
+            _developerModeState.update {
+                it.copy(
+                    isLoadingReports = false,
+                    reports = sorted,
+                    errorMessage = cloudError,
+                )
+            }
+        }
+    }
+
+    fun deleteDeveloperBugReport(report: BugReportItemUi) {
+        if (report.reportId in _developerModeState.value.deletingReportIds) return
+        viewModelScope.launch {
+            _developerModeState.update {
+                it.copy(
+                    deletingReportIds = it.deletingReportIds + report.reportId,
+                    errorMessage = null,
+                )
+            }
+            val repo = cloudRepository
+            if (!isGuestMode && repo != null && !cloudUserId.isNullOrBlank()) {
+                val targetDocId = report.docId.ifBlank { report.reportId }
+                val res = repo.deleteDeveloperBugReport(targetDocId, DEVELOPER_REPORTS_PASSWORD)
+                if (res.isFailure) {
+                    _developerModeState.update {
+                        it.copy(
+                            deletingReportIds = it.deletingReportIds - report.reportId,
+                            errorMessage = res.exceptionOrNull()?.localizedMessage ?: "Failed to delete report",
+                        )
+                    }
+                    return@launch
+                }
+            }
+            preferences.removeLocalBugReport(report.reportId)
+            _developerModeState.update {
+                it.copy(
+                    deletingReportIds = it.deletingReportIds - report.reportId,
+                    reports = it.reports.filterNot { item -> item.reportId == report.reportId },
+                )
+            }
+            refreshCloudStorageUsage()
+        }
+    }
+
+    private fun scheduleCloudSettingsSync() {
+        val repo = cloudRepository ?: return
+        if (isGuestMode || cloudUserId.isNullOrBlank()) return
+        settingsSyncJob?.cancel()
+        settingsSyncJob = app.appScope.launch(NonCancellable) {
+            delay(600L)
+            repo.syncUserSettings(preferences.currentSettings())
+            scheduleCloudMetricsSync()
+        }
+    }
+
+    private fun scheduleCloudMetricsSync() {
+        val repo = cloudRepository ?: return
+        val uid = cloudUserId?.takeIf { it.isNotBlank() } ?: return
+        if (isGuestMode) return
+        metricsSyncJob?.cancel()
+        metricsSyncJob = app.appScope.launch(NonCancellable) {
+            delay(1200L)
+            repo.syncCloudMetricsFromLocal(dao, buildCurrentCloudProfileSnapshot(uid))
         }
     }
 
@@ -886,7 +1691,7 @@ class SoundLapaViewModel(application: Application) : AndroidViewModel(applicatio
             isVisible = true,
             artistName = cleanName,
             avatarUrl = seedTrack?.coverArtPath ?: localMatches.firstOrNull()?.coverArtPath,
-            accentColorHex = seedTrack?.accentColorHex ?: localMatches.firstOrNull()?.accentColorHex ?: 0xFF10B981L,
+            accentColorHex = seedTrack?.accentColorHex ?: localMatches.firstOrNull()?.accentColorHex ?: 0xFF8B5CF6L,
             secondaryColorHex = seedTrack?.secondaryColorHex ?: localMatches.firstOrNull()?.secondaryColorHex ?: 0xFF5CE1E6L,
             isLoading = online,
             tracks = localMatches,
@@ -1010,6 +1815,15 @@ class SoundLapaViewModel(application: Application) : AndroidViewModel(applicatio
             val nextLiked = !track.isLiked
             val nextCount = (track.likeCount + if (nextLiked) 1 else -1).coerceAtLeast(0)
             dao.updateLike(track.id, nextLiked, nextCount)
+            val updatedTrack = dao.getTrackById(track.id) ?: track.copy(isLiked = nextLiked, likeCount = nextCount)
+            if (cloudRepository != null) {
+                val isInPlaylist = uiState.value.playlists.any { pl -> pl.tracks.any { it.id == track.id } }
+                if (nextLiked || updatedTrack.isUserUpload || isInPlaylist) {
+                    cloudRepository.upsertSavedTrack(updatedTrack)
+                } else {
+                    cloudRepository.deleteSavedTrack(track.id)
+                }
+            }
             _artistProfileState.update { current ->
                 if (!current.isVisible) {
                     current
@@ -1030,6 +1844,7 @@ class SoundLapaViewModel(application: Application) : AndroidViewModel(applicatio
     fun deleteTrack(track: TrackEntity) {
         viewModelScope.launch {
             cacheManager.deleteTrack(track)
+            cloudRepository?.deleteSavedTrack(track.id)
         }
     }
 
@@ -1054,6 +1869,9 @@ class SoundLapaViewModel(application: Application) : AndroidViewModel(applicatio
                 artist = newArtist.trim().ifBlank { track.artist },
                 coverArtPath = finalCoverPath,
             )
+            dao.getTrackById(track.id)?.let { updated ->
+                cloudRepository?.upsertSavedTrack(updated)
+            }
         }
     }
 
@@ -1062,16 +1880,19 @@ class SoundLapaViewModel(application: Application) : AndroidViewModel(applicatio
         if (trimmed.isEmpty()) return
         viewModelScope.launch {
             val id = "pl_${UUID.randomUUID()}"
-            dao.upsertPlaylist(
-                PlaylistEntity(
-                    id = id,
-                    name = trimmed,
-                    description = description.trim(),
-                ),
+            val playlist = PlaylistEntity(
+                id = id,
+                name = trimmed,
+                description = description.trim(),
             )
+            dao.upsertPlaylist(playlist)
             if (initialTrack != null) {
                 audiusRepository.ensureTrackPersisted(initialTrack)
-                dao.addTrackToPlaylist(PlaylistTrackCrossRef(playlistId = id, trackId = initialTrack.id))
+                val now = System.currentTimeMillis()
+                dao.addTrackToPlaylist(PlaylistTrackCrossRef(playlistId = id, trackId = initialTrack.id, addedAt = now, position = 0))
+                cloudRepository?.upsertPlaylistItem(playlist, initialTrack, position = 0, addedAtMs = now)
+            } else {
+                cloudRepository?.upsertPlaylist(playlist)
             }
         }
     }
@@ -1079,6 +1900,7 @@ class SoundLapaViewModel(application: Application) : AndroidViewModel(applicatio
     fun deletePlaylist(playlistId: String) {
         viewModelScope.launch {
             dao.deletePlaylist(playlistId)
+            cloudRepository?.deletePlaylist(playlistId)
         }
     }
 
@@ -1086,20 +1908,27 @@ class SoundLapaViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch {
             audiusRepository.ensureTrackPersisted(track)
             val nextPos = dao.getMaxPlaylistTrackPosition(playlistId) + 1
+            val now = System.currentTimeMillis()
             dao.addTrackToPlaylist(
                 PlaylistTrackCrossRef(
                     playlistId = playlistId,
                     trackId = track.id,
-                    addedAt = System.currentTimeMillis(),
+                    addedAt = now,
                     position = nextPos,
                 ),
             )
+            val playlist = uiState.value.playlists.find { it.playlist.id == playlistId }?.playlist
+                ?: dao.getAllPlaylistsOnce().find { it.id == playlistId }
+            if (playlist != null) {
+                cloudRepository?.upsertPlaylistItem(playlist, track, nextPos, now)
+            }
         }
     }
 
     fun removeTrackFromPlaylist(playlistId: String, trackId: String) {
         viewModelScope.launch {
             dao.removeTrackFromPlaylist(playlistId, trackId)
+            cloudRepository?.removePlaylistItem(playlistId, trackId)
         }
     }
 
@@ -1174,6 +2003,7 @@ class SoundLapaViewModel(application: Application) : AndroidViewModel(applicatio
                 )
             }
             if (imported != null) {
+                cloudRepository?.upsertSavedTrack(imported)
                 playbackController.playTrack(imported, listOf(imported) + uiState.value.tracks)
             }
         }
@@ -1188,6 +2018,7 @@ class SoundLapaViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch {
             _uploadState.update { it.copy(isImporting = true, statusMessage = null) }
             var successCount = 0
+            val importedTracks = mutableListOf<TrackEntity>()
             uris.forEachIndexed { idx, uri ->
                 val palette = uploadPalettes[idx % uploadPalettes.size]
                 val imported = cacheManager.importTrackFromUri(
@@ -1197,8 +2028,12 @@ class SoundLapaViewModel(application: Application) : AndroidViewModel(applicatio
                     secondaryColorHex = palette.second,
                     isAutoImported = false,
                 )
-                if (imported != null) successCount++
+                if (imported != null) {
+                    successCount++
+                    importedTracks += imported
+                }
             }
+            importedTracks.forEach { cloudRepository?.upsertSavedTrack(it) }
             _uploadState.update {
                 it.copy(
                     isImporting = false,
@@ -1216,6 +2051,7 @@ class SoundLapaViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun clearAutoUploadFolder() {
+        lastAutoSyncedTreeUri = null
         viewModelScope.launch {
             preferences.setAutoUploadFolder(null, null)
             _uploadState.update {
@@ -1228,6 +2064,9 @@ class SoundLapaViewModel(application: Application) : AndroidViewModel(applicatio
         val settings = uiState.value.settings
         val uriString = settings.autoUploadTreeUri ?: return
         if (!settings.autoUploadEnabled || _uploadState.value.isSyncingFolder) return
+        if (lastAutoSyncedTreeUri == uriString) return
+        lastAutoSyncedTreeUri = uriString
+        if (System.currentTimeMillis() - settings.lastSyncTimestamp < 6L * 3600_000L) return
         syncAutoUploadFolderNow(Uri.parse(uriString))
     }
 
@@ -1235,11 +2074,17 @@ class SoundLapaViewModel(application: Application) : AndroidViewModel(applicatio
         val uri = explicitUri
             ?: uiState.value.settings.autoUploadTreeUri?.let { Uri.parse(it) }
             ?: return
+        lastAutoSyncedTreeUri = uri.toString()
 
         viewModelScope.launch {
             _uploadState.update { it.copy(isSyncingFolder = true) }
             val result = cacheManager.scanAutoUploadFolder(uri)
             preferences.setLastSyncTimestamp(System.currentTimeMillis())
+            if (result.newlyImported > 0 && cloudRepository != null) {
+                dao.getAllTracksOnce()
+                    .filter { it.isUserUpload }
+                    .forEach { cloudRepository.upsertSavedTrack(it) }
+            }
             _uploadState.update {
                 it.copy(
                     isSyncingFolder = false,
@@ -1263,42 +2108,49 @@ class SoundLapaViewModel(application: Application) : AndroidViewModel(applicatio
             if (enabled) {
                 syncAutoUploadFolderIfEnabled()
             }
+            scheduleCloudSettingsSync()
         }
     }
 
     fun setAutoCacheOnPlay(enabled: Boolean) {
         app.appScope.launch(NonCancellable) {
             preferences.setAutoCacheOnPlay(enabled)
+            scheduleCloudSettingsSync()
         }
     }
 
     fun setDarkLiquidGlass(dark: Boolean) {
         app.appScope.launch(NonCancellable) {
             preferences.setDarkLiquidGlass(dark)
+            scheduleCloudSettingsSync()
         }
     }
 
     fun setAppLanguage(languageCode: String) {
         app.appScope.launch(NonCancellable) {
             preferences.setAppLanguage(languageCode)
+            scheduleCloudSettingsSync()
         }
     }
 
     fun setAccentColorArgb(argb: Long) {
         app.appScope.launch(NonCancellable) {
             preferences.setAccentColorArgb(argb)
+            scheduleCloudSettingsSync()
         }
     }
 
     fun setSmoothTransitionEnabled(enabled: Boolean) {
         app.appScope.launch(NonCancellable) {
             preferences.setSmoothTransitionEnabled(enabled)
+            scheduleCloudSettingsSync()
         }
     }
 
     fun setSmoothTransitionDurationSec(seconds: Int) {
         app.appScope.launch(NonCancellable) {
             preferences.setSmoothTransitionDurationSec(seconds)
+            scheduleCloudSettingsSync()
         }
     }
 
@@ -1306,6 +2158,21 @@ class SoundLapaViewModel(application: Application) : AndroidViewModel(applicatio
         FullStreamResolver.isDataSaverEnabled = enabled
         app.appScope.launch(NonCancellable) {
             preferences.setDataSaverEnabled(enabled)
+            scheduleCloudSettingsSync()
+        }
+    }
+
+    fun setHapticsEnabled(enabled: Boolean) {
+        app.appScope.launch(NonCancellable) {
+            preferences.setHapticsEnabled(enabled)
+            scheduleCloudSettingsSync()
+        }
+    }
+
+    fun setHapticIntensity(percent: Int) {
+        app.appScope.launch(NonCancellable) {
+            preferences.setHapticIntensity(percent)
+            scheduleCloudSettingsSync()
         }
     }
 
@@ -1339,6 +2206,9 @@ class SoundLapaViewModel(application: Application) : AndroidViewModel(applicatio
             _isImportingPlaylist.value = true
             _importStatusMessage.value = null
             val result = playlistImporter.importFromInput(input, playlistName)
+            result.onSuccess { summary ->
+                pushImportedPlaylistToCloud(summary.playlistId)
+            }
             _isImportingPlaylist.value = false
             _importStatusMessage.value = result.fold(
                 onSuccess = { summary ->
@@ -1358,6 +2228,9 @@ class SoundLapaViewModel(application: Application) : AndroidViewModel(applicatio
             _isImportingPlaylist.value = true
             _importStatusMessage.value = null
             val result = playlistImporter.importFromFileUri(uri, playlistName)
+            result.onSuccess { summary ->
+                pushImportedPlaylistToCloud(summary.playlistId)
+            }
             _isImportingPlaylist.value = false
             _importStatusMessage.value = result.fold(
                 onSuccess = { summary ->
@@ -1369,6 +2242,14 @@ class SoundLapaViewModel(application: Application) : AndroidViewModel(applicatio
             )
             refreshCacheSize()
         }
+    }
+
+    private suspend fun pushImportedPlaylistToCloud(playlistId: String) {
+        val repo = cloudRepository ?: return
+        val playlist = dao.getAllPlaylistsOnce().find { it.id == playlistId } ?: return
+        val refs = dao.getAllPlaylistRefsOnce().filter { it.playlistId == playlistId }
+        val allTracks = dao.getAllTracksOnce()
+        repo.pushPlaylistWithTracks(playlist, allTracks, refs)
     }
 
     fun clearImportStatus() {

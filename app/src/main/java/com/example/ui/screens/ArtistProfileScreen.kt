@@ -82,6 +82,7 @@ import com.example.ui.ArtistProfileUiState
 import com.example.ui.components.TrackRowItem
 import com.example.ui.components.rememberSoundLapaHaptics
 import com.example.ui.i18n.LocalAppStrings
+import com.example.ui.shaders.rememberIsAppForeground
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
@@ -237,6 +238,7 @@ fun ArtistProfileScreen(
                             SubcomposeAsyncImage(
                                 model = ImageRequest.Builder(context)
                                     .data(avatar)
+                                    .allowHardware(true)
                                     .crossfade(true)
                                     .size(420)
                                     .build(),
@@ -380,6 +382,7 @@ fun ArtistProfileScreen(
                             items(
                                 items = state.albums,
                                 key = { it.id },
+                                contentType = { "artist_album" },
                             ) { album ->
                                 ArtistAlbumCard(
                                     album = album,
@@ -424,6 +427,7 @@ fun ArtistProfileScreen(
                 items(
                     items = state.tracks,
                     key = { "artist_tr_${it.id}" },
+                    contentType = { "artist_track" },
                 ) { track ->
                     val isCurrent = currentTrackId == track.id
                     TrackRowItem(
@@ -549,6 +553,7 @@ fun ArtistProfileScreen(
                             items(
                                 items = state.selectedAlbumTracks,
                                 key = { "alb_tr_${it.id}" },
+                                contentType = { "artist_album_track" },
                             ) { track ->
                                 val isCurrent = currentTrackId == track.id
                                 TrackRowItem(
@@ -590,16 +595,22 @@ private fun ArtistShimmeringBanner(
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
-    val infiniteTransition = rememberInfiniteTransition(label = "artistBannerShimmer")
-    val phase by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = (2.0 * PI).toFloat(),
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 14_000, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart,
-        ),
-        label = "artistBannerPhase",
-    )
+    val isForeground = rememberIsAppForeground()
+    val phase = if (isForeground && collapseFraction < 0.99f) {
+        val infiniteTransition = rememberInfiniteTransition(label = "artistBannerShimmer")
+        val animatedPhase by infiniteTransition.animateFloat(
+            initialValue = 0f,
+            targetValue = (2.0 * PI).toFloat(),
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 14_000, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart,
+            ),
+            label = "artistBannerPhase",
+        )
+        animatedPhase
+    } else {
+        0f
+    }
 
     val visibleAlpha = (1f - collapseFraction).coerceIn(0f, 1f)
     val bottomFadeScrim = remember(backgroundColor) {
@@ -645,6 +656,7 @@ private fun ArtistShimmeringBanner(
                 SubcomposeAsyncImage(
                     model = ImageRequest.Builder(context)
                         .data(avatarUrl)
+                        .allowHardware(true)
                         .crossfade(true)
                         .size(320)
                         .build(),
@@ -774,6 +786,7 @@ private fun AlbumArtworkBox(
             SubcomposeAsyncImage(
                 model = ImageRequest.Builder(context)
                     .data(artworkUrl)
+                    .allowHardware(true)
                     .crossfade(true)
                     .size(480)
                     .build(),

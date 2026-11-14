@@ -1,4 +1,19 @@
 import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy
+import java.time.Duration
+import java.util.zip.ZipEntry
+import java.util.zip.ZipInputStream
+import java.util.zip.ZipOutputStream
+import org.gradle.api.artifacts.transform.CacheableTransform
+import org.gradle.api.artifacts.transform.InputArtifact
+import org.gradle.api.artifacts.transform.TransformAction
+import org.gradle.api.artifacts.transform.TransformOutputs
+import org.gradle.api.artifacts.transform.TransformParameters
+import org.gradle.api.artifacts.type.ArtifactTypeDefinition
+import org.gradle.api.attributes.Attribute
+import org.gradle.api.file.FileSystemLocation
+import org.gradle.api.provider.Provider
+import org.gradle.api.tasks.PathSensitive
+import org.gradle.api.tasks.PathSensitivity
 
 plugins {
   alias(libs.plugins.android.application)
@@ -17,8 +32,8 @@ android {
     applicationId = "com.aistudio.soundlapa.x7k9m2"
     minSdk = 24
     targetSdk = 36
-    versionCode = 9
-    versionName = "2.5-stable"
+    versionCode = 10
+    versionName = "3.1"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -70,6 +85,11 @@ android {
     includeInApk = false
     includeInBundle = true
   }
+  packaging {
+    resources {
+      excludes += "google/protobuf/descriptor.proto"
+    }
+  }
 }
 
 // Configure the Secrets Gradle Plugin to use .env and .env.example files
@@ -89,6 +109,7 @@ dependencies {
   implementation(platform(libs.firebase.bom))
   // implementation(libs.accompanist.permissions)
   implementation(libs.androidx.activity.compose)
+  implementation(libs.androidx.biometric)
   // implementation(libs.androidx.camera.camera2)
   // implementation(libs.androidx.camera.core)
   // implementation(libs.androidx.camera.lifecycle)
@@ -117,18 +138,15 @@ dependencies {
   implementation(libs.newpipe.extractor)
   coreLibraryDesugaring(libs.desugar.jdk.libs)
   // implementation(libs.converter.moshi)
-  // implementation(libs.firebase.ai)
-  // Uncomment to use Firestore:
-  // implementation(libs.firebase.firestore)
+  implementation(libs.firebase.ai)
+  implementation(libs.firebase.firestore)
 
-  // Uncomment ALL FOUR of the following dependencies together to use Firebase Auth and Google
-  // Sign-In via Credential Manager:
-  // implementation(libs.firebase.auth)
-  // implementation(libs.androidx.credentials)
-  // implementation(libs.androidx.credentials.play.services)
-  // implementation(libs.googleid)
-  // implementation(libs.firebase.appcheck.recaptcha)
-  // implementation(libs.firebase.appcheck.debug)
+  implementation(libs.firebase.auth)
+  implementation(libs.androidx.credentials)
+  implementation(libs.androidx.credentials.play.services)
+  implementation(libs.googleid)
+  implementation(libs.firebase.appcheck.recaptcha)
+  implementation(libs.firebase.appcheck.debug)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
   // implementation(libs.logging.interceptor)
@@ -151,4 +169,72 @@ dependencies {
   debugImplementation(libs.androidx.compose.ui.tooling)
   "ksp"(libs.androidx.room.compiler)
   // "ksp"(libs.moshi.kotlin.codegen)
+}
+
+tasks.withType<Test> {
+  failFast = true
+  timeout.set(Duration.ofMinutes(2))
+  testLogging {
+    events("passed", "failed", "skipped")
+  }
+}
+
+@CacheableTransform
+abstract class StripProtobufDescriptorTransform : TransformAction<TransformParameters.None> {
+  @get:InputArtifact
+  @get:PathSensitive(PathSensitivity.NAME_ONLY)
+  abstract val inputArtifact: Provider<FileSystemLocation>
+
+  override fun transform(outputs: TransformOutputs) {
+    val input = inputArtifact.get().asFile
+    if (!input.name.startsWith("protobuf-javalite")) {
+      outputs.file(inputArtifact)
+      return
+    }
+    val outputFile = outputs.file(input.name)
+    ZipInputStream(input.inputStream().buffered()).use { zis ->
+      ZipOutputStream(outputFile.outputStream().buffered()).use { zos ->
+        val seen = HashSet<String>()
+        while (true) {
+          val entry = zis.nextEntry ?: break
+          val name = entry.name
+          val isDuplicate =
+            name.startsWith("com/google/protobuf/DescriptorProtos") ||
+              name == "google/protobuf/descriptor.proto"
+          if (!isDuplicate && seen.add(name)) {
+            zos.putNextEntry(ZipEntry(name))
+            if (!entry.isDirectory) {
+              zis.copyTo(zos)
+            }
+            zos.closeEntry()
+          }
+          zis.closeEntry()
+        }
+      }
+    }
+  }
+}
+
+val protoDescriptorStrippedAttr = Attribute.of("protoDescriptorStripped", Boolean::class.javaObjectType)
+
+dependencies {
+  attributesSchema {
+    attribute(protoDescriptorStrippedAttr)
+  }
+  artifactTypes {
+    maybeCreate("jar").attributes.attribute(protoDescriptorStrippedAttr, false)
+    maybeCreate("aar").attributes.attribute(protoDescriptorStrippedAttr, true)
+  }
+  registerTransform(StripProtobufDescriptorTransform::class) {
+    from.attribute(ArtifactTypeDefinition.ARTIFACT_TYPE_ATTRIBUTE, "jar")
+      .attribute(protoDescriptorStrippedAttr, false)
+    to.attribute(ArtifactTypeDefinition.ARTIFACT_TYPE_ATTRIBUTE, "jar")
+      .attribute(protoDescriptorStrippedAttr, true)
+  }
+}
+
+configurations.configureEach {
+  if (isCanBeResolved && (name == "debugRuntimeClasspath" || name == "releaseRuntimeClasspath")) {
+    attributes.attribute(protoDescriptorStrippedAttr, true)
+  }
 }

@@ -26,10 +26,16 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.draw.BlurredEdgeTreatment
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
@@ -91,23 +97,45 @@ private const val LIQUID_AURORA_AGSL = """
 """
 
 @Composable
+fun rememberIsAppForeground(): Boolean {
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var isForeground by remember(lifecycleOwner) {
+        mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
+    }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, _ ->
+            isForeground = lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    return isForeground
+}
+
+@Composable
 fun FloatingCoverBackdrop(
     track: TrackEntity,
     isPlaying: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    val infiniteTransition = rememberInfiniteTransition(label = "floatingCoverLoop")
-    val phase by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = (2.0 * PI).toFloat(),
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 18_000, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart,
-        ),
-        label = "coverLoopPhase",
-    )
+    val isForeground = rememberIsAppForeground()
+    val phase = if (isForeground) {
+        val infiniteTransition = rememberInfiniteTransition(label = "floatingCoverLoop")
+        val animatedPhase by infiniteTransition.animateFloat(
+            initialValue = 0f,
+            targetValue = (2.0 * PI).toFloat(),
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 18_000, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart,
+            ),
+            label = "coverLoopPhase",
+        )
+        animatedPhase
+    } else {
+        0f
+    }
     val motionEnergy by animateFloatAsState(
-        targetValue = if (isPlaying) 1.0f else 0.35f,
+        targetValue = if (isPlaying && isForeground) 1.0f else 0.35f,
         animationSpec = tween(durationMillis = 500),
         label = "coverMotionEnergy",
     )
@@ -212,16 +240,22 @@ fun LiquidShaderBackdrop(
         }
     }
 
-    val infiniteTransition = rememberInfiniteTransition(label = "liquidTime")
-    val timeSec by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 62.8318f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 48_000, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart,
-        ),
-        label = "timeSec",
-    )
+    val isForeground = rememberIsAppForeground()
+    val timeSec = if (isForeground) {
+        val infiniteTransition = rememberInfiniteTransition(label = "liquidTime")
+        val animatedTimeSec by infiniteTransition.animateFloat(
+            initialValue = 0f,
+            targetValue = 62.8318f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 48_000, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart,
+            ),
+            label = "timeSec",
+        )
+        animatedTimeSec
+    } else {
+        0f
+    }
 
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         LiquidAuroraAgslCanvas(

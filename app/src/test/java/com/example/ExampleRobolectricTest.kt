@@ -44,9 +44,10 @@ class ExampleRobolectricTest {
   }
 
   @Test
-  fun `default theme accent is emerald green and v2_5_stable strings are configured`() {
-    assertEquals(0xFF10B981L, SoundLapaSettings().accentColorArgb)
-    assertEquals("2.5-stable", BuildConfig.VERSION_NAME)
+  fun `default theme accent is purple and v3_1 strings are configured`() {
+    assertEquals(0xFF8B5CF6L, SoundLapaSettings().accentColorArgb)
+    assertFalse(SoundLapaSettings().isGuestMode)
+    assertEquals("3.1", BuildConfig.VERSION_NAME)
     assertNotNull(HomeRoute)
 
     val ru = stringsForLanguage("ru")
@@ -54,7 +55,9 @@ class ExampleRobolectricTest {
     assertEquals("Лайкнутые", ru.favoritesTab)
     assertEquals("Загруженные треки", ru.myTracksTab)
     assertEquals("Сингл", ru.singleReleaseLabel)
-    assertTrue(ru.aboutWhatsNewTitle.contains("2.5-stable"))
+    assertTrue(ru.aboutWhatsNewTitle.contains("3.1"))
+    assertTrue(stringsForLanguage("en").aboutWhatsNewTitle.contains("3.1"))
+    assertTrue(stringsForLanguage("it").aboutWhatsNewTitle.contains("3.1"))
     assertTrue(ru.confirmDeleteTitle.isNotBlank())
     assertTrue(ru.deleteConfirmAction.isNotBlank())
     assertTrue(ru.artistSearchProfileSubtitle.isNotBlank())
@@ -377,6 +380,7 @@ class ExampleRobolectricTest {
     )
 
     assertEquals(4, trending.size)
+    assertTrue(trending.zipWithNext().all { (a, b) -> a.playCount >= b.playCount })
     // High-play matching Hip-Hop tracks rank above low-play match and unrelated genres,
     // while enforcing max 2 tracks per artist in primary pass.
     assertTrue(trending.take(3).any { it.id == "hiphop_hit_1" || it.id == "hiphop_hit_2" })
@@ -384,5 +388,232 @@ class ExampleRobolectricTest {
     val miyagiCount = trending.count { it.artist == "Miyagi" }
     assertTrue(miyagiCount <= 2)
     assertFalse(trending.take(3).any { it.id == "pop_low_match" })
+  }
+
+  @Test
+  fun `upsertTrack and upsertPlaylist preserve existing playlist track cross refs`() = runBlocking {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val db = Room.inMemoryDatabaseBuilder(context, SoundLapaDatabase::class.java)
+      .allowMainThreadQueries()
+      .build()
+    try {
+      val dao = db.soundLapaDao()
+      val originalTrack = TrackEntity(
+        id = "t_keep",
+        title = "Minor",
+        artist = "Miyagi & Andy Panda",
+        genre = "Hip-Hop",
+        durationMs = 175_000L,
+        waveformJson = "[]",
+        cachedFilePath = null,
+        sourceUri = "https://example.com/minor.mp3",
+        coverArtPath = "https://i.scdn.co/image/minor",
+        accentColorHex = 0xFF10B981L,
+        secondaryColorHex = 0xFF065F46L,
+        isUserUpload = false,
+        isCachedOffline = false,
+        fileSizeBytes = 0L,
+        isLiked = true,
+      )
+      val playlist = PlaylistEntity(
+        id = "pl_persist",
+        name = "Saved Mix",
+        description = "Cloud",
+        coverArtPath = "https://i.scdn.co/image/cover",
+        createdAt = 5000L,
+      )
+      dao.upsertTrack(originalTrack)
+      dao.upsertPlaylist(playlist)
+      dao.addTrackToPlaylist(
+        PlaylistTrackCrossRef(playlistId = "pl_persist", trackId = "t_keep", position = 0, addedAt = 5001L),
+      )
+
+      // Re-upserting the same track and playlist must update in-place without CASCADE-deleting cross refs
+      dao.upsertTracks(listOf(originalTrack.copy(playCount = 999)))
+      dao.upsertPlaylist(playlist.copy(description = "Updated"))
+
+      val refs = dao.getAllPlaylistRefsOnce()
+      assertEquals(1, refs.size)
+      assertEquals("t_keep", refs.first().trackId)
+      assertEquals("pl_persist", refs.first().playlistId)
+    } finally {
+      db.close()
+    }
+  }
+
+  @Test
+  fun `artist track matcher includes featured collaborations in title and credits`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val db = Room.inMemoryDatabaseBuilder(context, SoundLapaDatabase::class.java)
+      .allowMainThreadQueries()
+      .build()
+    try {
+      val repo = AudiusRepository(context, db.soundLapaDao())
+      val base = TrackEntity(
+        id = "c1",
+        title = "Колибри",
+        artist = "Other Artist",
+        genre = "Hip-Hop",
+        durationMs = 200_000L,
+        waveformJson = "[]",
+        cachedFilePath = null,
+        sourceUri = null,
+        coverArtPath = null,
+        accentColorHex = 0xFF10B981L,
+        secondaryColorHex = 0xFF065F46L,
+        isUserUpload = false,
+        isCachedOffline = false,
+        fileSizeBytes = 0L,
+      )
+      val featInTitle = base.copy(id = "c2", title = "Колибри (feat. Miyagi)", artist = "Скриптонит")
+      val collabX = base.copy(id = "c3", title = "Yamakasi", artist = "Miyagi x TumaniYO")
+      val typeBeatNoise = base.copy(id = "c4", title = "Miyagi Type Beat (feat. Miyagi)", artist = "Beatmaker")
+
+      assertTrue(repo.isTrackByArtist(featInTitle, listOf("Miyagi")))
+      assertTrue(repo.isTrackByArtist(collabX, listOf("Miyagi")))
+      assertFalse(repo.isTrackByArtist(typeBeatNoise, listOf("Miyagi")))
+    } finally {
+      db.close()
+    }
+  }
+
+  @Test
+  fun `haptic defaults and localized playlist duration strings are configured`() {
+    val defaults = SoundLapaSettings()
+    assertTrue(defaults.hapticsEnabled)
+    assertEquals(70, defaults.hapticIntensity)
+    assertTrue(defaults.syncedCloudUids.isEmpty())
+
+    val ru = stringsForLanguage("ru")
+    val en = stringsForLanguage("en")
+    val it = stringsForLanguage("it")
+
+    assertEquals("Длительность плейлиста: 15 мин", ru.playlistDurationLabel("15 мин"))
+    assertEquals("Playlist duration: 15 min", en.playlistDurationLabel("15 min"))
+    assertEquals("Durata playlist: 15 min", it.playlistDurationLabel("15 min"))
+
+    listOf(ru, en, it).forEach { s ->
+      assertTrue(s.settingsHapticsTitle.isNotBlank())
+      assertTrue(s.settingsHapticsSubtitle.isNotBlank())
+      assertTrue(s.settingsHapticsIntensityLabel(80).contains("80"))
+    }
+  }
+
+  @Test
+  fun `new settings labels guest warning and developer password match requirements`() {
+    assertEquals("shelban852", com.example.data.remote.DEVELOPER_REPORTS_PASSWORD)
+
+    val ru = stringsForLanguage("ru")
+    assertEquals("Плавность перехода трека и файлы", ru.settingsPlaybackSection)
+    assertEquals(
+      "Длительность кроссфейда (сливание треков при переходе): 4 сек",
+      ru.settingsSmoothTransitionDurationLabel(4),
+    )
+    assertEquals("Виброотклик", ru.settingsHapticsSection)
+    assertEquals("Экономия трафика", ru.settingsDataSaverSection)
+    assertEquals("Для разработчика", ru.settingsDeveloperSection)
+    assertEquals("Репорты", ru.settingsDeveloperReportsTitle)
+    assertEquals("Войти как гость", ru.authContinueAsGuest)
+    assertTrue(ru.authGuestWarningMessage.contains("Google"))
+
+    listOf("ru", "en", "it").forEach { lang ->
+      val s = stringsForLanguage(lang)
+      assertTrue(s.authContinueAsGuest.isNotBlank())
+      assertTrue(s.authGuestWarningMessage.isNotBlank())
+      assertTrue(s.bugReportDialogTitle.isNotBlank())
+      assertTrue(s.settingsDeveloperSection.isNotBlank())
+      assertTrue(s.settingsDeveloperReportsTitle.isNotBlank())
+      assertTrue(s.settingsProfileEditTitle.isNotBlank())
+      assertTrue(s.settingsProfileModeratingLabel.isNotBlank())
+      assertTrue(s.settingsProfileAvatarBlockedTitle.isNotBlank())
+      assertTrue(s.settingsProfileAvatarBlockedNotice.isNotBlank())
+      assertTrue(s.settingsProfileModerationErrorFallback.isNotBlank())
+    }
+  }
+
+  @Test
+  fun `avatar moderation service parses safe, flagged 18 plus, and invalid verdicts strictly`() {
+    val safe = com.example.data.remote.AvatarModerationService.parseModerationVerdictJson(
+      """{"isUnsafeAdultContent": false, "reason": "Portrait photo"}""",
+    )
+    assertTrue(safe is com.example.data.remote.AvatarModerationVerdict.Safe)
+
+    val flagged = com.example.data.remote.AvatarModerationService.parseModerationVerdictJson(
+      """{"isUnsafeAdultContent": true, "reason": "Explicit nudity"}""",
+    )
+    assertTrue(flagged is com.example.data.remote.AvatarModerationVerdict.Flagged18Plus)
+    assertEquals(
+      "Explicit nudity",
+      (flagged as com.example.data.remote.AvatarModerationVerdict.Flagged18Plus).reason,
+    )
+
+    val invalid = com.example.data.remote.AvatarModerationService.parseModerationVerdictJson("not-json")
+    assertTrue(invalid is com.example.data.remote.AvatarModerationVerdict.Error)
+  }
+
+  @Test
+  fun `cloud storage headline formats real 1 GiB quota, exact sizes, and tracks payload compaction`() {
+    assertEquals(1_073_741_824L, com.example.data.remote.DEFAULT_CLOUD_QUOTA_BYTES)
+    assertEquals(
+      "0.5ГБ/1ГБ | 50.0%",
+      com.example.data.remote.formatCloudStorageHeadline(
+        usedBytes = 536_870_912L,
+        quotaBytes = com.example.data.remote.DEFAULT_CLOUD_QUOTA_BYTES,
+        gbUnit = "ГБ",
+      ),
+    )
+    assertEquals(
+      "<0.0001ГБ/1ГБ | <0.01%",
+      com.example.data.remote.formatCloudStorageHeadline(
+        usedBytes = 10_240L,
+        quotaBytes = com.example.data.remote.DEFAULT_CLOUD_QUOTA_BYTES,
+        gbUnit = "ГБ",
+      ),
+    )
+    assertEquals(
+      "0.0ГБ/1ГБ | 0.0%",
+      com.example.data.remote.formatCloudStorageHeadline(
+        usedBytes = 0L,
+        quotaBytes = com.example.data.remote.DEFAULT_CLOUD_QUOTA_BYTES,
+        gbUnit = "ГБ",
+      ),
+    )
+    assertEquals(
+      "10.0 КБ",
+      com.example.data.remote.formatCloudExactSize(10_240L),
+    )
+    assertEquals(
+      "512.00 МБ",
+      com.example.data.remote.formatCloudExactSize(536_870_912L),
+    )
+
+    val stripped = com.example.data.remote.compactCloudUrl(
+      "https://open.spotify.com/track/123?si=abcdef&utm_source=copy&foo=bar",
+    )
+    assertEquals("https://open.spotify.com/track/123?foo=bar", stripped)
+
+    val preservedLocalResolve = com.example.data.remote.compactCloudUrl(
+      "soundlapa://resolve-full?artist=Miyagi&title=Yamakasi",
+    )
+    assertEquals("soundlapa://resolve-full?artist=Miyagi&title=Yamakasi", preservedLocalResolve)
+  }
+
+  @Test
+  fun `developer biometric storage and startup loading strings are localized in RU EN IT`() {
+    listOf("ru", "en", "it").forEach { lang ->
+      val s = stringsForLanguage(lang)
+      assertTrue(s.settingsDeveloperEntrySubtitle.isNotBlank())
+      assertTrue(s.settingsDeveloperBiometricButton.isNotBlank())
+      assertTrue(s.settingsDeveloperStorageTitle.isNotBlank())
+      assertTrue(s.cloudStorageGbUnit.isNotBlank())
+      assertTrue(s.cloudStorageQuotaBadge.isNotBlank())
+      assertTrue(s.developerDeleteReportConfirmButton.isNotBlank())
+      assertTrue(s.startupLoadingTitle.isNotBlank())
+      assertTrue(s.startupLoadingCoversStatus(2, 5).contains("2"))
+    }
+    assertEquals("Использование хранилища облака", stringsForLanguage("ru").settingsDeveloperStorageTitle)
+    assertEquals("или", stringsForLanguage("ru").settingsDeveloperOrPasswordDivider)
+    assertEquals("or", stringsForLanguage("en").settingsDeveloperOrPasswordDivider)
+    assertEquals("oppure", stringsForLanguage("it").settingsDeveloperOrPasswordDivider)
   }
 }

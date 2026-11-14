@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<resources>
+    <string name="firestore_database_id" translatable="false">ai-studio-android-soundlap-2629d279-a395-490d-a148-a9d8d1572b05</string>
+    <string name="recaptcha_site_key" translatable="false">6LcY4h8uAAAAAMLyxIxTzqYVuktpGVQO4zKaLhEP</string>
+</resources>

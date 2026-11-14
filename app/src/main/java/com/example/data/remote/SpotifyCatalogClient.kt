@@ -56,10 +56,102 @@ object SpotifyCatalogClient {
         Pair<Long, Triple<SpotifyArtistInfo?, List<TrackEntity>, List<ArtistAlbumItem>>>,
     >()
     private const val ARTIST_CATALOG_CACHE_TTL_MS = 5 * 60 * 1000L
+    private const val TRENDING_CACHE_TTL_MS = 15 * 60 * 1000L
+    private val trendingTracksCache = ConcurrentHashMap<String, Pair<Long, List<TrackEntity>>>()
+    private val trackArtworkCache = ConcurrentHashMap<String, String>()
+
+    fun findCachedTrackArtwork(artist: String, title: String): String? {
+        val titleKey = normalizeToken(title)
+        if (titleKey.isBlank()) return null
+        val artistKey = normalizeToken(artist)
+        if (artistKey.isNotBlank()) {
+            trackArtworkCache["$artistKey|$titleKey"]?.let { return it }
+        }
+        return trackArtworkCache["*|$titleKey"]
+    }
+
+    private fun cacheTrackArtwork(artist: String, title: String, coverUrl: String?) {
+        val url = coverUrl?.trim()?.takeIf { it.startsWith("http") } ?: return
+        val titleKey = normalizeToken(title)
+        if (titleKey.isBlank()) return
+        val primaryArtist = artist.split(",", "&", "feat.", "ft.").firstOrNull().orEmpty()
+        val artistKey = normalizeToken(primaryArtist)
+        if (artistKey.isNotBlank()) {
+            trackArtworkCache["$artistKey|$titleKey"] = url
+        }
+        trackArtworkCache.putIfAbsent("*|$titleKey", url)
+    }
+
+    private val defaultTrendingArtists = listOf(
+        "The Weeknd",
+        "Billie Eilish",
+        "Eminem",
+        "Miyagi",
+        "Travis Scott",
+        "Drake",
+    )
 
     @Volatile
     private var lastMusicBrainzCallMs: Long = 0L
     private val musicBrainzLock = Any()
+
+    fun fetchSpotifyTrendingTracks(
+        seedArtists: List<String> = emptyList(),
+        limit: Int = 18,
+    ): List<TrackEntity> {
+        val cleanSeeds = seedArtists
+            .map { it.trim() }
+            .filter { it.length >= 2 }
+            .distinctBy { normalizeToken(it) }
+            .take(3)
+        val queryArtists = (cleanSeeds + defaultTrendingArtists)
+            .distinctBy { normalizeToken(it) }
+            .take(6)
+
+        val cacheKey = queryArtists.joinToString("|") { normalizeToken(it) }
+        val now = System.currentTimeMillis()
+        trendingTracksCache[cacheKey]?.let { (ts, cached) ->
+            if (now - ts < TRENDING_CACHE_TTL_MS && cached.isNotEmpty()) {
+                return cached.take(limit)
+            }
+        }
+
+        val futures = queryArtists.map { artist ->
+            CompletableFuture.supplyAsync {
+                runCatching {
+                    fetchArtistCatalog(
+                        artistQuery = artist,
+                        preferredDisplayName = artist,
+                    ).second
+                }.getOrDefault(emptyList())
+            }
+        }
+
+        val collected = futures
+            .flatMap { fut -> runCatching { fut.get(6, TimeUnit.SECONDS) }.getOrDefault(emptyList()) }
+            .filter { it.title.isNotBlank() && it.playCount >= 10_000 }
+            .sortedByDescending { it.playCount }
+
+        val picked = mutableListOf<TrackEntity>()
+        val seenTitles = HashSet<String>()
+        val artistCounts = HashMap<String, Int>()
+        for (track in collected) {
+            if (picked.size >= limit) break
+            val titleKey = normalizeToken(track.title)
+            val artistKey = normalizeToken(track.artist.substringBefore(",").trim())
+            if (titleKey.isBlank() || !seenTitles.add(titleKey)) continue
+            val count = artistCounts[artistKey] ?: 0
+            if (count < 2) {
+                picked += track
+                artistCounts[artistKey] = count + 1
+            }
+        }
+        val ordered = picked.sortedByDescending { it.playCount }
+        if (ordered.isNotEmpty()) {
+            trendingTracksCache[cacheKey] = System.currentTimeMillis() to ordered
+        }
+        return ordered
+    }
 
     fun searchArtists(query: String, limit: Int = 5): List<SpotifyArtistInfo> {
         val trimmed = query.trim()
@@ -263,13 +355,14 @@ object SpotifyCatalogClient {
                         isAutoImported = false,
                         isCachedOffline = false,
                         fileSizeBytes = 0L,
-                        playCount = playcount.coerceIn(1_000L, 900_000_000L).toInt(),
+                        playCount = playcount.coerceIn(1_000L, Int.MAX_VALUE.toLong()).toInt(),
                         likeCount = 0,
                         isLiked = false,
                         description = "Spotify",
                         createdAt = System.currentTimeMillis(),
                         albumTitle = albumName,
                     )
+                    cacheTrackArtwork(draft.artist, draft.title, coverUrl)
                     draft.copy(sourceUri = FullStreamResolver.buildLegacyUpgradeUri(draft))
                 }.orEmpty()
 
@@ -303,6 +396,36 @@ object SpotifyCatalogClient {
                                     trackCount = 0,
                                 )
                             }
+                        }
+                    }
+                }
+
+                // Also parse appearsOn collaborative releases when present in SSR initialState
+                val relatedContent = artistObj["relatedContent"] as? JsonObject
+                val appearsOnItems = (relatedContent?.get("appearsOn") as? JsonObject)?.get("items") as? JsonArray
+                appearsOnItems?.forEach { el ->
+                    val wrapper = el as? JsonObject ?: return@forEach
+                    val releaseList = ((wrapper["releases"] as? JsonObject)?.get("items") as? JsonArray)
+                        ?.mapNotNull { it as? JsonObject }
+                        ?: listOf(wrapper)
+                    releaseList.forEach { rel ->
+                        val albId = extractSpotifyIdFromUri(rel["uri"]?.jsonPrimitive?.contentOrNull)
+                            ?: return@forEach
+                        val albTitle = rel["name"]?.jsonPrimitive?.contentOrNull?.trim()
+                            ?.takeIf { it.isNotBlank() } ?: return@forEach
+                        val albCover = ((rel["coverArt"] as? JsonObject)?.get("sources") as? JsonArray)
+                            ?.let(::pickBestImageUrl)
+                            ?: avatarUrl
+                        val key = normalizeToken(albTitle)
+                        if (key.isNotBlank() && !albumItems.containsKey(key)) {
+                            albumItems[key] = ArtistAlbumItem(
+                                id = "sp_alb_$albId",
+                                title = albTitle,
+                                artist = artistName,
+                                sourceUrl = "https://open.spotify.com/album/$albId",
+                                artworkUrl = albCover,
+                                trackCount = 0,
+                            )
                         }
                     }
                 }
@@ -505,7 +628,7 @@ object SpotifyCatalogClient {
         val encoded = URLEncoder.encode(query, "UTF-8")
         val searchBody = httpGet(
             url = "https://www.wikidata.org/w/api.php?action=wbsearchentities&format=json&language=$lang&uselang=$lang&type=item&limit=6&search=$encoded",
-            userAgent = "SoundLapa/2.5 (Android)",
+            userAgent = "SoundLapa/3.1 (Android)",
         ) ?: return emptyList()
 
         val qids = runCatching {
@@ -517,7 +640,7 @@ object SpotifyCatalogClient {
 
         val entitiesBody = httpGet(
             url = "https://www.wikidata.org/w/api.php?action=wbgetentities&format=json&ids=${qids.joinToString("|")}&props=claims|labels",
-            userAgent = "SoundLapa/2.5 (Android)",
+            userAgent = "SoundLapa/3.1 (Android)",
         ) ?: return emptyList()
 
         return runCatching {
@@ -555,7 +678,7 @@ object SpotifyCatalogClient {
             val encoded = URLEncoder.encode(query, "UTF-8")
             val searchBody = httpGet(
                 url = "https://musicbrainz.org/ws/2/artist?query=$encoded&fmt=json&limit=3",
-                userAgent = "SoundLapa/2.5 (app@soundlapa.example)",
+                userAgent = "SoundLapa/3.1 (app@soundlapa.example)",
             ) ?: return@synchronized emptyList()
 
             val mbid = runCatching {
@@ -578,7 +701,7 @@ object SpotifyCatalogClient {
             lastMusicBrainzCallMs = System.currentTimeMillis()
             val relBody = httpGet(
                 url = "https://musicbrainz.org/ws/2/artist/$mbid?inc=url-rels&fmt=json",
-                userAgent = "SoundLapa/2.5 (app@soundlapa.example)",
+                userAgent = "SoundLapa/3.1 (app@soundlapa.example)",
             ) ?: return@synchronized emptyList()
 
             runCatching {

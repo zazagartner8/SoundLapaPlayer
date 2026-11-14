@@ -8,10 +8,13 @@ import com.example.data.local.SoundLapaDao
 import com.example.data.local.TrackEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.SerialName
@@ -145,6 +148,7 @@ class AudiusRepository(
 
     private val searchCache = ConcurrentHashMap<String, Pair<Long, List<TrackEntity>>>()
     private val artistCatalogCache = ConcurrentHashMap<String, Pair<Long, ArtistCatalogResult>>()
+    private val artworkEnrichCache = ConcurrentHashMap<String, String>()
     private val searchCacheTtlMs = 5 * 60 * 1000L
 
     private val json = Json {
@@ -160,12 +164,86 @@ class AudiusRepository(
     fun clearSearchCache() {
         searchCache.clear()
         artistCatalogCache.clear()
+        artworkEnrichCache.clear()
     }
 
-    suspend fun fetchTrendingTracks(limit: Int = 36): Result<List<TrackEntity>> = withContext(Dispatchers.IO) {
+    fun resolvePreferredCoverArt(artist: String, title: String): String? {
+        val cleanTitle = title.trim()
+        if (cleanTitle.isBlank()) return null
+        val cleanArtist = artist.trim()
+        val cacheKey = "${normalizeStrictToken(cleanArtist)}|${normalizeStrictToken(cleanTitle)}"
+        artworkEnrichCache[cacheKey]?.let { cached ->
+            return cached.takeIf { it.isNotBlank() }
+        }
+        val fromSpotify = SpotifyCatalogClient.findCachedTrackArtwork(cleanArtist, cleanTitle)
+        if (!fromSpotify.isNullOrBlank()) {
+            artworkEnrichCache[cacheKey] = fromSpotify
+            return fromSpotify
+        }
+        if (FullStreamResolver.isDataSaverEnabled) return null
+        val fromSoundCloud = FullStreamResolver.findSoundCloudArtwork(cleanArtist, cleanTitle)
+        artworkEnrichCache[cacheKey] = fromSoundCloud.orEmpty()
+        return fromSoundCloud
+    }
+
+    suspend fun enrichTracksArtwork(
+        tracks: List<TrackEntity>,
+        maxNetworkLookups: Int = 8,
+    ): List<TrackEntity> = withContext(Dispatchers.IO) {
+        if (tracks.isEmpty()) return@withContext tracks
+        val semaphore = Semaphore(4)
+        var lookupsRemaining = maxNetworkLookups
+        val counterLock = Any()
+
+        coroutineScope {
+            tracks.map { track ->
+                async {
+                    if (track.isUserUpload || FullStreamResolver.isSpotifyOrSoundCloudArtwork(track.coverArtPath)) {
+                        return@async track
+                    }
+                    val cachedOnly = SpotifyCatalogClient.findCachedTrackArtwork(track.artist, track.title)
+                        ?: artworkEnrichCache["${normalizeStrictToken(track.artist)}|${normalizeStrictToken(track.title)}"]
+                            ?.takeIf { it.isNotBlank() }
+                    if (!cachedOnly.isNullOrBlank()) {
+                        return@async track.copy(coverArtPath = cachedOnly)
+                    }
+                    if (FullStreamResolver.isDataSaverEnabled) return@async track
+                    val allowNetwork = synchronized(counterLock) {
+                        if (lookupsRemaining > 0) {
+                            lookupsRemaining--
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    if (!allowNetwork) return@async track
+                    val resolved = semaphore.withPermit {
+                        withTimeoutOrNull(2500L) {
+                            resolvePreferredCoverArt(track.artist, track.title)
+                        }
+                    }
+                    if (!resolved.isNullOrBlank()) track.copy(coverArtPath = resolved) else track
+                }
+            }.awaitAll()
+        }
+    }
+
+    suspend fun fetchTrendingTracks(
+        limit: Int = 36,
+        seedArtists: List<String> = emptyList(),
+    ): Result<List<TrackEntity>> = withContext(Dispatchers.IO) {
         runCatching {
             runCatching { dao.deleteUnreferencedPreviewTracks() }
             coroutineScope {
+                val spotifyTrendingDeferred = async {
+                    withTimeoutOrNull(7000L) {
+                        SpotifyCatalogClient.fetchSpotifyTrendingTracks(
+                            seedArtists = seedArtists,
+                            limit = 18,
+                        )
+                    }.orEmpty()
+                }
+
                 val audiusWeekDeferred = async {
                     withTimeoutOrNull(6500L) {
                         runCatching {
@@ -201,29 +279,24 @@ class AudiusRepository(
                     }.orEmpty()
                 }
 
-                val popularQueries = listOf(
-                    "madk1d",
-                    "miyagi",
-                    "eminem",
-                    "the weeknd",
-                )
-                val ytPopularDeferred = popularQueries.map { q ->
+                val ytPopularDeferred = listOf("the weeknd", "miyagi").map { q ->
                     async {
-                        withTimeoutOrNull(7000L) {
-                            FullStreamResolver.searchYouTubeMusic(query = q, limit = 5)
+                        withTimeoutOrNull(6500L) {
+                            FullStreamResolver.searchYouTubeMusic(query = q, limit = 4)
                         }.orEmpty()
                     }
                 }
                 val scPopularDeferred = listOf("madk1d", "miyagi").map { q ->
                     async {
-                        withTimeoutOrNull(6500L) {
-                            FullStreamResolver.searchSoundCloud(query = q, limit = 5)
+                        withTimeoutOrNull(6000L) {
+                            FullStreamResolver.searchSoundCloud(query = q, limit = 4)
                         }.orEmpty()
                     }
                 }
 
                 val combined = LinkedHashMap<String, TrackEntity>()
-                (ytPopularDeferred.flatMap { it.await() } +
+                (spotifyTrendingDeferred.await() +
+                    ytPopularDeferred.flatMap { it.await() } +
                     scPopularDeferred.flatMap { it.await() } +
                     audiusWeekDeferred.await() +
                     audiusHipHopDeferred.await() +
@@ -232,7 +305,8 @@ class AudiusRepository(
                     combined.putIfAbsent(track.id, track)
                 }
 
-                val entities = combined.values.toList()
+                val rawEntities = combined.values.toList()
+                val entities = enrichTracksArtwork(rawEntities, maxNetworkLookups = 10)
                 upsertPreservingLocalState(entities)
                 entities
             }
@@ -304,7 +378,7 @@ class AudiusRepository(
                 (ytTracks + scTracks + audiusTracks).forEach { track ->
                     combined.putIfAbsent(track.id, track)
                 }
-                val finalResults = combined.values.toList()
+                val finalResults = enrichTracksArtwork(combined.values.toList(), maxNetworkLookups = 8)
                 if (finalResults.isNotEmpty()) {
                     searchCache[cacheKey] = System.currentTimeMillis() to finalResults
                 }
@@ -523,7 +597,7 @@ class AudiusRepository(
             (ytDeferred.flatMap { it.await() } + scDeferred.flatMap { it.await() }).forEach { track ->
                 merged.putIfAbsent(track.id, track)
             }
-            val list = merged.values.toList()
+            val list = enrichTracksArtwork(merged.values.toList(), maxNetworkLookups = 6)
             if (list.isNotEmpty()) {
                 upsertPreservingLocalState(list)
             }
@@ -815,9 +889,17 @@ class AudiusRepository(
             }
 
             val scSearchJob = launch {
-                val res = withTimeoutOrNull(4500L) {
-                    FullStreamResolver.searchSoundCloud(query = expanded, limit = 14)
-                }.orEmpty()
+                val baseDeferred = async {
+                    withTimeoutOrNull(4500L) {
+                        FullStreamResolver.searchSoundCloud(query = expanded, limit = 16)
+                    }.orEmpty()
+                }
+                val collabDeferred = async {
+                    withTimeoutOrNull(4500L) {
+                        FullStreamResolver.searchSoundCloud(query = "$expanded feat", limit = 10)
+                    }.orEmpty()
+                }
+                val res = (baseDeferred.await() + collabDeferred.await()).distinctBy { it.id }
                 if (res.isNotEmpty()) {
                     val localTracks = localTracksDeferred.await()
                     val snapshot = buildMutex.withLock {
@@ -944,10 +1026,17 @@ class AudiusRepository(
             ).map { it.trim() }.filter { it.isNotBlank() }.distinct()
 
             val strictScSearchTracks = scSearchTracks.filter { isTrackByArtist(it, targetNames) }
+            val hasCollabTracks = (spTracks + scChannelTracks + strictScSearchTracks).any { t ->
+                t.artist.contains(",") ||
+                    t.artist.contains("&") ||
+                    t.title.contains("feat", ignoreCase = true) ||
+                    t.title.contains("ft.", ignoreCase = true)
+            }
             val preCount = spTracks.size + scChannelTracks.size + strictScSearchTracks.size + audiusTracks.size
-            val strictYtFallbackTracks = if (preCount < 4) {
+            val strictYtFallbackTracks = if (preCount < 4 || !hasCollabTracks) {
                 withTimeoutOrNull(4500L) {
-                    FullStreamResolver.searchYouTubeMusic(query = expanded, limit = 14)
+                    val query = if (preCount < 4) expanded else "$expanded feat"
+                    FullStreamResolver.searchYouTubeMusic(query = query, limit = 12)
                         .filter { isTrackByArtist(it, targetNames) }
                 }.orEmpty()
             } else {
@@ -955,9 +1044,11 @@ class AudiusRepository(
             }
 
             val localTracks = localTracksDeferred.await()
-            val finalCatalog = buildMutex.withLock {
+            val rawCatalog = buildMutex.withLock {
                 buildMergedSnapshot(localTracks, strictYtFallbackTracks)
             }
+            val enrichedTracks = enrichTracksArtwork(rawCatalog.tracks, maxNetworkLookups = 10)
+            val finalCatalog = rawCatalog.copy(tracks = enrichedTracks)
             if (cacheKey.isNotBlank() && (finalCatalog.tracks.isNotEmpty() || finalCatalog.albums.isNotEmpty())) {
                 artistCatalogCache[cacheKey] = System.currentTimeMillis() to finalCatalog
             }
@@ -1022,11 +1113,59 @@ class AudiusRepository(
             .replace(Regex("\\s*-\\s*Topic$", RegexOption.IGNORE_CASE), "")
             .replace(Regex("\\s+(?:Official|VEVO)$", RegexOption.IGNORE_CASE), "")
         val rawParts = cleanedField
-            .split(Regex("\\s*(?:,|&|/|;|feat\\.|ft\\.|featuring|\\s+x\\s+|\\s+feat\\s+|\\s+with\\s+)\\s*", RegexOption.IGNORE_CASE))
+            .split(
+                Regex(
+                    "\\s*(?:,|&|/|;|\\+|feat\\.|ft\\.|featuring|при\\s+уч\\.|\\s+x\\s+|\\s+×\\s+|\\s+feat\\s+|\\s+ft\\s+|\\s+with\\s+|\\s+и\\s+)\\s*",
+                    RegexOption.IGNORE_CASE,
+                ),
+            )
             .map { normalizeStrictToken(it) }
             .filter { it.isNotBlank() }
         val fullNorm = normalizeStrictToken(cleanedField)
         return fullNorm == normTarget || rawParts.any { it == normTarget }
+    }
+
+    private fun extractTitleFeaturedArtists(title: String): List<String> {
+        val candidates = mutableListOf<String>()
+        // Bracketed or parenthesized featured credits: (feat. Artist A, Artist B), [with Artist C]
+        val bracketedRegex = Regex(
+            """[({\[]\s*(?:feat\.?|ft\.?|featuring|with|prod\.?\s*by|при\s+уч\.?)\s+([^)}\]]+)[)}\]]""",
+            RegexOption.IGNORE_CASE,
+        )
+        bracketedRegex.findAll(title).forEach { m ->
+            candidates += m.groupValues[1]
+        }
+        // Unbracketed trailing featured credit: "Song Name feat. Artist A & Artist B"
+        val trailingRegex = Regex(
+            """(?:^|\s)(?:feat\.?|ft\.?|featuring|при\s+уч\.?)\s+(.+)$""",
+            RegexOption.IGNORE_CASE,
+        )
+        trailingRegex.find(title)?.let { m ->
+            candidates += m.groupValues[1]
+        }
+        // Upload titles prefixed with multiple artists: "ArtistA x ArtistB - Track Name"
+        val dashIdx = title.indexOf(" - ").takeIf { it > 0 } ?: title.indexOf(" — ").takeIf { it > 0 }
+        if (dashIdx != null) {
+            val prefix = title.substring(0, dashIdx).trim()
+            if (prefix.contains(" x ", ignoreCase = true) ||
+                prefix.contains("&") ||
+                prefix.contains(",") ||
+                prefix.contains("×")
+            ) {
+                candidates += prefix
+            }
+        }
+        return candidates
+            .flatMap { segment ->
+                segment.split(
+                    Regex(
+                        "\\s*(?:,|&|/|;|\\+|\\s+x\\s+|\\s+×\\s+|\\s+and\\s+|\\s+и\\s+)\\s*",
+                        RegexOption.IGNORE_CASE,
+                    ),
+                )
+            }
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
     }
 
     internal fun isTrackByArtist(track: TrackEntity, targetNames: List<String>): Boolean {
@@ -1041,7 +1180,15 @@ class AudiusRepository(
         if (suspiciousNoise && targetNames.none { it.lowercase().contains("cover") }) {
             return false
         }
-        return targetNames.any { target -> isArtistNameMatch(track.artist, target) }
+        if (targetNames.any { target -> isArtistNameMatch(track.artist, target) }) {
+            return true
+        }
+        val titleCredits = extractTitleFeaturedArtists(track.title)
+        if (titleCredits.isEmpty()) return false
+        return targetNames.any { target ->
+            val normTarget = normalizeStrictToken(target)
+            normTarget.isNotBlank() && titleCredits.any { normalizeStrictToken(it) == normTarget }
+        }
     }
 
     private fun artistMatchScore(track: TrackEntity, targetNames: List<String>): Int {
@@ -1052,7 +1199,8 @@ class AudiusRepository(
             if (needle.isBlank()) continue
             val score = when {
                 artistNorm == needle -> 120
-                isArtistNameMatch(track.artist, target) -> 90
+                isArtistNameMatch(track.artist, target) -> 95
+                extractTitleFeaturedArtists(track.title).any { normalizeStrictToken(it) == needle } -> 85
                 else -> 0
             }
             if (score > best) best = score
@@ -1070,7 +1218,14 @@ class AudiusRepository(
                 val mergedCover = if (existing.isUserUpload) {
                     existing.coverArtPath ?: track.coverArtPath
                 } else {
-                    FullStreamResolver.upgradeArtworkUrl(track.coverArtPath ?: existing.coverArtPath)
+                    val incomingUrl = track.coverArtPath
+                    val existingUrl = existing.coverArtPath
+                    val bestRaw = when {
+                        FullStreamResolver.isSpotifyOrSoundCloudArtwork(incomingUrl) -> incomingUrl
+                        FullStreamResolver.isSpotifyOrSoundCloudArtwork(existingUrl) -> existingUrl
+                        else -> incomingUrl ?: existingUrl
+                    }
+                    FullStreamResolver.upgradeArtworkUrl(bestRaw)
                 }
                 track.copy(
                     title = existing.title,
@@ -1139,11 +1294,11 @@ class AudiusRepository(
 
     private fun paletteForGenre(genre: String?, seed: String): Pair<Long, Long> {
         val palettes = listOf(
-            0xFFFF5500L to 0xFF9C2B00L,
+            0xFF8B5CF6L to 0xFFA78BFAL,
             0xFF5CE1E6L to 0xFFA78BFAL,
-            0xFFFF9248L to 0xFFFB7185L,
             0xFF34D399L to 0xFF5CE1E6L,
             0xFFA78BFAL to 0xFFFB7185L,
+            0xFF7C3AEDL to 0xFF5CE1E6L,
         )
         val idx = ((genre?.hashCode() ?: 0) + seed.hashCode()).let { abs(it) } % palettes.size
         return palettes[idx]

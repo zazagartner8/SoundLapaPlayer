@@ -22,6 +22,7 @@ import com.google.common.util.concurrent.ListenableFuture
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -29,6 +30,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.abs
@@ -89,7 +91,13 @@ class PlaybackController(
     private val _queueTracks = MutableStateFlow<List<TrackEntity>>(emptyList())
     val queueTracks: StateFlow<List<TrackEntity>> = _queueTracks.asStateFlow()
 
+    private val tickerWakeChannel = Channel<Unit>(Channel.CONFLATED)
+
     var onOfflinePlaybackBlocked: ((String?) -> Unit)? = null
+
+    private fun wakeTicker() {
+        tickerWakeChannel.trySend(Unit)
+    }
 
     init {
         scope.launch {
@@ -947,14 +955,17 @@ class PlaybackController(
                 repeatMode = controller.repeatMode,
             )
         }
+        wakeTicker()
     }
 
     private fun startPositionTicker() {
         positionTickerJob?.cancel()
         positionTickerJob = scope.launch {
-            var ticks = 0
+            var lastPersistedTrackId: String? = null
+            var lastPersistedPosMs = -1L
             while (isActive) {
                 val controller = mediaController
+                var isActivelyRunning = false
                 if (controller != null && controller.mediaItemCount > 0) {
                     val controllerMediaId = controller.currentMediaItem?.mediaId
                     val now = System.currentTimeMillis()
@@ -980,6 +991,7 @@ class PlaybackController(
                     } else {
                         true to _playbackState.value.isBuffering
                     }
+                    isActivelyRunning = playing || buffering
 
                     if (_positionMs.value != pos) {
                         _positionMs.value = pos
@@ -1041,14 +1053,24 @@ class PlaybackController(
                         }
                     }
 
-                    if (ticks % 10 == 0 && playing) {
+                    if (playing && currentId != null &&
+                        (currentId != lastPersistedTrackId || abs(pos - lastPersistedPosMs) >= 2500L)
+                    ) {
+                        lastPersistedTrackId = currentId
+                        lastPersistedPosMs = pos
                         launch(Dispatchers.IO) {
                             preferences.savePlaybackState(currentId, pos)
                         }
                     }
                 }
-                ticks++
-                delay(180L)
+                val nextDelayMs = when {
+                    controller == null || controller.mediaItemCount == 0 -> 900L
+                    isActivelyRunning -> 200L
+                    else -> 750L
+                }
+                withTimeoutOrNull(nextDelayMs) {
+                    tickerWakeChannel.receive()
+                }
             }
         }
     }

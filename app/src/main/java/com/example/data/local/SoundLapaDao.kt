@@ -1,10 +1,9 @@
 package com.example.data.local
 
 import androidx.room.Dao
-import androidx.room.Insert
-import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
+import androidx.room.Upsert
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -24,10 +23,10 @@ interface SoundLapaDao {
     @Query("SELECT COUNT(*) FROM tracks")
     suspend fun getTrackCount(): Int
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun upsertTrack(track: TrackEntity)
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun upsertTracks(tracks: List<TrackEntity>)
 
     @Query("UPDATE tracks SET isLiked = :liked, likeCount = :likeCount WHERE id = :id")
@@ -73,16 +72,28 @@ interface SoundLapaDao {
     @Query("SELECT * FROM playlist_tracks ORDER BY playlistId ASC, position ASC, addedAt ASC")
     fun observeOrderedPlaylistRefs(): Flow<List<PlaylistTrackCrossRef>>
 
+    @Query("SELECT * FROM playlists ORDER BY createdAt DESC")
+    suspend fun getAllPlaylistsOnce(): List<PlaylistEntity>
+
+    @Query("SELECT * FROM playlist_tracks ORDER BY playlistId ASC, position ASC, addedAt ASC")
+    suspend fun getAllPlaylistRefsOnce(): List<PlaylistTrackCrossRef>
+
     @Query("SELECT COALESCE(MAX(position), -1) FROM playlist_tracks WHERE playlistId = :playlistId")
     suspend fun getMaxPlaylistTrackPosition(playlistId: String): Int
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun upsertPlaylist(playlist: PlaylistEntity)
 
     @Query("DELETE FROM playlists WHERE id = :playlistId")
     suspend fun deletePlaylist(playlistId: String)
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Query("DELETE FROM playlists")
+    suspend fun clearAllPlaylists()
+
+    @Query("UPDATE tracks SET isLiked = 0")
+    suspend fun clearAllTrackLikes()
+
+    @Upsert
     suspend fun addTrackToPlaylist(ref: PlaylistTrackCrossRef)
 
     @Query("DELETE FROM playlist_tracks WHERE playlistId = :playlistId AND trackId = :trackId")

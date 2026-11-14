@@ -1,0 +1,367 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated Google user profile, custom identity, and synced app settings for SoundLapa",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the signed-in Google user"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "User display name or custom nickname"
+        },
+        "email": {
+          "type": "string",
+          "description": "Optional user email (private to owner only)"
+        },
+        "photoUrl": {
+          "type": "string",
+          "description": "Optional avatar URL or compressed JPEG data URI"
+        },
+        "bio": {
+          "type": "string",
+          "description": "Optional user profile description / bio"
+        },
+        "avatarBlocked": {
+          "type": "boolean",
+          "description": "Whether custom avatar uploads are permanently blocked for this account due to 18+ moderation violation"
+        },
+        "settings": {
+          "type": "object",
+          "description": "Cloud-synced SoundLapa preferences (language, theme, accent color, crossfade, haptics, cache, data saver)"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when profile was created (FieldValue.serverTimestamp)"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when profile was last updated (FieldValue.serverTimestamp)"
+        }
+      },
+      "required": ["userId", "displayName", "createdAt", "updatedAt"]
+    },
+    "BugReport": {
+      "title": "BugReport",
+      "description": "User-submitted bug report with reporter display name, avatar, message, and timestamp",
+      "type": "object",
+      "properties": {
+        "reportId": {
+          "type": "string",
+          "description": "Unique bug report identifier"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Reporter Firebase Auth UID"
+        },
+        "reporterName": {
+          "type": "string",
+          "description": "Display name of the reporter at submission time"
+        },
+        "reporterAvatarUrl": {
+          "type": "string",
+          "description": "Optional avatar URL or compressed data URI of the reporter"
+        },
+        "message": {
+          "type": "string",
+          "description": "Bug description entered by user"
+        },
+        "appVersion": {
+          "type": "string",
+          "description": "SoundLapa app version string"
+        },
+        "devAccessKey": {
+          "type": "string",
+          "description": "Developer reports access verification key"
+        },
+        "createdAtMs": {
+          "type": "integer",
+          "description": "Client epoch milliseconds when report was sent"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when report was created"
+        }
+      },
+      "required": [
+        "reportId",
+        "userId",
+        "reporterName",
+        "message",
+        "appVersion",
+        "devAccessKey",
+        "createdAtMs",
+        "createdAt"
+      ]
+    },
+    "SavedTrack": {
+      "title": "SavedTrack",
+      "description": "User-saved, liked, or playlist-referenced track metadata persisted across app updates",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID"
+        },
+        "trackId": {
+          "type": "string",
+          "description": "Canonical SoundLapa track ID"
+        },
+        "title": {
+          "type": "string",
+          "description": "Track title"
+        },
+        "artist": {
+          "type": "string",
+          "description": "Track artist name"
+        },
+        "genre": {
+          "type": "string",
+          "description": "Track genre label"
+        },
+        "durationMs": {
+          "type": "integer",
+          "description": "Track duration in milliseconds"
+        },
+        "sourceUri": {
+          "type": "string",
+          "description": "Optional remote stream or resolver URI"
+        },
+        "coverArtPath": {
+          "type": "string",
+          "description": "Optional remote artwork URL"
+        },
+        "accentColorHex": {
+          "type": "integer",
+          "description": "Primary ARGB palette value"
+        },
+        "secondaryColorHex": {
+          "type": "integer",
+          "description": "Secondary ARGB palette value"
+        },
+        "isUserUpload": {
+          "type": "boolean",
+          "description": "Whether track was uploaded by user"
+        },
+        "isLiked": {
+          "type": "boolean",
+          "description": "Whether user liked this track"
+        },
+        "playCount": {
+          "type": "integer",
+          "description": "Track play count"
+        },
+        "likeCount": {
+          "type": "integer",
+          "description": "Track like count"
+        },
+        "description": {
+          "type": "string",
+          "description": "Optional track source description"
+        },
+        "albumTitle": {
+          "type": "string",
+          "description": "Optional album title"
+        },
+        "trackCreatedAtMs": {
+          "type": "integer",
+          "description": "Client epoch timestamp when track was added"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when record was created"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when record was updated"
+        }
+      },
+      "required": [
+        "userId",
+        "trackId",
+        "title",
+        "artist",
+        "genre",
+        "durationMs",
+        "accentColorHex",
+        "secondaryColorHex",
+        "isUserUpload",
+        "isLiked",
+        "playCount",
+        "likeCount",
+        "trackCreatedAtMs",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UserPlaylist": {
+      "title": "UserPlaylist",
+      "description": "User-created or imported playlist persisted in cloud",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID"
+        },
+        "playlistId": {
+          "type": "string",
+          "description": "Canonical SoundLapa playlist ID"
+        },
+        "name": {
+          "type": "string",
+          "description": "Playlist name"
+        },
+        "description": {
+          "type": "string",
+          "description": "Optional playlist description"
+        },
+        "coverArtPath": {
+          "type": "string",
+          "description": "Optional cover artwork URL"
+        },
+        "playlistCreatedAtMs": {
+          "type": "integer",
+          "description": "Client epoch timestamp when playlist was created"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when playlist was created"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when playlist was updated"
+        }
+      },
+      "required": [
+        "userId",
+        "playlistId",
+        "name",
+        "playlistCreatedAtMs",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UserPlaylistItem": {
+      "title": "UserPlaylistItem",
+      "description": "Ordered track entry inside a user playlist",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID"
+        },
+        "playlistId": {
+          "type": "string",
+          "description": "Parent playlist ID"
+        },
+        "trackId": {
+          "type": "string",
+          "description": "Referenced track ID"
+        },
+        "position": {
+          "type": "integer",
+          "description": "0-based order position in playlist"
+        },
+        "addedAtMs": {
+          "type": "integer",
+          "description": "Epoch milliseconds when added"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when added"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when updated"
+        }
+      },
+      "required": [
+        "userId",
+        "playlistId",
+        "trackId",
+        "position",
+        "addedAtMs",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "CloudMetrics": {
+      "title": "CloudMetrics",
+      "description": "Zero-PII per-user Firestore storage byte usage summary for developer quota monitoring",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID"
+        },
+        "storageBytes": {
+          "type": "integer",
+          "description": "Estimated serialized Firestore byte footprint for this user's cloud documents"
+        },
+        "tracksCount": {
+          "type": "integer",
+          "description": "Count of cloud saved track documents"
+        },
+        "playlistsCount": {
+          "type": "integer",
+          "description": "Count of cloud playlist documents"
+        },
+        "devAccessKey": {
+          "type": "string",
+          "description": "Developer metrics access verification key"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when metrics were updated"
+        }
+      },
+      "required": [
+        "userId",
+        "storageBytes",
+        "tracksCount",
+        "playlistsCount",
+        "devAccessKey",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Private user profile, custom identity, and synced settings for SoundLapa Google Sign-In account"
+    },
+    "/users/{userId}/tracks/{trackDocId}": {
+      "schema": { "$ref": "#/entities/SavedTrack" },
+      "description": "User's saved, liked, and playlist tracks synced across installs and updates"
+    },
+    "/users/{userId}/playlists/{playlistDocId}": {
+      "schema": { "$ref": "#/entities/UserPlaylist" },
+      "description": "User's playlists synced across installs and updates"
+    },
+    "/users/{userId}/playlists/{playlistDocId}/items/{itemDocId}": {
+      "schema": { "$ref": "#/entities/UserPlaylistItem" },
+      "description": "Ordered tracks belonging to a user's playlist"
+    },
+    "/bug_reports/{reportId}": {
+      "schema": { "$ref": "#/entities/BugReport" },
+      "description": "User bug reports queried in the password-protected Developer Reports section"
+    },
+    "/cloud_metrics/{userId}": {
+      "schema": { "$ref": "#/entities/CloudMetrics" },
+      "description": "Aggregated cloud byte usage per user for developer storage monitoring"
+    }
+  }
+}

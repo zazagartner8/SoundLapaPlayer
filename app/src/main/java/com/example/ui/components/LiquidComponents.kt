@@ -30,6 +30,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
+import androidx.compose.material.icons.rounded.Flag
 import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.MoreVert
@@ -40,8 +41,10 @@ import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
 import androidx.compose.material.icons.rounded.Wifi
 import androidx.compose.material.icons.rounded.WifiOff
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -49,13 +52,17 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.NavigationRailItemDefaults
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -78,20 +85,24 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.data.local.TrackEntity
+import com.example.ui.BugReportUiState
 import com.example.ui.SoundLapaTab
 import com.example.ui.formatDuration
 import com.example.ui.i18n.LocalAppStrings
 import com.example.ui.shaders.TrackCoverArtwork
+import com.example.ui.theme.LiquidMint
 import kotlinx.coroutines.flow.StateFlow
 import kotlin.math.abs
 
 @Composable
 fun SystemUtilityTopBar(
+    onBugReportClick: () -> Unit,
     onAboutClick: () -> Unit,
     onSettingsClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val uriHandler = LocalUriHandler.current
+    val strings = LocalAppStrings.current
     val accent = MaterialTheme.colorScheme.primary
     val onSurfaceVariant = MaterialTheme.colorScheme.onSurfaceVariant
     val creatorLabel = remember(accent, onSurfaceVariant) {
@@ -108,7 +119,7 @@ fun SystemUtilityTopBar(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 10.dp),
+            .padding(horizontal = 14.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
@@ -119,21 +130,21 @@ fun SystemUtilityTopBar(
             modifier = Modifier.testTag("top_creator_badge"),
         ) {
             Row(
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
             ) {
                 Image(
                     painter = painterResource(R.drawable.soundlapa_brand_logo),
                     contentDescription = "SoundLapa Logo",
                     contentScale = ContentScale.Crop,
                     modifier = Modifier
-                        .size(24.dp)
+                        .size(21.dp)
                         .clip(CircleShape),
                 )
                 Text(
                     text = creatorLabel,
-                    style = MaterialTheme.typography.titleSmall,
+                    style = MaterialTheme.typography.labelLarge,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -142,37 +153,57 @@ fun SystemUtilityTopBar(
 
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            IconButton(
+            CompactTopBarIconButton(
+                icon = Icons.Rounded.Flag,
+                contentDescription = strings.bugReportButtonCd,
+                onClick = onBugReportClick,
+                testTag = "top_bug_report_button",
+            )
+            CompactTopBarIconButton(
+                icon = Icons.Rounded.Info,
+                contentDescription = stringResource(R.string.cd_about_app),
                 onClick = onAboutClick,
-                modifier = Modifier
-                    .minimumInteractiveComponentSize()
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f))
-                    .testTag("top_about_button"),
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.Info,
-                    contentDescription = stringResource(R.string.cd_about_app),
-                    tint = MaterialTheme.colorScheme.onSurface,
-                )
-            }
-
-            IconButton(
+                testTag = "top_about_button",
+            )
+            CompactTopBarIconButton(
+                icon = Icons.Rounded.Settings,
+                contentDescription = stringResource(R.string.cd_settings),
                 onClick = onSettingsClick,
-                modifier = Modifier
-                    .minimumInteractiveComponentSize()
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f))
-                    .testTag("top_settings_button"),
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.Settings,
-                    contentDescription = stringResource(R.string.cd_settings),
-                    tint = MaterialTheme.colorScheme.onSurface,
-                )
-            }
+                testTag = "top_settings_button",
+            )
+        }
+    }
+}
+
+@Composable
+private fun CompactTopBarIconButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit,
+    testTag: String,
+) {
+    IconButton(
+        onClick = onClick,
+        modifier = Modifier
+            .minimumInteractiveComponentSize()
+            .size(48.dp)
+            .testTag(testTag),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.62f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = contentDescription,
+                tint = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.size(21.dp),
+            )
         }
     }
 }
@@ -864,3 +895,104 @@ fun LiquidNavigationRail(
         )
     }
 }
+
+@Composable
+fun BugReportDialog(
+    bugReportState: BugReportUiState,
+    onSubmit: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val strings = LocalAppStrings.current
+    val haptics = rememberSoundLapaHaptics()
+    val accent = MaterialTheme.colorScheme.primary
+    var messageText by remember { mutableStateOf("") }
+
+    LaunchedEffect(bugReportState.statusMessage) {
+        if (bugReportState.statusMessage == "sent") {
+            messageText = ""
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(
+                imageVector = Icons.Rounded.Flag,
+                contentDescription = strings.bugReportDialogTitle,
+                tint = accent,
+            )
+        },
+        title = {
+            Text(
+                text = strings.bugReportDialogTitle,
+                style = MaterialTheme.typography.titleLarge,
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = strings.bugReportDialogHint,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = messageText,
+                    onValueChange = { messageText = it },
+                    label = { Text(strings.bugReportInputLabel) },
+                    placeholder = { Text(strings.bugReportInputPlaceholder) },
+                    minLines = 3,
+                    maxLines = 6,
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("bug_report_message_input"),
+                )
+                if (bugReportState.statusMessage == "sent") {
+                    Text(
+                        text = if (bugReportState.savedOfflineOnly) {
+                            strings.bugReportSavedOfflineNote
+                        } else {
+                            strings.bugReportSentSuccess
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = LiquidMint,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.testTag("bug_report_status_text"),
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    haptics.confirm()
+                    onSubmit(messageText)
+                },
+                enabled = messageText.isNotBlank() && !bugReportState.isSubmitting,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = accent,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                ),
+                modifier = Modifier.testTag("bug_report_submit_button"),
+            ) {
+                if (bugReportState.isSubmitting) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onPrimary,
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(strings.bugReportSendingLabel)
+                } else {
+                    Text(strings.bugReportSendButton)
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(strings.close)
+            }
+        },
+    )
+}
+

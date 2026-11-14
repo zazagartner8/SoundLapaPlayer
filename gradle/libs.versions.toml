@@ -45,6 +45,7 @@ documentfile = "1.0.1"
 kotlinxSerializationJson = "1.8.0"
 newpipeExtractor = "v0.26.5"
 desugarJdkLibs = "2.1.5"
+biometric = "1.1.0"
 
 
 [libraries]
@@ -107,6 +108,7 @@ androidx-documentfile = { group = "androidx.documentfile", name = "documentfile"
 kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "kotlinxSerializationJson" }
 newpipe-extractor = { group = "com.github.teamnewpipe", name = "NewPipeExtractor", version.ref = "newpipeExtractor" }
 desugar-jdk-libs = { group = "com.android.tools", name = "desugar_jdk_libs_nio", version.ref = "desugarJdkLibs" }
+androidx-biometric = { group = "androidx.biometric", name = "biometric", version.ref = "biometric" }
 
 
 [plugins]

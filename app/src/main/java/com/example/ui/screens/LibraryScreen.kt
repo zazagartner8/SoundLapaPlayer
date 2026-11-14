@@ -3,6 +3,11 @@ package com.example.ui.screens
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -10,6 +15,7 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -27,6 +33,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -51,6 +58,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -58,11 +66,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.BlurredEdgeTreatment
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -77,9 +89,14 @@ import com.example.ui.MainUiState
 import com.example.ui.components.CreatePlaylistDialog
 import com.example.ui.components.TrackRowItem
 import com.example.ui.components.rememberSoundLapaHaptics
+import com.example.ui.i18n.AppStrings
 import com.example.ui.i18n.LocalAppStrings
 import com.example.ui.shaders.TrackCoverArtwork
+import com.example.ui.shaders.rememberIsAppForeground
 import com.example.ui.theme.LiquidRose
+import kotlin.math.PI
+import kotlin.math.cos
+import kotlin.math.sin
 
 @Composable
 fun LibraryScreen(
@@ -395,6 +412,7 @@ fun LibraryScreen(
                             ) { pl ->
                                 PlaylistRowCard(
                                     playlistWithTracks = pl,
+                                    appLanguage = state.settings.appLanguage,
                                     onOpen = {
                                         haptics.tick()
                                         openedPlaylistId = pl.playlist.id
@@ -522,83 +540,166 @@ fun LibraryScreen(
     }
 }
 
+private fun formatPlaylistDurationValue(
+    tracks: List<TrackEntity>,
+    appLanguage: String,
+    strings: AppStrings,
+): String {
+    if (tracks.isEmpty()) return strings.playlistTotalDurationMinutes(0)
+    val totalMinutes = ((tracks.sumOf { it.durationMs } / 60_000L).toInt()).coerceAtLeast(1)
+    if (totalMinutes < 60) return strings.playlistTotalDurationMinutes(totalMinutes)
+    val hours = totalMinutes / 60
+    val remMins = totalMinutes % 60
+    return when (appLanguage) {
+        "ru" -> if (remMins > 0) "$hours ч $remMins мин" else "$hours ч"
+        "it" -> if (remMins > 0) "$hours h $remMins min" else "$hours h"
+        else -> if (remMins > 0) "${hours}h ${remMins}m" else "${hours}h"
+    }
+}
+
 @Composable
 private fun PlaylistRowCard(
     playlistWithTracks: PlaylistWithTracks,
+    appLanguage: String,
     onOpen: () -> Unit,
     onPlay: () -> Unit,
 ) {
     val strings = LocalAppStrings.current
+    val context = LocalContext.current
     val accent = MaterialTheme.colorScheme.primary
-    val totalMinutes = remember(playlistWithTracks.tracks) {
-        ((playlistWithTracks.tracks.sumOf { it.durationMs } / 60_000L).toInt()).coerceAtLeast(
-            if (playlistWithTracks.tracks.isNotEmpty()) 1 else 0,
+    val backdropTrack = remember(playlistWithTracks.tracks) {
+        playlistWithTracks.tracks.firstOrNull { !it.coverArtPath.isNullOrBlank() }
+            ?: playlistWithTracks.tracks.firstOrNull()
+    }
+    val backdropCoverUrl = remember(playlistWithTracks.playlist.coverArtPath, backdropTrack) {
+        playlistWithTracks.playlist.coverArtPath?.takeIf { it.isNotBlank() }
+            ?: backdropTrack?.coverArtPath
+    }
+    val durationLabel = remember(playlistWithTracks.tracks, appLanguage, strings) {
+        strings.playlistDurationLabel(
+            formatPlaylistDurationValue(
+                tracks = playlistWithTracks.tracks,
+                appLanguage = appLanguage,
+                strings = strings,
+            ),
         )
     }
 
+    val shape = RoundedCornerShape(20.dp)
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(18.dp))
+            .clip(shape)
+            .border(
+                width = 1.dp,
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.40f),
+                shape = shape,
+            )
             .clickable(onClick = onOpen)
             .testTag("playlist_card_${playlistWithTracks.playlist.id}"),
-        shape = RoundedCornerShape(18.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.44f),
+        shape = shape,
+        color = Color.Transparent,
         contentColor = MaterialTheme.colorScheme.onSurface,
     ) {
-        Row(
-            modifier = Modifier.padding(10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            PlaylistArtworkMosaic(
-                coverArtPath = playlistWithTracks.playlist.coverArtPath,
-                tracks = playlistWithTracks.tracks,
-                accentColor = accent,
-                modifier = Modifier.size(66.dp),
-                cornerRadius = 12.dp,
-            )
-
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(3.dp),
+        Box(modifier = Modifier.fillMaxWidth()) {
+            // Translucent floating cover backdrop inside the playlist card
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .graphicsLayer {
+                        scaleX = 1.38f
+                        scaleY = 1.38f
+                        alpha = 0.34f
+                    }
+                    .blur(18.dp, edgeTreatment = BlurredEdgeTreatment.Rectangle),
             ) {
-                Text(
-                    text = playlistWithTracks.playlist.name,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                val metaText = if (playlistWithTracks.tracks.isNotEmpty()) {
-                    "${strings.tracksCountLabel(playlistWithTracks.tracks.size)} • ${strings.playlistTotalDurationMinutes(totalMinutes)}"
+                if (!backdropCoverUrl.isNullOrBlank()) {
+                    SubcomposeAsyncImage(
+                        model = ImageRequest.Builder(context)
+                            .data(backdropCoverUrl)
+                            .allowHardware(true)
+                            .size(220)
+                            .crossfade(true)
+                            .build(),
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } else if (backdropTrack != null) {
+                    TrackCoverArtwork(
+                        track = backdropTrack,
+                        cornerRadius = 0.dp,
+                        targetSizePx = 180,
+                        modifier = Modifier.fillMaxSize(),
+                    )
                 } else {
-                    strings.tracksCountLabel(0)
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(
+                                Brush.linearGradient(
+                                    listOf(accent.copy(alpha = 0.45f), accent.copy(alpha = 0.14f)),
+                                ),
+                            ),
+                    )
                 }
-                Text(
-                    text = metaText,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
             }
 
-            if (playlistWithTracks.tracks.isNotEmpty()) {
-                IconButton(
-                    onClick = onPlay,
-                    modifier = Modifier
-                        .size(44.dp)
-                        .clip(CircleShape)
-                        .background(accent),
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.72f)),
+            )
+
+            Row(
+                modifier = Modifier.padding(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                PlaylistArtworkMosaic(
+                    coverArtPath = playlistWithTracks.playlist.coverArtPath,
+                    tracks = playlistWithTracks.tracks,
+                    accentColor = accent,
+                    modifier = Modifier.size(66.dp),
+                    cornerRadius = 12.dp,
+                )
+
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(3.dp),
                 ) {
-                    Icon(
-                        imageVector = Icons.Rounded.PlayArrow,
-                        contentDescription = strings.playCountLabel(playlistWithTracks.tracks.size),
-                        tint = MaterialTheme.colorScheme.onPrimary,
-                        modifier = Modifier.size(24.dp),
+                    Text(
+                        text = playlistWithTracks.playlist.name,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
+                    Text(
+                        text = durationLabel,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+
+                if (playlistWithTracks.tracks.isNotEmpty()) {
+                    IconButton(
+                        onClick = onPlay,
+                        modifier = Modifier
+                            .size(44.dp)
+                            .clip(CircleShape)
+                            .background(accent),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.PlayArrow,
+                            contentDescription = strings.playCountLabel(playlistWithTracks.tracks.size),
+                            tint = MaterialTheme.colorScheme.onPrimary,
+                            modifier = Modifier.size(24.dp),
+                        )
+                    }
                 }
             }
         }
@@ -624,6 +725,8 @@ private fun PlaylistArtworkMosaic(
         SubcomposeAsyncImage(
             model = ImageRequest.Builder(context)
                 .data(coverArtPath)
+                .allowHardware(true)
+                .size(420)
                 .crossfade(true)
                 .build(),
             contentDescription = null,
@@ -736,44 +839,82 @@ private fun PlaylistDetailView(
     val strings = LocalAppStrings.current
     val haptics = rememberSoundLapaHaptics()
     val firstTrack = playlistWithTracks.tracks.firstOrNull()
+    val backdropTrack = remember(playlistWithTracks.tracks) {
+        playlistWithTracks.tracks.firstOrNull { !it.coverArtPath.isNullOrBlank() } ?: firstTrack
+    }
+    val backdropCoverUrl = remember(playlistWithTracks.playlist.coverArtPath, backdropTrack) {
+        playlistWithTracks.playlist.coverArtPath?.takeIf { it.isNotBlank() }
+            ?: backdropTrack?.coverArtPath
+    }
     val accent = MaterialTheme.colorScheme.primary
-    val heroTint = firstTrack?.let { Color(it.accentColorHex) } ?: accent
-    val totalMinutes = remember(playlistWithTracks.tracks) {
-        ((playlistWithTracks.tracks.sumOf { it.durationMs } / 60_000L).toInt()).coerceAtLeast(
-            if (playlistWithTracks.tracks.isNotEmpty()) 1 else 0,
+    val heroTint = backdropTrack?.let { Color(it.accentColorHex) } ?: accent
+    val heroSecondary = backdropTrack?.let { Color(it.secondaryColorHex) } ?: accent
+    val backgroundColor = MaterialTheme.colorScheme.background
+    val listState = rememberLazyListState()
+    val density = LocalDensity.current
+    val collapseRangePx = remember(density) { with(density) { 270.dp.toPx() } }
+    val scrollOffsetPx by remember {
+        derivedStateOf {
+            if (listState.firstVisibleItemIndex == 0) {
+                listState.firstVisibleItemScrollOffset.toFloat()
+            } else {
+                collapseRangePx
+            }
+        }
+    }
+    val bannerCollapseFraction by remember {
+        derivedStateOf { (scrollOffsetPx / collapseRangePx).coerceIn(0f, 1f) }
+    }
+    val durationLabel = remember(playlistWithTracks.tracks, state.settings.appLanguage, strings) {
+        strings.playlistDurationLabel(
+            formatPlaylistDurationValue(
+                tracks = playlistWithTracks.tracks,
+                appLanguage = state.settings.appLanguage,
+                strings = strings,
+            ),
         )
     }
 
-    LazyColumn(
+    Box(
         modifier = Modifier
             .fillMaxSize()
             .widthIn(max = 720.dp),
-        contentPadding = PaddingValues(
-            start = 16.dp,
-            end = 16.dp,
-            top = 4.dp,
-            bottom = bottomContentPadding,
-        ),
-        verticalArrangement = Arrangement.spacedBy(2.dp),
+        contentAlignment = Alignment.TopCenter,
     ) {
-        item(key = "pl_detail_hero") {
-            Box(
+        if (bannerCollapseFraction < 0.99f) {
+            PlaylistFloatingCoverBackdrop(
+                coverArtUrl = backdropCoverUrl,
+                fallbackTrack = backdropTrack,
+                heroAccent = heroTint,
+                heroSecondary = heroSecondary,
+                backgroundColor = backgroundColor,
+                collapseFraction = bannerCollapseFraction,
+                scrollOffsetPx = scrollOffsetPx,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(24.dp))
-                    .background(
-                        Brush.verticalGradient(
-                            colors = listOf(
-                                heroTint.copy(alpha = 0.24f),
-                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.22f),
-                                Color.Transparent,
-                            ),
-                        ),
-                    )
-                    .padding(horizontal = 8.dp, vertical = 6.dp),
-            ) {
+                    .height(370.dp)
+                    .align(Alignment.TopCenter),
+            )
+        }
+
+        LazyColumn(
+            state = listState,
+            modifier = Modifier
+                .fillMaxSize()
+                .widthIn(max = 720.dp),
+            contentPadding = PaddingValues(
+                start = 16.dp,
+                end = 16.dp,
+                top = 4.dp,
+                bottom = bottomContentPadding,
+            ),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            item(key = "pl_detail_hero", contentType = "playlist_hero") {
                 Column(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 4.dp, vertical = 6.dp),
                     verticalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
                     Row(
@@ -789,7 +930,7 @@ private fun PlaylistDetailView(
                             modifier = Modifier
                                 .minimumInteractiveComponentSize()
                                 .clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)),
+                                .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.62f)),
                         ) {
                             Icon(
                                 imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
@@ -806,7 +947,7 @@ private fun PlaylistDetailView(
                             modifier = Modifier
                                 .minimumInteractiveComponentSize()
                                 .clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f))
+                                .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.62f))
                                 .testTag("delete_playlist_button"),
                         ) {
                             Icon(
@@ -824,14 +965,14 @@ private fun PlaylistDetailView(
                         Surface(
                             shape = RoundedCornerShape(18.dp),
                             tonalElevation = 10.dp,
-                            shadowElevation = 14.dp,
+                            shadowElevation = 18.dp,
                             color = Color.Transparent,
                         ) {
                             PlaylistArtworkMosaic(
                                 coverArtPath = playlistWithTracks.playlist.coverArtPath,
                                 tracks = playlistWithTracks.tracks,
                                 accentColor = accent,
-                                modifier = Modifier.size(176.dp),
+                                modifier = Modifier.size(184.dp),
                                 cornerRadius = 18.dp,
                             )
                         }
@@ -867,11 +1008,7 @@ private fun PlaylistDetailView(
                                 )
                             }
                             Text(
-                                text = if (playlistWithTracks.tracks.isNotEmpty()) {
-                                    "${strings.tracksCountLabel(playlistWithTracks.tracks.size)} • ${strings.playlistTotalDurationMinutes(totalMinutes)}"
-                                } else {
-                                    strings.tracksCountLabel(0)
-                                },
+                                text = durationLabel,
                                 style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -880,7 +1017,7 @@ private fun PlaylistDetailView(
                         if (playlistWithTracks.tracks.isNotEmpty()) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
                                 IconButton(
                                     onClick = {
@@ -889,13 +1026,15 @@ private fun PlaylistDetailView(
                                     },
                                     modifier = Modifier
                                         .minimumInteractiveComponentSize()
+                                        .clip(CircleShape)
+                                        .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.50f))
                                         .testTag("playlist_detail_shuffle_button"),
                                 ) {
                                     Icon(
                                         imageVector = Icons.Rounded.Shuffle,
                                         contentDescription = strings.playlistShuffleLabel,
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.size(24.dp),
+                                        tint = MaterialTheme.colorScheme.onSurface,
+                                        modifier = Modifier.size(22.dp),
                                     )
                                 }
 
@@ -921,29 +1060,141 @@ private fun PlaylistDetailView(
                         }
                     }
                 }
+                Spacer(modifier = Modifier.height(6.dp))
             }
-            Spacer(modifier = Modifier.height(6.dp))
-        }
 
-        if (playlistWithTracks.tracks.isNotEmpty()) {
-            items(playlistWithTracks.tracks, key = { "pl_${it.id}" }) { track ->
-                val isCurrent = state.playback.currentTrackId == track.id
-                TrackRowItem(
-                    track = track,
-                    isCurrentTrack = isCurrent,
-                    isPlaying = isCurrent && state.playback.isPlaying,
-                    compact = true,
-                    onPlayClick = { onPlayTrack(track) },
-                    onLikeClick = { onToggleLike(track) },
-                    onRemoveFromPlaylistClick = { onRemoveTrack(track) },
-                    onMoreClick = { onOpenTrackOptions(track) },
+            if (playlistWithTracks.tracks.isNotEmpty()) {
+                items(
+                    items = playlistWithTracks.tracks,
+                    key = { "pl_${it.id}" },
+                    contentType = { "playlist_track_row" },
+                ) { track ->
+                    val isCurrent = state.playback.currentTrackId == track.id
+                    TrackRowItem(
+                        track = track,
+                        isCurrentTrack = isCurrent,
+                        isPlaying = isCurrent && state.playback.isPlaying,
+                        compact = true,
+                        onPlayClick = { onPlayTrack(track) },
+                        onLikeClick = { onToggleLike(track) },
+                        onRemoveFromPlaylistClick = { onRemoveTrack(track) },
+                        onMoreClick = { onOpenTrackOptions(track) },
+                    )
+                }
+            } else {
+                item(key = "pl_empty") {
+                    EmptyLibraryNotice(strings.emptyPlaylist)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PlaylistFloatingCoverBackdrop(
+    coverArtUrl: String?,
+    fallbackTrack: TrackEntity?,
+    heroAccent: Color,
+    heroSecondary: Color,
+    backgroundColor: Color,
+    collapseFraction: Float,
+    scrollOffsetPx: Float,
+    modifier: Modifier = Modifier,
+) {
+    val context = LocalContext.current
+    val isForeground = rememberIsAppForeground()
+    val phase = if (isForeground && collapseFraction < 0.99f) {
+        val infiniteTransition = rememberInfiniteTransition(label = "playlistBannerFloat")
+        val animatedPhase by infiniteTransition.animateFloat(
+            initialValue = 0f,
+            targetValue = (2.0 * PI).toFloat(),
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 16_000, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart,
+            ),
+            label = "playlistBannerPhase",
+        )
+        animatedPhase
+    } else {
+        0f
+    }
+
+    val visibleAlpha = (1f - collapseFraction).coerceIn(0f, 1f)
+    val fadeScrim = remember(backgroundColor) {
+        Brush.verticalGradient(
+            colors = listOf(
+                backgroundColor.copy(alpha = 0.14f),
+                backgroundColor.copy(alpha = 0.44f),
+                backgroundColor,
+            ),
+        )
+    }
+
+    Box(
+        modifier = modifier
+            .graphicsLayer {
+                alpha = visibleAlpha
+                translationY = -scrollOffsetPx * 0.36f
+            }
+            .clip(RoundedCornerShape(0.dp))
+            .testTag("playlist_floating_backdrop"),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    val ampX = size.width * 0.06f
+                    val ampY = size.height * 0.07f
+                    translationX = sin(phase) * ampX
+                    translationY = cos(phase) * ampY
+                    val scale = 1.44f + 0.08f * sin(phase)
+                    scaleX = scale
+                    scaleY = scale
+                    rotationZ = sin(phase) * 3.5f
+                    alpha = 0.46f
+                }
+                .blur(
+                    radius = 26.dp,
+                    edgeTreatment = BlurredEdgeTreatment.Rectangle,
+                ),
+        ) {
+            if (!coverArtUrl.isNullOrBlank()) {
+                SubcomposeAsyncImage(
+                    model = ImageRequest.Builder(context)
+                        .data(coverArtUrl)
+                        .allowHardware(true)
+                        .size(320)
+                        .crossfade(true)
+                        .build(),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else if (fallbackTrack != null) {
+                TrackCoverArtwork(
+                    track = fallbackTrack,
+                    cornerRadius = 0.dp,
+                    targetSizePx = 280,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.linearGradient(
+                                listOf(heroAccent.copy(alpha = 0.36f), heroSecondary.copy(alpha = 0.22f)),
+                            ),
+                        ),
                 )
             }
-        } else {
-            item(key = "pl_empty") {
-                EmptyLibraryNotice(strings.emptyPlaylist)
-            }
         }
+
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(fadeScrim),
+        )
     }
 }
 

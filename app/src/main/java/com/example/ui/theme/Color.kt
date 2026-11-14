@@ -2,7 +2,8 @@ package com.example.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-// Default Emerald Green & Brand Accents
+// Default Purple & Brand Accents
+val SoundLapaPurple = Color(0xFF8B5CF6)
 val SoundLapaEmerald = Color(0xFF10B981)
 val SoundLapaFlame = Color(0xFFFF5500)
 val SoundLapaTerracotta = Color(0xFF9C2B00)

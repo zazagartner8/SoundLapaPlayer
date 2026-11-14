@@ -39,6 +39,7 @@ data class ImportedTrackQuery(
     val artist: String,
     val durationMs: Long = 180_000L,
     val albumTitle: String? = null,
+    val coverArtUrl: String? = null,
 )
 
 data class ParsedPlaylistPayload(
@@ -255,8 +256,8 @@ class PlaylistImporter(
                     cachedFilePath = null,
                     sourceUri = info.url ?: url,
                     coverArtPath = FullStreamResolver.upgradeArtworkUrl(info.thumbnails.lastOrNull()?.url),
-                    accentColorHex = 0xFFFF5500L,
-                    secondaryColorHex = 0xFF9C2B00L,
+                    accentColorHex = 0xFF8B5CF6L,
+                    secondaryColorHex = 0xFFA78BFAL,
                     isUserUpload = false,
                     isAutoImported = false,
                     isCachedOffline = false,
@@ -333,7 +334,7 @@ class PlaylistImporter(
         val pageSize = 100
         while (queries.size < MAX_IMPORT_TRACKS) {
             val pageUrl = if (kind == "playlist") {
-                "https://api.spotify.com/v1/playlists/$id/tracks?offset=$offset&limit=$pageSize&fields=items(track(name,duration_ms,album(name),artists(name))),next"
+                "https://api.spotify.com/v1/playlists/$id/tracks?offset=$offset&limit=$pageSize&fields=items(track(name,duration_ms,album(name,images),artists(name))),next"
             } else {
                 "https://api.spotify.com/v1/albums/$id/tracks?offset=$offset&limit=$pageSize"
             }
@@ -352,16 +353,26 @@ class PlaylistImporter(
                     (it as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull?.trim()
                 }?.joinToString(", ").orEmpty()
                 val durationMs = trackObj["duration_ms"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 180_000L
+                val albumObj = trackObj["album"] as? JsonObject
                 val albumTitle = if (kind == "album") {
                     collectionTitle
                 } else {
-                    (trackObj["album"] as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull?.trim()
+                    albumObj?.get("name")?.jsonPrimitive?.contentOrNull?.trim()
+                }
+                val trackCover = if (kind == "album") {
+                    collectionCover
+                } else {
+                    (albumObj?.get("images") as? JsonArray)
+                        ?.firstOrNull()
+                        ?.let { (it as? JsonObject)?.get("url")?.jsonPrimitive?.contentOrNull }
+                        ?.takeIf { it.isNotBlank() }
                 }
                 queries += ImportedTrackQuery(
                     title = title,
                     artist = artist,
                     durationMs = durationMs,
                     albumTitle = albumTitle,
+                    coverArtUrl = trackCover,
                 )
                 if (queries.size >= MAX_IMPORT_TRACKS) break
             }
@@ -398,16 +409,22 @@ class PlaylistImporter(
             if (trackTitle.isBlank()) return@mapNotNull null
             val artist = (obj["artist"] as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
             val sec = obj["duration"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 180L
+            val albumObj = obj["album"] as? JsonObject
             val album = if (kind == "album") {
                 title
             } else {
-                (obj["album"] as? JsonObject)?.get("title")?.jsonPrimitive?.contentOrNull?.trim()
+                albumObj?.get("title")?.jsonPrimitive?.contentOrNull?.trim()
             }
+            val trackCover = listOf("cover_xl", "cover_big", "cover_medium")
+                .firstNotNullOfOrNull { key ->
+                    albumObj?.get(key)?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                } ?: coverUrl
             ImportedTrackQuery(
                 title = trackTitle,
                 artist = artist,
                 durationMs = (sec.coerceAtLeast(30L) * 1000L),
                 albumTitle = album,
+                coverArtUrl = trackCover,
             )
         }
         return ParsedPlaylistPayload(
@@ -442,14 +459,24 @@ class PlaylistImporter(
                             }.trim()
                             if (searchQuery.isBlank()) return@withPermit idx to null
                             val matched = withTimeoutOrNull(7000L) {
-                                FullStreamResolver.searchYouTubeMusic(searchQuery, limit = 2).firstOrNull()
-                                    ?: FullStreamResolver.searchSoundCloud(searchQuery, limit = 2).firstOrNull()
+                                FullStreamResolver.searchSoundCloud(searchQuery, limit = 2).firstOrNull()
+                                    ?: FullStreamResolver.searchYouTubeMusic(searchQuery, limit = 2).firstOrNull()
                                     ?: audiusRepository.searchTracks(searchQuery, limit = 2).getOrNull()?.firstOrNull()
                             }
-                            val finalMatched = if (matched != null && matched.albumTitle.isNullOrBlank() && !item.albumTitle.isNullOrBlank()) {
-                                matched.copy(albumTitle = item.albumTitle)
+                            val finalMatched = if (matched != null) {
+                                val preferredCover = item.coverArtUrl?.takeIf { it.isNotBlank() }
+                                    ?: matched.coverArtPath?.takeIf { FullStreamResolver.isSpotifyOrSoundCloudArtwork(it) }
+                                    ?: audiusRepository.resolvePreferredCoverArt(
+                                        artist = item.artist.ifBlank { matched.artist },
+                                        title = item.title.ifBlank { matched.title },
+                                    )
+                                    ?: matched.coverArtPath
+                                matched.copy(
+                                    albumTitle = matched.albumTitle ?: item.albumTitle,
+                                    coverArtPath = preferredCover,
+                                )
                             } else {
-                                matched
+                                null
                             }
                             idx to finalMatched
                         }

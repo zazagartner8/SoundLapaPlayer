@@ -1,0 +1,303 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidUserSettings(s) {
+      return s is map &&
+        s.keys().hasOnly([
+          'appLanguage', 'darkLiquidGlass', 'accentColorArgb',
+          'smoothTransitionEnabled', 'smoothTransitionDurationSec',
+          'hapticsEnabled', 'hapticIntensity',
+          'autoCacheOnPlay', 'dataSaverEnabled', 'autoUploadEnabled',
+          'updatedAtMs'
+        ]) &&
+        (!('appLanguage' in s) || (s.appLanguage is string && s.appLanguage.size() >= 2 && s.appLanguage.size() <= 10)) &&
+        (!('darkLiquidGlass' in s) || s.darkLiquidGlass is bool) &&
+        (!('accentColorArgb' in s) || s.accentColorArgb is int) &&
+        (!('smoothTransitionEnabled' in s) || s.smoothTransitionEnabled is bool) &&
+        (!('smoothTransitionDurationSec' in s) || (s.smoothTransitionDurationSec is int && s.smoothTransitionDurationSec >= 1 && s.smoothTransitionDurationSec <= 10)) &&
+        (!('hapticsEnabled' in s) || s.hapticsEnabled is bool) &&
+        (!('hapticIntensity' in s) || (s.hapticIntensity is int && s.hapticIntensity >= 10 && s.hapticIntensity <= 100)) &&
+        (!('autoCacheOnPlay' in s) || s.autoCacheOnPlay is bool) &&
+        (!('dataSaverEnabled' in s) || s.dataSaverEnabled is bool) &&
+        (!('autoUploadEnabled' in s) || s.autoUploadEnabled is bool) &&
+        (!('updatedAtMs' in s) || (s.updatedAtMs is int && s.updatedAtMs >= 0));
+    }
+
+    function isValidUserProfile(data) {
+      return data.userId is string && data.userId == request.auth.uid &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100 &&
+        (!('email' in data) || (data.email is string && data.email.size() <= 200)) &&
+        (!('photoUrl' in data) || (data.photoUrl is string && data.photoUrl.size() <= 100000)) &&
+        (!('bio' in data) || (data.bio is string && data.bio.size() <= 300)) &&
+        (!('avatarBlocked' in data) || data.avatarBlocked is bool) &&
+        (!('avatarBlocked' in data) || !data.avatarBlocked || !('photoUrl' in data)) &&
+        (!('settings' in data) || isValidUserSettings(data.settings));
+    }
+
+    function isValidBugReport(data) {
+      return data.reportId is string && data.reportId.size() >= 1 && data.reportId.size() <= 128 &&
+        data.userId is string && data.userId == request.auth.uid &&
+        data.reporterName is string && data.reporterName.size() >= 1 && data.reporterName.size() <= 100 &&
+        (!('reporterAvatarUrl' in data) || (data.reporterAvatarUrl is string && data.reporterAvatarUrl.size() <= 100000)) &&
+        data.message is string && data.message.size() >= 1 && data.message.size() <= 2000 &&
+        data.appVersion is string && data.appVersion.size() >= 1 && data.appVersion.size() <= 64 &&
+        data.devAccessKey is string && data.devAccessKey == 'shelban852' &&
+        data.createdAtMs is int && data.createdAtMs >= 0;
+    }
+
+    function isValidSavedTrack(data) {
+      return data.userId is string && data.userId == request.auth.uid &&
+        data.trackId is string && data.trackId.size() >= 1 && data.trackId.size() <= 200 &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 200 &&
+        data.artist is string && data.artist.size() >= 1 && data.artist.size() <= 200 &&
+        data.genre is string && data.genre.size() <= 80 &&
+        data.durationMs is int && data.durationMs >= 0 &&
+        (!('sourceUri' in data) || (data.sourceUri is string && data.sourceUri.size() <= 1000)) &&
+        (!('coverArtPath' in data) || (data.coverArtPath is string && data.coverArtPath.size() <= 1000)) &&
+        data.accentColorHex is int &&
+        data.secondaryColorHex is int &&
+        data.isUserUpload is bool &&
+        data.isLiked is bool &&
+        data.playCount is int && data.playCount >= 0 &&
+        data.likeCount is int && data.likeCount >= 0 &&
+        (!('description' in data) || (data.description is string && data.description.size() <= 500)) &&
+        (!('albumTitle' in data) || (data.albumTitle is string && data.albumTitle.size() <= 200)) &&
+        data.trackCreatedAtMs is int && data.trackCreatedAtMs >= 0;
+    }
+
+    function isValidUserPlaylist(data) {
+      return data.userId is string && data.userId == request.auth.uid &&
+        data.playlistId is string && data.playlistId.size() >= 1 && data.playlistId.size() <= 160 &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 160 &&
+        (!('description' in data) || (data.description is string && data.description.size() <= 500)) &&
+        (!('coverArtPath' in data) || (data.coverArtPath is string && data.coverArtPath.size() <= 1000)) &&
+        data.playlistCreatedAtMs is int && data.playlistCreatedAtMs >= 0;
+    }
+
+    function isValidUserPlaylistItem(data) {
+      return data.userId is string && data.userId == request.auth.uid &&
+        data.playlistId is string && data.playlistId.size() >= 1 && data.playlistId.size() <= 160 &&
+        data.trackId is string && data.trackId.size() >= 1 && data.trackId.size() <= 200 &&
+        data.position is int && data.position >= 0 &&
+        data.addedAtMs is int && data.addedAtMs >= 0;
+    }
+
+    function isValidCloudMetrics(data) {
+      return data.userId is string && data.userId == request.auth.uid &&
+        data.storageBytes is int && data.storageBytes >= 0 && data.storageBytes <= 10737418240 &&
+        data.tracksCount is int && data.tracksCount >= 0 && data.tracksCount <= 100000 &&
+        data.playlistsCount is int && data.playlistsCount >= 0 && data.playlistsCount <= 50000 &&
+        data.devAccessKey is string && data.devAccessKey == 'shelban852';
+    }
+
+    match /users/{userId} {
+      allow get: if isOwner(userId) && isValidId(userId);
+      allow list: if isOwner(userId);
+
+      allow create: if isOwner(userId) &&
+        isValidId(userId) &&
+        incoming().keys().hasAll(['userId', 'displayName', 'createdAt', 'updatedAt']) &&
+        incoming().keys().hasOnly([
+          'userId', 'displayName', 'email', 'photoUrl', 'bio', 'avatarBlocked', 'settings', 'createdAt', 'updatedAt'
+        ]) &&
+        incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+        isValidUserProfile(incoming());
+
+      allow update: if isOwner(userId) &&
+        isValidId(userId) &&
+        isValidUserProfile(incoming()) &&
+        incoming().userId == existing().userId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+        (!('avatarBlocked' in existing()) || !existing().avatarBlocked || (incoming().avatarBlocked == true && !('photoUrl' in incoming()))) &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'displayName', 'email', 'photoUrl', 'bio', 'avatarBlocked', 'settings', 'updatedAt'
+        ]);
+
+      allow delete: if isOwner(userId) && isValidId(userId);
+
+      match /tracks/{trackDocId} {
+        allow get: if isOwner(userId) && isValidId(trackDocId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+          isValidId(trackDocId) &&
+          incoming().keys().hasAll([
+            'userId', 'trackId', 'title', 'artist', 'genre', 'durationMs',
+            'accentColorHex', 'secondaryColorHex', 'isUserUpload', 'isLiked',
+            'playCount', 'likeCount', 'trackCreatedAtMs', 'createdAt', 'updatedAt'
+          ]) &&
+          incoming().keys().hasOnly([
+            'userId', 'trackId', 'title', 'artist', 'genre', 'durationMs',
+            'sourceUri', 'coverArtPath', 'accentColorHex', 'secondaryColorHex',
+            'isUserUpload', 'isLiked', 'playCount', 'likeCount', 'description',
+            'albumTitle', 'trackCreatedAtMs', 'createdAt', 'updatedAt'
+          ]) &&
+          incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+          incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+          isValidSavedTrack(incoming());
+
+        allow update: if isOwner(userId) &&
+          isValidId(trackDocId) &&
+          isValidSavedTrack(incoming()) &&
+          incoming().userId == existing().userId &&
+          incoming().trackId == existing().trackId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'title', 'artist', 'genre', 'durationMs', 'sourceUri', 'coverArtPath',
+            'accentColorHex', 'secondaryColorHex', 'isUserUpload', 'isLiked',
+            'playCount', 'likeCount', 'description', 'albumTitle', 'trackCreatedAtMs', 'updatedAt'
+          ]);
+
+        allow delete: if isOwner(userId) && isValidId(trackDocId);
+      }
+
+      match /playlists/{playlistDocId} {
+        allow get: if isOwner(userId) && isValidId(playlistDocId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+          isValidId(playlistDocId) &&
+          incoming().keys().hasAll([
+            'userId', 'playlistId', 'name', 'playlistCreatedAtMs', 'createdAt', 'updatedAt'
+          ]) &&
+          incoming().keys().hasOnly([
+            'userId', 'playlistId', 'name', 'description', 'coverArtPath',
+            'playlistCreatedAtMs', 'createdAt', 'updatedAt'
+          ]) &&
+          incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+          incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+          isValidUserPlaylist(incoming());
+
+        allow update: if isOwner(userId) &&
+          isValidId(playlistDocId) &&
+          isValidUserPlaylist(incoming()) &&
+          incoming().userId == existing().userId &&
+          incoming().playlistId == existing().playlistId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'name', 'description', 'coverArtPath', 'playlistCreatedAtMs', 'updatedAt'
+          ]);
+
+        allow delete: if isOwner(userId) && isValidId(playlistDocId);
+
+        match /items/{itemDocId} {
+          allow get: if isOwner(userId) && isValidId(playlistDocId) && isValidId(itemDocId);
+          allow list: if isOwner(userId);
+
+          allow create: if isOwner(userId) &&
+            isValidId(playlistDocId) &&
+            isValidId(itemDocId) &&
+            isValidUserPlaylistItem(incoming()) &&
+            incoming().keys().hasAll([
+              'userId', 'playlistId', 'trackId', 'position', 'addedAtMs', 'createdAt', 'updatedAt'
+            ]) &&
+            incoming().keys().hasOnly([
+              'userId', 'playlistId', 'trackId', 'position', 'addedAtMs', 'createdAt', 'updatedAt'
+            ]) &&
+            incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+            incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+            (
+              exists(/databases/$(database)/documents/users/$(userId)/playlists/$(playlistDocId)) ||
+              existsAfter(/databases/$(database)/documents/users/$(userId)/playlists/$(playlistDocId))
+            );
+
+          allow update: if isOwner(userId) &&
+            isValidId(playlistDocId) &&
+            isValidId(itemDocId) &&
+            isValidUserPlaylistItem(incoming()) &&
+            incoming().userId == existing().userId &&
+            incoming().playlistId == existing().playlistId &&
+            incoming().trackId == existing().trackId &&
+            incoming().createdAt == existing().createdAt &&
+            incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['position', 'addedAtMs', 'updatedAt']);
+
+          allow delete: if isOwner(userId) && isValidId(playlistDocId) && isValidId(itemDocId);
+        }
+      }
+    }
+
+    match /bug_reports/{reportId} {
+      allow get: if isSignedIn() &&
+        isValidId(reportId) &&
+        (existing().userId == request.auth.uid || existing().devAccessKey == 'shelban852');
+
+      allow list: if isSignedIn() &&
+        (existing().userId == request.auth.uid || existing().devAccessKey == 'shelban852');
+
+      allow create: if isSignedIn() &&
+        isValidId(reportId) &&
+        incoming().keys().hasAll([
+          'reportId', 'userId', 'reporterName', 'message',
+          'appVersion', 'devAccessKey', 'createdAtMs', 'createdAt'
+        ]) &&
+        incoming().keys().hasOnly([
+          'reportId', 'userId', 'reporterName', 'reporterAvatarUrl', 'message',
+          'appVersion', 'devAccessKey', 'createdAtMs', 'createdAt'
+        ]) &&
+        incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+        isValidBugReport(incoming());
+
+      allow update: if false;
+
+      allow delete: if isSignedIn() &&
+        isValidId(reportId) &&
+        (existing().userId == request.auth.uid || existing().devAccessKey == 'shelban852');
+    }
+
+    match /cloud_metrics/{userId} {
+      allow get: if isOwner(userId) && isValidId(userId);
+      allow list: if isSignedIn() && existing().devAccessKey == 'shelban852';
+
+      allow create: if isOwner(userId) &&
+        isValidId(userId) &&
+        incoming().keys().hasAll([
+          'userId', 'storageBytes', 'tracksCount', 'playlistsCount', 'devAccessKey', 'updatedAt'
+        ]) &&
+        incoming().keys().hasOnly([
+          'userId', 'storageBytes', 'tracksCount', 'playlistsCount', 'devAccessKey', 'updatedAt'
+        ]) &&
+        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+        isValidCloudMetrics(incoming());
+
+      allow update: if isOwner(userId) &&
+        isValidId(userId) &&
+        incoming().keys().hasOnly([
+          'userId', 'storageBytes', 'tracksCount', 'playlistsCount', 'devAccessKey', 'updatedAt'
+        ]) &&
+        incoming().userId == existing().userId &&
+        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+        isValidCloudMetrics(incoming());
+
+      allow delete: if isOwner(userId) && isValidId(userId);
+    }
+  }
+}

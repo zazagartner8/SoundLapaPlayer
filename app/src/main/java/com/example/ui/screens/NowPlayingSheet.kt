@@ -17,14 +17,11 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -65,6 +62,8 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
@@ -647,8 +646,6 @@ private fun SmoothPlaybackSeekBar(
 ) {
     val basePositionMs by positionFlow.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
-    val density = LocalDensity.current
-    val themeAccent = MaterialTheme.colorScheme.primary
     var isScrubbing by remember(trackId) { mutableStateOf(false) }
     var scrubFraction by remember(trackId) { mutableFloatStateOf(0f) }
     val animFraction = remember(trackId) {
@@ -691,141 +688,31 @@ private fun SmoothPlaybackSeekBar(
     val formattedCurrentTime = remember(displaySecond) { formatDuration(displaySecond * 1000L) }
     val formattedDuration = remember(durationMs) { formatDuration(durationMs) }
 
-    val thumbDiameter by animateDpAsState(
-        targetValue = if (isScrubbing) 18.dp else 13.dp,
-        animationSpec = spring(dampingRatio = 0.72f, stiffness = 500f),
-        label = "seekThumbSize",
-    )
-    val trackHeight by animateDpAsState(
-        targetValue = if (isScrubbing) 6.dp else 4.dp,
-        animationSpec = tween(durationMillis = 120),
-        label = "seekTrackHeight",
-    )
-
     Column(modifier = Modifier.fillMaxWidth()) {
-        BoxWithConstraints(
+        Slider(
+            value = displayFraction,
+            onValueChange = { next ->
+                isScrubbing = true
+                scrubFraction = if (next.isFinite()) next.coerceIn(0f, 1f) else 0f
+            },
+            onValueChangeFinished = {
+                onTickHaptic()
+                val target = if (scrubFraction.isFinite()) scrubFraction.coerceIn(0f, 1f) else 0f
+                scope.launch {
+                    animFraction.snapTo(target)
+                    isScrubbing = false
+                    onSeekFraction(target)
+                }
+            },
+            colors = SliderDefaults.colors(
+                thumbColor = Color.White,
+                activeTrackColor = Color.White,
+                inactiveTrackColor = Color.White.copy(alpha = 0.28f),
+            ),
             modifier = Modifier
                 .fillMaxWidth()
-                .height(48.dp)
                 .testTag("player_material_slider"),
-        ) {
-            val totalWidthPx = with(density) { maxWidth.toPx() }.coerceAtLeast(1f)
-            val endPadPx = with(density) { 9.dp.toPx() }
-            val usableWidthPx = (totalWidthPx - endPadPx * 2f).coerceAtLeast(1f)
-            var pillWidthPx by remember { mutableIntStateOf(0) }
-
-            fun xToFraction(x: Float): Float = ((x - endPadPx) / usableWidthPx).coerceIn(0f, 1f)
-
-            // Floating timecode marker pill above thumb during slide/scrub
-            androidx.compose.animation.AnimatedVisibility(
-                visible = isScrubbing,
-                enter = fadeIn(tween(90)) + scaleIn(initialScale = 0.85f, animationSpec = tween(110)),
-                exit = fadeOut(tween(110)) + scaleOut(targetScale = 0.85f, animationSpec = tween(110)),
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .offset {
-                        val thumbCenterX = endPadPx + usableWidthPx * displayFraction
-                        val maxOffsetX = (totalWidthPx - pillWidthPx).coerceAtLeast(0f)
-                        val x = (thumbCenterX - pillWidthPx / 2f).coerceIn(0f, maxOffsetX)
-                        IntOffset(x = x.roundToInt(), y = -with(density) { 20.dp.toPx() }.roundToInt())
-                    }
-                    .onSizeChanged { pillWidthPx = it.width }
-                    .testTag("seekbar_timecode_marker"),
-            ) {
-                Surface(
-                    shape = CircleShape,
-                    color = Color(0xEC14131B),
-                    border = BorderStroke(1.dp, themeAccent.copy(alpha = 0.78f)),
-                    shadowElevation = 6.dp,
-                ) {
-                    Text(
-                        text = formattedCurrentTime,
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                    )
-                }
-            }
-
-            // Interactive hit area supporting both smooth horizontal slide and direct tap
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .pointerInput(trackId, durationMs, usableWidthPx) {
-                        detectHorizontalDragGestures(
-                            onDragStart = { offset ->
-                                isScrubbing = true
-                                scrubFraction = xToFraction(offset.x)
-                            },
-                            onHorizontalDrag = { change, _ ->
-                                change.consume()
-                                scrubFraction = xToFraction(change.position.x)
-                            },
-                            onDragEnd = {
-                                onTickHaptic()
-                                val target = if (scrubFraction.isFinite()) scrubFraction.coerceIn(0f, 1f) else 0f
-                                scope.launch {
-                                    animFraction.snapTo(target)
-                                    isScrubbing = false
-                                    onSeekFraction(target)
-                                }
-                            },
-                            onDragCancel = {
-                                isScrubbing = false
-                            },
-                        )
-                    }
-                    .pointerInput(trackId, durationMs, usableWidthPx) {
-                        detectTapGestures { offset ->
-                            onTickHaptic()
-                            val target = xToFraction(offset.x)
-                            scope.launch {
-                                animFraction.snapTo(target)
-                                onSeekFraction(target)
-                            }
-                        }
-                    },
-                contentAlignment = Alignment.CenterStart,
-            ) {
-                // Inactive track
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 9.dp)
-                        .height(trackHeight)
-                        .clip(CircleShape)
-                        .background(Color.White.copy(alpha = 0.26f)),
-                ) {
-                    // Active progress fill
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth(displayFraction)
-                            .height(trackHeight)
-                            .clip(CircleShape)
-                            .background(if (isScrubbing) themeAccent else Color.White),
-                    )
-                }
-
-                // Thumb positioned precisely along usable width
-                Box(
-                    modifier = Modifier
-                        .offset {
-                            val centerX = endPadPx + usableWidthPx * displayFraction
-                            val halfThumb = with(density) { (thumbDiameter / 2).toPx() }
-                            IntOffset(x = (centerX - halfThumb).roundToInt(), y = 0)
-                        }
-                        .size(thumbDiameter)
-                        .clip(CircleShape)
-                        .background(Color.White)
-                        .border(
-                            width = if (isScrubbing) 2.5.dp else 0.dp,
-                            color = if (isScrubbing) themeAccent else Color.Transparent,
-                            shape = CircleShape,
-                        ),
-                )
-            }
-        }
+        )
 
         Row(
             modifier = Modifier

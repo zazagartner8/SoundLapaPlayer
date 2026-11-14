@@ -188,6 +188,7 @@ object FullStreamResolver {
     private val streamCache = ConcurrentHashMap<String, CachedStreamEntry>()
     private val forceProbeKeys = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
     private val inFlightResolutions = ConcurrentHashMap<String, CompletableFuture<ResolvedAudioStream?>>()
+    private val scArtworkCache = ConcurrentHashMap<String, String>()
 
     private val scJsonParser = Json {
         ignoreUnknownKeys = true
@@ -362,10 +363,32 @@ object FullStreamResolver {
     }
 
     fun searchSoundCloud(query: String, limit: Int = 16): List<TrackEntity> {
-        ensureInitialized()
         val trimmed = query.trim()
         if (trimmed.isBlank()) return emptyList()
 
+        // Fast SoundCloud api-v2 track search first (rich metadata, playback counts, square t500x500 artwork)
+        val cid = getSoundCloudClientId()
+        if (!cid.isNullOrBlank()) {
+            val encoded = URLEncoder.encode(trimmed, "UTF-8")
+            val body = soundCloudApiGet(
+                "https://api-v2.soundcloud.com/search/tracks?q=$encoded&client_id=$cid&limit=${limit.coerceAtLeast(10)}",
+            )
+            if (!body.isNullOrBlank()) {
+                val parsed = runCatching {
+                    val col = scJsonParser.parseToJsonElement(body).jsonObject["collection"] as? JsonArray
+                    if (col != null) {
+                        parseSoundCloudApiTracks(col, fallbackArtist = "SoundCloud", fallbackAvatar = null)
+                    } else {
+                        emptyList()
+                    }
+                }.getOrDefault(emptyList())
+                if (parsed.isNotEmpty()) {
+                    return parsed.take(limit)
+                }
+            }
+        }
+
+        ensureInitialized()
         val items = runCatching {
             val extractor = ServiceList.SoundCloud.getSearchExtractor(trimmed)
             extractor.fetchPage()
@@ -376,6 +399,62 @@ object FullStreamResolver {
         }.getOrDefault(emptyList())
 
         return items.mapNotNull { mapStreamItemToTrack(it, isYouTube = false) }
+    }
+
+    fun isSpotifyOrSoundCloudArtwork(url: String?): Boolean {
+        val lower = url?.trim()?.lowercase() ?: return false
+        return lower.contains("scdn.co/") ||
+            lower.contains("spotifycdn.com/") ||
+            lower.contains("sndcdn.com/artworks")
+    }
+
+    fun findSoundCloudArtwork(
+        artist: String,
+        title: String,
+        dataSaver: Boolean = isDataSaverEnabled,
+    ): String? {
+        val cleanTitle = title.trim()
+        if (cleanTitle.isBlank()) return null
+        val cleanArtist = artist.trim()
+        val cacheKey = "${cleanArtist.lowercase()}|${cleanTitle.lowercase()}"
+        scArtworkCache[cacheKey]?.let { cached ->
+            return cached.takeIf { it.isNotBlank() }?.let { upgradeArtworkUrl(it, dataSaver = dataSaver) }
+        }
+
+        val cid = getSoundCloudClientId() ?: return null
+        val query = buildString {
+            if (cleanArtist.isNotBlank() &&
+                !cleanArtist.equals("YouTube Music", ignoreCase = true) &&
+                !cleanArtist.equals("SoundLapa", ignoreCase = true)
+            ) {
+                append(cleanArtist)
+                append(' ')
+            }
+            append(cleanTitle)
+        }.trim()
+        if (query.length < 2) return null
+
+        val encoded = URLEncoder.encode(query, "UTF-8")
+        val body = soundCloudApiGet(
+            "https://api-v2.soundcloud.com/search/tracks?q=$encoded&client_id=$cid&limit=4",
+        ) ?: return null
+
+        val normTitle = cleanTitle.lowercase().replace(Regex("[^\\p{L}\\p{Nd}]"), "")
+        val resolvedArt = runCatching {
+            val col = scJsonParser.parseToJsonElement(body).jsonObject["collection"] as? JsonArray
+                ?: return@runCatching null
+            val candidates = col.mapNotNull { it as? JsonObject }
+            val best = candidates.firstOrNull { obj ->
+                val objTitle = obj["title"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                    .lowercase().replace(Regex("[^\\p{L}\\p{Nd}]"), "")
+                val hasArt = !obj["artwork_url"]?.jsonPrimitive?.contentOrNull.isNullOrBlank()
+                hasArt && normTitle.length >= 2 && (objTitle.contains(normTitle) || normTitle.contains(objTitle))
+            } ?: candidates.firstOrNull { !it["artwork_url"]?.jsonPrimitive?.contentOrNull.isNullOrBlank() }
+            best?.get("artwork_url")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+        }.getOrNull()
+
+        scArtworkCache[cacheKey] = resolvedArt.orEmpty()
+        return resolvedArt?.let { upgradeArtworkUrl(it, dataSaver = dataSaver) }
     }
 
     fun searchArtistAlbumsAndAvatar(
@@ -1503,11 +1582,11 @@ object FullStreamResolver {
 
     private fun paletteForSeed(seed: String): Pair<Long, Long> {
         val palettes = listOf(
-            0xFFFF5500L to 0xFF9C2B00L,
+            0xFF8B5CF6L to 0xFFA78BFAL,
             0xFF5CE1E6L to 0xFFA78BFAL,
-            0xFFFF9248L to 0xFFFB7185L,
             0xFF34D399L to 0xFF5CE1E6L,
             0xFFA78BFAL to 0xFFFB7185L,
+            0xFF7C3AEDL to 0xFF5CE1E6L,
         )
         val idx = abs(seed.hashCode()) % palettes.size
         return palettes[idx]

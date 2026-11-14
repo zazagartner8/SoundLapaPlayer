@@ -33,11 +33,15 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -68,6 +72,7 @@ import com.example.ui.i18n.LocalAppStrings
 import com.example.ui.i18n.filterDisplayLabel
 import com.example.ui.shaders.TrackCoverArtwork
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun StreamScreen(
     state: HomeUiState,
@@ -75,6 +80,7 @@ fun StreamScreen(
     onSelectFilter: (String) -> Unit,
     onSearchQueryChange: (String) -> Unit,
     onCloseSearch: () -> Unit,
+    onRefreshHome: () -> Unit,
     onPlayTrack: (TrackEntity) -> Unit,
     onPlayRecommendedTrack: (TrackEntity) -> Unit,
     onToggleLike: (TrackEntity) -> Unit,
@@ -87,15 +93,33 @@ fun StreamScreen(
     val listState = rememberLazyListState()
     val trendingRowState = rememberLazyListState()
     val recommendedRowState = rememberLazyListState()
+    val pullToRefreshState = rememberPullToRefreshState()
 
     val currentOnPlayTrack by rememberUpdatedState(onPlayTrack)
     val currentOnPlayRecommendedTrack by rememberUpdatedState(onPlayRecommendedTrack)
     val currentOnToggleLike by rememberUpdatedState(onToggleLike)
     val currentOnOpenTrackOptions by rememberUpdatedState(onOpenTrackOptions)
 
-    Box(
-        modifier = modifier.fillMaxSize(),
+    PullToRefreshBox(
+        isRefreshing = state.isRefreshingHome,
+        onRefresh = {
+            haptics.tap()
+            onRefreshHome()
+        },
+        state = pullToRefreshState,
+        modifier = modifier
+            .fillMaxSize()
+            .testTag("home_pull_to_refresh"),
         contentAlignment = Alignment.TopCenter,
+        indicator = {
+            PullToRefreshDefaults.Indicator(
+                state = pullToRefreshState,
+                isRefreshing = state.isRefreshingHome,
+                color = MaterialTheme.colorScheme.primary,
+                containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                modifier = Modifier.align(Alignment.TopCenter),
+            )
+        },
     ) {
         LazyColumn(
             state = listState,
