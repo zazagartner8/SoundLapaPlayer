@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.Color as AndroidColor
 import android.net.Uri
 import androidx.activity.compose.BackHandler
@@ -8,12 +9,15 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -37,17 +41,19 @@ import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.rounded.AccountCircle
 import androidx.compose.material.icons.rounded.AdminPanelSettings
+import androidx.compose.material.icons.rounded.BatterySaver
 import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.Check
-import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DarkMode
 import androidx.compose.material.icons.rounded.DataSaverOn
+import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.GraphicEq
+import androidx.compose.material.icons.rounded.Group
 import androidx.compose.material.icons.rounded.LightMode
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Palette
@@ -58,6 +64,7 @@ import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material.icons.rounded.Translate
 import androidx.compose.material.icons.rounded.UploadFile
 import androidx.compose.material.icons.rounded.Vibration
+import androidx.compose.material.icons.rounded.VolumeUp
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -87,7 +94,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -95,8 +104,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.documentfile.provider.DocumentFile
+import com.example.data.local.AudioFocusMode
 import com.example.ui.MainUiState
 import com.example.ui.components.AccountAvatarImage
+import com.example.ui.components.AvatarCropDialog
+import com.example.ui.components.CountryFlagIcon
 import com.example.ui.components.rememberSoundLapaHaptics
 import com.example.ui.formatFileSize
 import com.example.ui.i18n.AppLanguage
@@ -116,6 +128,7 @@ private val PresetAccentColors = listOf(
     0xFFEC4899L, // Sakura Pink
 )
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SettingsScreen(
     state: MainUiState,
@@ -128,8 +141,10 @@ fun SettingsScreen(
     onToggleHaptics: (Boolean) -> Unit = {},
     onChangeHapticIntensity: (Int) -> Unit = {},
     onToggleAutoUpload: (Boolean) -> Unit,
-    onToggleAutoCache: (Boolean) -> Unit,
+    @Suppress("UNUSED_PARAMETER") onToggleAutoCache: (Boolean) -> Unit = {},
     onToggleDataSaver: (Boolean) -> Unit,
+    onToggleBatterySaver: (Boolean) -> Unit = {},
+    onChangeAudioFocusMode: (AudioFocusMode) -> Unit = {},
     onClearCache: () -> Unit,
     onImportFromInput: (String, String?) -> Unit,
     onImportFromFile: (Uri, String?) -> Unit,
@@ -138,8 +153,9 @@ fun SettingsScreen(
     onSyncCloudNow: () -> Unit = {},
     onSignOutGoogle: () -> Unit = {},
     onSignInGoogleFromGuest: () -> Unit = {},
-    onUpdateProfile: (displayName: String, bio: String, pickedAvatarUri: Uri?, clearAvatar: Boolean) -> Unit = { _, _, _, _ -> },
+    onUpdateProfile: (displayName: String, bio: String, croppedAvatarBitmap: Bitmap?, clearAvatar: Boolean) -> Unit = { _, _, _, _ -> },
     onClearProfileStatus: () -> Unit = {},
+    onOpenFriendsScreen: () -> Unit = {},
     onOpenDeveloperScreen: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
@@ -159,8 +175,11 @@ fun SettingsScreen(
     var profileBioInput by remember(state.cloudSync.userId, state.cloudSync.bio) {
         mutableStateOf(state.cloudSync.bio.orEmpty())
     }
-    var pickedAvatarUri by remember(state.cloudSync.userId, state.cloudSync.photoUrl) {
+    var pendingCropAvatarUri by remember(state.cloudSync.userId) {
         mutableStateOf<Uri?>(null)
+    }
+    var croppedAvatarBitmap by remember(state.cloudSync.userId, state.cloudSync.photoUrl) {
+        mutableStateOf<Bitmap?>(null)
     }
     var clearProfileAvatar by remember(state.cloudSync.userId, state.cloudSync.photoUrl) {
         mutableStateOf(false)
@@ -169,7 +188,8 @@ fun SettingsScreen(
 
     LaunchedEffect(state.cloudSync.avatarBlocked) {
         if (state.cloudSync.avatarBlocked) {
-            pickedAvatarUri = null
+            pendingCropAvatarUri = null
+            croppedAvatarBitmap = null
             clearProfileAvatar = true
         }
     }
@@ -178,10 +198,23 @@ fun SettingsScreen(
         contract = ActivityResultContracts.PickVisualMedia(),
     ) { uri ->
         if (uri != null && !state.cloudSync.avatarBlocked) {
-            pickedAvatarUri = uri
-            clearProfileAvatar = false
+            pendingCropAvatarUri = uri
             onClearProfileStatus()
         }
+    }
+
+    pendingCropAvatarUri?.let { sourceUri ->
+        AvatarCropDialog(
+            sourceUri = sourceUri,
+            accent = accent,
+            onDismiss = { pendingCropAvatarUri = null },
+            onConfirmCropped = { cropped ->
+                croppedAvatarBitmap = cropped
+                clearProfileAvatar = false
+                pendingCropAvatarUri = null
+                onClearProfileStatus()
+            },
+        )
     }
 
     val initialHsv = remember {
@@ -381,10 +414,12 @@ fun SettingsScreen(
                                 val accountLabel = state.cloudSync.displayName?.takeIf { it.isNotBlank() }
                                     ?: state.cloudSync.email?.takeIf { it.isNotBlank() }
                                     ?: state.cloudSync.userId.orEmpty()
+                                val localCroppedPreview = croppedAvatarBitmap?.takeIf {
+                                    !it.isRecycled && !clearProfileAvatar && !state.cloudSync.avatarBlocked
+                                }
                                 val previewAvatarModel = when {
                                     state.cloudSync.avatarBlocked -> null
                                     clearProfileAvatar -> null
-                                    pickedAvatarUri != null -> pickedAvatarUri.toString()
                                     else -> state.cloudSync.photoUrl
                                 }
 
@@ -393,16 +428,29 @@ fun SettingsScreen(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                                 ) {
-                                    AccountAvatarImage(
-                                        avatarUrlOrData = previewAvatarModel,
-                                        contentDescription = accountLabel,
-                                        isGuest = false,
-                                        size = 56.dp,
-                                        modifier = Modifier.testTag("settings_account_avatar"),
-                                    )
+                                    if (localCroppedPreview != null) {
+                                        Image(
+                                            bitmap = localCroppedPreview.asImageBitmap(),
+                                            contentDescription = accountLabel,
+                                            contentScale = ContentScale.Crop,
+                                            modifier = Modifier
+                                                .size(56.dp)
+                                                .clip(CircleShape)
+                                                .border(1.5.dp, accent.copy(alpha = 0.7f), CircleShape)
+                                                .testTag("settings_account_avatar"),
+                                        )
+                                    } else {
+                                        AccountAvatarImage(
+                                            avatarUrlOrData = previewAvatarModel,
+                                            contentDescription = accountLabel,
+                                            isGuest = false,
+                                            size = 56.dp,
+                                            modifier = Modifier.testTag("settings_account_avatar"),
+                                        )
+                                    }
                                     Column(
                                         modifier = Modifier.weight(1f),
-                                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                                        verticalArrangement = Arrangement.spacedBy(3.dp),
                                     ) {
                                         if (accountLabel.isNotBlank()) {
                                             Text(
@@ -413,6 +461,29 @@ fun SettingsScreen(
                                                 maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis,
                                             )
+                                        }
+                                        val handle = state.cloudSync.username?.takeIf { it.isNotBlank() }
+                                        if (handle != null || state.cloudSync.isVerifiedDeveloper) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                            ) {
+                                                handle?.let { h ->
+                                                    Text(
+                                                        text = "@$h",
+                                                        style = MaterialTheme.typography.labelMedium,
+                                                        fontWeight = FontWeight.SemiBold,
+                                                        color = accent,
+                                                        maxLines = 1,
+                                                    )
+                                                }
+                                                if (state.cloudSync.isVerifiedDeveloper) {
+                                                    DeveloperVerifiedPill(
+                                                        label = strings.social.developerBadge,
+                                                        accent = accent,
+                                                    )
+                                                }
+                                            }
                                         }
                                         state.cloudSync.email?.takeIf { it.isNotBlank() && it != accountLabel }?.let { email ->
                                             Text(
@@ -441,6 +512,30 @@ fun SettingsScreen(
                                             color = LiquidMint,
                                         )
                                     }
+                                }
+
+                                OutlinedButton(
+                                    onClick = {
+                                        haptics.tick()
+                                        onOpenFriendsScreen()
+                                    },
+                                    shape = CircleShape,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("settings_open_friends_button"),
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Group,
+                                        contentDescription = null,
+                                        tint = accent,
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(
+                                        text = strings.social.friendsEntryButton,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
                                 }
 
                                 state.cloudSync.statusMessage?.let { err ->
@@ -608,10 +703,10 @@ fun SettingsScreen(
                                                 }
                                             }
                                         } else {
-                                            Row(
+                                            FlowRow(
                                                 modifier = Modifier.fillMaxWidth(),
                                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                                verticalAlignment = Alignment.CenterVertically,
+                                                verticalArrangement = Arrangement.spacedBy(8.dp),
                                             ) {
                                                 OutlinedButton(
                                                     onClick = {
@@ -633,22 +728,33 @@ fun SettingsScreen(
                                                     Text(
                                                         text = strings.settingsProfileChangeAvatarButton,
                                                         maxLines = 1,
+                                                        softWrap = false,
                                                     )
                                                 }
-                                                if (pickedAvatarUri != null || (!clearProfileAvatar && !state.cloudSync.photoUrl.isNullOrBlank())) {
-                                                    IconButton(
+                                                if (croppedAvatarBitmap != null || (!clearProfileAvatar && !state.cloudSync.photoUrl.isNullOrBlank())) {
+                                                    OutlinedButton(
                                                         onClick = {
                                                             haptics.tick()
-                                                            pickedAvatarUri = null
+                                                            croppedAvatarBitmap = null
                                                             clearProfileAvatar = true
                                                             onClearProfileStatus()
                                                         },
+                                                        enabled = !state.cloudSync.isSavingProfile,
+                                                        shape = CircleShape,
                                                         modifier = Modifier.testTag("settings_profile_clear_avatar_button"),
                                                     ) {
                                                         Icon(
-                                                            imageVector = Icons.Rounded.Close,
-                                                            contentDescription = strings.resetCover,
-                                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                            imageVector = Icons.Rounded.DeleteOutline,
+                                                            contentDescription = null,
+                                                            tint = LiquidRose,
+                                                            modifier = Modifier.size(16.dp),
+                                                        )
+                                                        Spacer(Modifier.width(6.dp))
+                                                        Text(
+                                                            text = strings.settingsV33.removeAvatarButton,
+                                                            color = LiquidRose,
+                                                            maxLines = 1,
+                                                            softWrap = false,
                                                         )
                                                     }
                                                 }
@@ -690,7 +796,14 @@ fun SettingsScreen(
                                                 "✓" -> strings.settingsProfileSavedSuccess
                                                 "moderating" -> strings.settingsProfileModeratingLabel
                                                 "blocked_18plus" -> strings.settingsProfileAvatarBlockedNotice
-                                                "moderation_error" -> strings.settingsProfileModerationErrorFallback
+                                                com.example.data.remote.AvatarModerationService.ERR_APPCHECK ->
+                                                    strings.settingsV33.moderationAppCheckError
+                                                com.example.data.remote.AvatarModerationService.ERR_NETWORK ->
+                                                    strings.settingsV33.moderationNetworkError
+                                                com.example.data.remote.AvatarModerationService.ERR_TIMEOUT ->
+                                                    strings.settingsV33.moderationTimeoutError
+                                                com.example.data.remote.AvatarModerationService.ERR_GENERIC ->
+                                                    strings.settingsProfileModerationErrorFallback
                                                 else -> status
                                             }
                                             val statusColor = when (status) {
@@ -710,10 +823,17 @@ fun SettingsScreen(
                                         Button(
                                             onClick = {
                                                 haptics.confirm()
+                                                val bitmapToUpload = if (state.cloudSync.avatarBlocked || clearProfileAvatar) {
+                                                    null
+                                                } else {
+                                                    croppedAvatarBitmap?.takeIf { !it.isRecycled }?.let { src ->
+                                                        src.copy(src.config ?: Bitmap.Config.ARGB_8888, false)
+                                                    }
+                                                }
                                                 onUpdateProfile(
                                                     profileNameInput,
                                                     profileBioInput,
-                                                    if (state.cloudSync.avatarBlocked) null else pickedAvatarUri,
+                                                    bitmapToUpload,
                                                     clearProfileAvatar || state.cloudSync.avatarBlocked,
                                                 )
                                             },
@@ -784,11 +904,12 @@ fun SettingsScreen(
                                             .padding(vertical = 12.dp, horizontal = 8.dp)
                                             .testTag("lang_option_${lang.code}"),
                                         horizontalAlignment = Alignment.CenterHorizontally,
-                                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                                        verticalArrangement = Arrangement.spacedBy(8.dp),
                                     ) {
-                                        Text(
-                                            text = lang.badge,
-                                            fontSize = 28.sp,
+                                        CountryFlagIcon(
+                                            languageCode = lang.code,
+                                            width = 36.dp,
+                                            height = 25.dp,
                                         )
                                         Text(
                                             text = lang.nativeName,
@@ -1185,36 +1306,6 @@ fun SettingsScreen(
                                     }
                                 }
                             }
-
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                            ) {
-                                Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
-                                    Text(
-                                        text = strings.settingsAutoCacheTitle,
-                                        style = MaterialTheme.typography.titleSmall,
-                                        color = MaterialTheme.colorScheme.onSurface,
-                                    )
-                                    Text(
-                                        text = strings.settingsAutoCacheSubtitle,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
-                                }
-                                Switch(
-                                    checked = state.settings.autoCacheOnPlay,
-                                    onCheckedChange = {
-                                        haptics.tick()
-                                        onToggleAutoCache(it)
-                                    },
-                                    colors = SwitchDefaults.colors(
-                                        checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
-                                        checkedTrackColor = accent,
-                                    ),
-                                )
-                            }
                         }
                     }
 
@@ -1334,6 +1425,132 @@ fun SettingsScreen(
                         }
                     }
 
+                    // 3d. Standalone Battery Saver Card
+                    item(key = "battery_saver_section") {
+                        SettingsCard(
+                            icon = Icons.Rounded.BatterySaver,
+                            title = strings.settingsV33.batterySaverSection,
+                            accent = accent,
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                                    Text(
+                                        text = strings.settingsV33.batterySaverTitle,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                    )
+                                    Text(
+                                        text = strings.settingsV33.batterySaverSubtitle,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                Switch(
+                                    checked = state.settings.batterySaverEnabled,
+                                    onCheckedChange = {
+                                        haptics.tick()
+                                        onToggleBatterySaver(it)
+                                    },
+                                    colors = SwitchDefaults.colors(
+                                        checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
+                                        checkedTrackColor = accent,
+                                    ),
+                                    modifier = Modifier.testTag("settings_battery_saver_switch"),
+                                )
+                            }
+                        }
+                    }
+
+                    // 3e. Audio Focus Priority Over Other Apps Card
+                    item(key = "audio_focus_section") {
+                        SettingsCard(
+                            icon = Icons.Rounded.VolumeUp,
+                            title = strings.settingsV33.audioFocusSection,
+                            accent = accent,
+                        ) {
+                            Text(
+                                text = strings.settingsV33.audioFocusSubtitle,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+
+                            val modes = listOf(
+                                Triple(
+                                    AudioFocusMode.PAUSE,
+                                    strings.settingsV33.audioFocusPauseTitle,
+                                    strings.settingsV33.audioFocusPauseDesc,
+                                ),
+                                Triple(
+                                    AudioFocusMode.DUCK,
+                                    strings.settingsV33.audioFocusDuckTitle,
+                                    strings.settingsV33.audioFocusDuckDesc,
+                                ),
+                                Triple(
+                                    AudioFocusMode.MIX,
+                                    strings.settingsV33.audioFocusMixTitle,
+                                    strings.settingsV33.audioFocusMixDesc,
+                                ),
+                            )
+
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                modes.forEach { (mode, title, desc) ->
+                                    val selected = state.settings.audioFocusMode == mode
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(18.dp))
+                                            .background(
+                                                if (selected) accent.copy(alpha = 0.18f)
+                                                else MaterialTheme.colorScheme.background.copy(alpha = 0.50f),
+                                            )
+                                            .border(
+                                                width = if (selected) 1.5.dp else 1.dp,
+                                                color = if (selected) accent else MaterialTheme.colorScheme.outlineVariant,
+                                                shape = RoundedCornerShape(18.dp),
+                                            )
+                                            .clickable {
+                                                haptics.tick()
+                                                onChangeAudioFocusMode(mode)
+                                            }
+                                            .padding(horizontal = 14.dp, vertical = 12.dp)
+                                            .testTag("audio_focus_${mode.name.lowercase()}"),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                    ) {
+                                        Column(
+                                            modifier = Modifier.weight(1f),
+                                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                                        ) {
+                                            Text(
+                                                text = title,
+                                                style = MaterialTheme.typography.titleSmall,
+                                                fontWeight = if (selected) FontWeight.Bold else FontWeight.SemiBold,
+                                                color = if (selected) accent else MaterialTheme.colorScheme.onSurface,
+                                            )
+                                            Text(
+                                                text = desc,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                        if (selected) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.Check,
+                                                contentDescription = null,
+                                                tint = accent,
+                                                modifier = Modifier.size(20.dp),
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // 4. Storage & Cache Management Card
                     item(key = "storage_section") {
                         SettingsCard(
@@ -1444,6 +1661,7 @@ fun SettingsScreen(
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Button(
                                     onClick = {
@@ -1459,7 +1677,10 @@ fun SettingsScreen(
                                         containerColor = accent,
                                         contentColor = MaterialTheme.colorScheme.onPrimary,
                                     ),
-                                    modifier = Modifier.testTag("settings_import_link_button"),
+                                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+                                    modifier = Modifier
+                                        .weight(1.35f)
+                                        .testTag("settings_import_link_button"),
                                 ) {
                                     if (state.isImportingPlaylist) {
                                         CircularProgressIndicator(
@@ -1468,9 +1689,19 @@ fun SettingsScreen(
                                             color = MaterialTheme.colorScheme.onPrimary,
                                         )
                                         Spacer(Modifier.width(6.dp))
-                                        Text(strings.settingsImportingLabel)
+                                        Text(
+                                            text = strings.settingsImportingLabel,
+                                            maxLines = 1,
+                                            softWrap = false,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
                                     } else {
-                                        Text(strings.settingsImportFromLinkButton)
+                                        Text(
+                                            text = strings.settingsImportFromLinkButton,
+                                            maxLines = 1,
+                                            softWrap = false,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
                                     }
                                 }
 
@@ -1493,7 +1724,10 @@ fun SettingsScreen(
                                     },
                                     enabled = !state.isImportingPlaylist,
                                     shape = CircleShape,
-                                    modifier = Modifier.testTag("settings_import_file_button"),
+                                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("settings_import_file_button"),
                                 ) {
                                     Icon(
                                         imageVector = Icons.Rounded.UploadFile,
@@ -1501,7 +1735,12 @@ fun SettingsScreen(
                                         modifier = Modifier.size(16.dp),
                                     )
                                     Spacer(Modifier.width(6.dp))
-                                    Text(strings.settingsImportFromFileButton)
+                                    Text(
+                                        text = strings.settingsImportFromFileButton,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
                                 }
                             }
 
@@ -1512,6 +1751,13 @@ fun SettingsScreen(
                                 lineHeight = 15.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.80f),
                                 modifier = Modifier.testTag("settings_import_public_notice"),
+                            )
+                            Text(
+                                text = strings.settingsV33.importTitleFineHint,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontSize = 11.sp,
+                                lineHeight = 14.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f),
                             )
                         }
                     }

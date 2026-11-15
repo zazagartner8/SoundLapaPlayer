@@ -25,6 +25,16 @@ service cloud.firestore {
       return isSignedIn() && request.auth.uid == userId;
     }
 
+    function isValidHandle(handle) {
+      return handle is string && handle.matches('^[a-z0-9_]{3,24}$');
+    }
+
+    function isVerifiedDeveloper() {
+      return isSignedIn() &&
+        request.auth.token.email == 'livex0464@gmail.com' &&
+        request.auth.token.email_verified == true;
+    }
+
     function isValidUserSettings(s) {
       return s is map &&
         s.keys().hasOnly([
@@ -32,6 +42,7 @@ service cloud.firestore {
           'smoothTransitionEnabled', 'smoothTransitionDurationSec',
           'hapticsEnabled', 'hapticIntensity',
           'autoCacheOnPlay', 'dataSaverEnabled', 'autoUploadEnabled',
+          'batterySaverEnabled', 'audioFocusMode',
           'updatedAtMs'
         ]) &&
         (!('appLanguage' in s) || (s.appLanguage is string && s.appLanguage.size() >= 2 && s.appLanguage.size() <= 10)) &&
@@ -44,12 +55,15 @@ service cloud.firestore {
         (!('autoCacheOnPlay' in s) || s.autoCacheOnPlay is bool) &&
         (!('dataSaverEnabled' in s) || s.dataSaverEnabled is bool) &&
         (!('autoUploadEnabled' in s) || s.autoUploadEnabled is bool) &&
+        (!('batterySaverEnabled' in s) || s.batterySaverEnabled is bool) &&
+        (!('audioFocusMode' in s) || (s.audioFocusMode is string && s.audioFocusMode in ['PAUSE', 'DUCK', 'MIX'])) &&
         (!('updatedAtMs' in s) || (s.updatedAtMs is int && s.updatedAtMs >= 0));
     }
 
     function isValidUserProfile(data) {
       return data.userId is string && data.userId == request.auth.uid &&
         data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100 &&
+        (!('username' in data) || isValidHandle(data.username)) &&
         (!('email' in data) || (data.email is string && data.email.size() <= 200)) &&
         (!('photoUrl' in data) || (data.photoUrl is string && data.photoUrl.size() <= 100000)) &&
         (!('bio' in data) || (data.bio is string && data.bio.size() <= 300)) &&
@@ -114,6 +128,46 @@ service cloud.firestore {
         data.devAccessKey is string && data.devAccessKey == 'shelban852';
     }
 
+    function isValidPublicProfile(userId, data) {
+      return data.userId is string && data.userId == userId && data.userId == request.auth.uid &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100 &&
+        (!('username' in data) || isValidHandle(data.username)) &&
+        (!('photoUrl' in data) || (data.photoUrl is string && data.photoUrl.size() <= 100000)) &&
+        (!('bio' in data) || (data.bio is string && data.bio.size() <= 300)) &&
+        data.isDeveloper is bool && (!data.isDeveloper || isVerifiedDeveloper()) &&
+        data.isPublic is bool && data.isPublic == true;
+    }
+
+    function isValidUsernameDoc(handle, data) {
+      return data.username is string && data.username == handle && isValidHandle(data.username) &&
+        data.userId is string && data.userId == request.auth.uid &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100 &&
+        (!('photoUrl' in data) || (data.photoUrl is string && data.photoUrl.size() <= 100000)) &&
+        data.isDeveloper is bool && (!data.isDeveloper || isVerifiedDeveloper()) &&
+        data.isPublic is bool && data.isPublic == true;
+    }
+
+    function isValidFriendDoc(userId, friendUid, data) {
+      return data.userId is string && data.userId == request.auth.uid && data.userId == userId &&
+        data.friendUid is string && data.friendUid == friendUid && isValidId(data.friendUid) &&
+        data.friendUid != userId &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100 &&
+        (!('username' in data) || isValidHandle(data.username)) &&
+        (!('photoUrl' in data) || (data.photoUrl is string && data.photoUrl.size() <= 100000)) &&
+        data.isDeveloper is bool &&
+        data.addedAtMs is int && data.addedAtMs >= 0;
+    }
+
+    function isValidArtistSubscriptionDoc(userId, artistKey, data) {
+      return data.userId is string && data.userId == request.auth.uid && data.userId == userId &&
+        data.artistKey is string && data.artistKey == artistKey && isValidId(data.artistKey) &&
+        data.artistName is string && data.artistName.size() >= 1 && data.artistName.size() <= 160 &&
+        (!('avatarUrl' in data) || (data.avatarUrl is string && data.avatarUrl.size() <= 1000)) &&
+        (!('soundCloudUrl' in data) || (data.soundCloudUrl is string && data.soundCloudUrl.size() <= 1000)) &&
+        (!('spotifyArtistId' in data) || (data.spotifyArtistId is string && data.spotifyArtistId.size() <= 200)) &&
+        data.subscribedAtMs is int && data.subscribedAtMs >= 0;
+    }
+
     match /users/{userId} {
       allow get: if isOwner(userId) && isValidId(userId);
       allow list: if isOwner(userId);
@@ -122,7 +176,7 @@ service cloud.firestore {
         isValidId(userId) &&
         incoming().keys().hasAll(['userId', 'displayName', 'createdAt', 'updatedAt']) &&
         incoming().keys().hasOnly([
-          'userId', 'displayName', 'email', 'photoUrl', 'bio', 'avatarBlocked', 'settings', 'createdAt', 'updatedAt'
+          'userId', 'displayName', 'username', 'email', 'photoUrl', 'bio', 'avatarBlocked', 'settings', 'createdAt', 'updatedAt'
         ]) &&
         incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
@@ -136,7 +190,7 @@ service cloud.firestore {
         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
         (!('avatarBlocked' in existing()) || !existing().avatarBlocked || (incoming().avatarBlocked == true && !('photoUrl' in incoming()))) &&
         incoming().diff(existing()).affectedKeys().hasOnly([
-          'displayName', 'email', 'photoUrl', 'bio', 'avatarBlocked', 'settings', 'updatedAt'
+          'displayName', 'username', 'email', 'photoUrl', 'bio', 'avatarBlocked', 'settings', 'updatedAt'
         ]);
 
       allow delete: if isOwner(userId) && isValidId(userId);
@@ -243,6 +297,118 @@ service cloud.firestore {
           allow delete: if isOwner(userId) && isValidId(playlistDocId) && isValidId(itemDocId);
         }
       }
+
+      match /friends/{friendUid} {
+        allow get: if isOwner(userId) && isValidId(friendUid);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+          isValidId(friendUid) &&
+          incoming().keys().hasAll([
+            'userId', 'friendUid', 'displayName', 'isDeveloper', 'addedAtMs', 'createdAt', 'updatedAt'
+          ]) &&
+          incoming().keys().hasOnly([
+            'userId', 'friendUid', 'username', 'displayName', 'photoUrl', 'isDeveloper',
+            'addedAtMs', 'createdAt', 'updatedAt'
+          ]) &&
+          incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+          incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+          isValidFriendDoc(userId, friendUid, incoming());
+
+        allow update: if isOwner(userId) &&
+          isValidId(friendUid) &&
+          isValidFriendDoc(userId, friendUid, incoming()) &&
+          incoming().userId == existing().userId &&
+          incoming().friendUid == existing().friendUid &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'username', 'displayName', 'photoUrl', 'isDeveloper', 'addedAtMs', 'updatedAt'
+          ]);
+
+        allow delete: if isOwner(userId) && isValidId(friendUid);
+      }
+
+      match /artist_subscriptions/{artistKey} {
+        allow get: if isOwner(userId) && isValidId(artistKey);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+          isValidId(artistKey) &&
+          incoming().keys().hasAll([
+            'userId', 'artistKey', 'artistName', 'subscribedAtMs', 'createdAt', 'updatedAt'
+          ]) &&
+          incoming().keys().hasOnly([
+            'userId', 'artistKey', 'artistName', 'avatarUrl', 'soundCloudUrl', 'spotifyArtistId',
+            'subscribedAtMs', 'createdAt', 'updatedAt'
+          ]) &&
+          incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+          incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+          isValidArtistSubscriptionDoc(userId, artistKey, incoming());
+
+        allow update: if isOwner(userId) &&
+          isValidId(artistKey) &&
+          isValidArtistSubscriptionDoc(userId, artistKey, incoming()) &&
+          incoming().userId == existing().userId &&
+          incoming().artistKey == existing().artistKey &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'artistName', 'avatarUrl', 'soundCloudUrl', 'spotifyArtistId', 'subscribedAtMs', 'updatedAt'
+          ]);
+
+        allow delete: if isOwner(userId) && isValidId(artistKey);
+      }
+    }
+
+    match /public_profiles/{userId} {
+      allow get: if isSignedIn() && isValidId(userId);
+      allow list: if isSignedIn() && (existing().isPublic == true || existing().isDeveloper == true);
+
+      allow create, update: if isOwner(userId) &&
+        isValidId(userId) &&
+        incoming().keys().hasAll([
+          'userId', 'displayName', 'isDeveloper', 'isPublic', 'updatedAt'
+        ]) &&
+        incoming().keys().hasOnly([
+          'userId', 'displayName', 'username', 'photoUrl', 'bio', 'isDeveloper', 'isPublic', 'updatedAt'
+        ]) &&
+        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+        isValidPublicProfile(userId, incoming());
+
+      allow delete: if isOwner(userId) && isValidId(userId);
+    }
+
+    match /usernames/{handle} {
+      allow get: if isSignedIn() && isValidHandle(handle);
+      allow list: if isSignedIn() && existing().isPublic == true;
+
+      allow create: if isSignedIn() &&
+        isValidHandle(handle) &&
+        incoming().keys().hasAll([
+          'username', 'userId', 'displayName', 'isDeveloper', 'isPublic', 'updatedAt'
+        ]) &&
+        incoming().keys().hasOnly([
+          'username', 'userId', 'displayName', 'photoUrl', 'isDeveloper', 'isPublic', 'updatedAt'
+        ]) &&
+        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+        isValidUsernameDoc(handle, incoming());
+
+      allow update: if isSignedIn() &&
+        isValidHandle(handle) &&
+        existing().userId == request.auth.uid &&
+        incoming().keys().hasAll([
+          'username', 'userId', 'displayName', 'isDeveloper', 'isPublic', 'updatedAt'
+        ]) &&
+        incoming().keys().hasOnly([
+          'username', 'userId', 'displayName', 'photoUrl', 'isDeveloper', 'isPublic', 'updatedAt'
+        ]) &&
+        incoming().userId == existing().userId &&
+        incoming().username == existing().username &&
+        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+        isValidUsernameDoc(handle, incoming());
+
+      allow delete: if isSignedIn() && isValidHandle(handle) && existing().userId == request.auth.uid;
     }
 
     match /bug_reports/{reportId} {

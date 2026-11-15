@@ -628,7 +628,7 @@ object SpotifyCatalogClient {
         val encoded = URLEncoder.encode(query, "UTF-8")
         val searchBody = httpGet(
             url = "https://www.wikidata.org/w/api.php?action=wbsearchentities&format=json&language=$lang&uselang=$lang&type=item&limit=6&search=$encoded",
-            userAgent = "SoundLapa/3.1 (Android)",
+            userAgent = "SoundLap/3.3 (Android)",
         ) ?: return emptyList()
 
         val qids = runCatching {
@@ -640,7 +640,7 @@ object SpotifyCatalogClient {
 
         val entitiesBody = httpGet(
             url = "https://www.wikidata.org/w/api.php?action=wbgetentities&format=json&ids=${qids.joinToString("|")}&props=claims|labels",
-            userAgent = "SoundLapa/3.1 (Android)",
+            userAgent = "SoundLap/3.3 (Android)",
         ) ?: return emptyList()
 
         return runCatching {
@@ -678,7 +678,7 @@ object SpotifyCatalogClient {
             val encoded = URLEncoder.encode(query, "UTF-8")
             val searchBody = httpGet(
                 url = "https://musicbrainz.org/ws/2/artist?query=$encoded&fmt=json&limit=3",
-                userAgent = "SoundLapa/3.1 (app@soundlapa.example)",
+                userAgent = "SoundLap/3.3 (app@soundlap.example)",
             ) ?: return@synchronized emptyList()
 
             val mbid = runCatching {
@@ -701,7 +701,7 @@ object SpotifyCatalogClient {
             lastMusicBrainzCallMs = System.currentTimeMillis()
             val relBody = httpGet(
                 url = "https://musicbrainz.org/ws/2/artist/$mbid?inc=url-rels&fmt=json",
-                userAgent = "SoundLapa/3.1 (app@soundlapa.example)",
+                userAgent = "SoundLap/3.3 (app@soundlap.example)",
             ) ?: return@synchronized emptyList()
 
             runCatching {

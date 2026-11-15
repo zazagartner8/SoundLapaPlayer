@@ -82,6 +82,8 @@ import com.example.ui.BugReportItemUi
 import com.example.ui.MainUiState
 import com.example.ui.auth.BiometricAvailability
 import com.example.ui.auth.checkBiometricAvailability
+import com.example.ui.auth.hasProvisionedDeveloperBiometricKey
+import com.example.ui.auth.isAllowedDeveloperEmail
 import com.example.ui.auth.launchDeveloperBiometricPrompt
 import com.example.ui.components.AccountAvatarImage
 import com.example.ui.components.rememberSoundLapaHaptics
@@ -255,28 +257,45 @@ fun DeveloperScreen(
                                     onClick = {
                                         haptics.tick()
                                         biometricStatusMessage = null
-                                        if (biometricAvailability != BiometricAvailability.AVAILABLE) {
-                                            biometricStatusMessage = strings.settingsDeveloperBiometricUnavailable
-                                        } else {
-                                            launchDeveloperBiometricPrompt(
-                                                context = context,
-                                                title = strings.settingsDeveloperBiometricPromptTitle,
-                                                subtitle = strings.settingsDeveloperBiometricPromptSubtitle,
-                                                negativeButtonText = strings.settingsDeveloperBiometricFallbackPassword,
-                                                unavailableMessage = strings.settingsDeveloperBiometricUnavailable,
-                                                failedMessage = strings.settingsDeveloperBiometricFailed,
-                                                onAuthenticated = {
-                                                    haptics.confirm()
-                                                    biometricStatusMessage = null
-                                                    onUnlockWithBiometrics()
-                                                },
-                                                onFallbackOrDismiss = {
-                                                    // Keep password card visible for immediate fallback
-                                                },
-                                                onError = { msg ->
-                                                    biometricStatusMessage = msg
-                                                },
-                                            )
+                                        val signedInEmail = state.cloudSync.email
+                                        val signedInUid = state.cloudSync.userId
+                                        val activatedDevUid = state.settings.devUnlockedUid
+                                        when {
+                                            !isAllowedDeveloperEmail(signedInEmail) -> {
+                                                biometricStatusMessage = strings.settingsV33.biometricOwnerOnlyHint
+                                            }
+                                            signedInUid.isNullOrBlank() ||
+                                                activatedDevUid != signedInUid ||
+                                                !hasProvisionedDeveloperBiometricKey(signedInUid) -> {
+                                                biometricStatusMessage = strings.settingsV33.biometricNeedPasswordFirstHint
+                                            }
+                                            biometricAvailability != BiometricAvailability.AVAILABLE -> {
+                                                biometricStatusMessage = strings.settingsDeveloperBiometricUnavailable
+                                            }
+                                            else -> {
+                                                launchDeveloperBiometricPrompt(
+                                                    context = context,
+                                                    signedInUid = signedInUid,
+                                                    signedInEmail = signedInEmail,
+                                                    activatedDevUid = activatedDevUid,
+                                                    title = strings.settingsDeveloperBiometricPromptTitle,
+                                                    subtitle = strings.settingsDeveloperBiometricPromptSubtitle,
+                                                    negativeButtonText = strings.settingsDeveloperBiometricFallbackPassword,
+                                                    unavailableMessage = strings.settingsDeveloperBiometricUnavailable,
+                                                    failedMessage = strings.settingsDeveloperBiometricFailed,
+                                                    onAuthenticated = {
+                                                        haptics.confirm()
+                                                        biometricStatusMessage = null
+                                                        onUnlockWithBiometrics()
+                                                    },
+                                                    onFallbackOrDismiss = {
+                                                        // Keep password card visible for immediate fallback
+                                                    },
+                                                    onError = { msg ->
+                                                        biometricStatusMessage = msg
+                                                    },
+                                                )
+                                            }
                                         }
                                     },
                                     shape = RoundedCornerShape(18.dp),

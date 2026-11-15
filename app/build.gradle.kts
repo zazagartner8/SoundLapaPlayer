@@ -32,8 +32,8 @@ android {
     applicationId = "com.aistudio.soundlapa.x7k9m2"
     minSdk = 24
     targetSdk = 36
-    versionCode = 10
-    versionName = "3.1"
+    versionCode = 12
+    versionName = "3.3"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -134,6 +134,7 @@ dependencies {
   implementation(libs.androidx.media3.exoplayer.hls)
   implementation(libs.androidx.media3.session)
   implementation(libs.androidx.media3.common)
+  implementation(libs.androidx.media3.ui)
   implementation(libs.kotlinx.serialization.json)
   implementation(libs.newpipe.extractor)
   coreLibraryDesugaring(libs.desugar.jdk.libs)

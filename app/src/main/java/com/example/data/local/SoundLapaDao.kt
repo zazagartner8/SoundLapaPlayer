@@ -48,6 +48,19 @@ interface SoundLapaDao {
     @Query("UPDATE tracks SET title = :title, artist = :artist, coverArtPath = :coverArtPath WHERE id = :id")
     suspend fun updateTrackMetadata(id: String, title: String, artist: String, coverArtPath: String?)
 
+    @Query(
+        "UPDATE tracks SET title = :title, artist = :artist, albumTitle = :albumTitle, " +
+            "genre = :genre, coverArtPath = :coverArtPath WHERE id = :id"
+    )
+    suspend fun updateTrackFullMetadata(
+        id: String,
+        title: String,
+        artist: String,
+        albumTitle: String?,
+        genre: String,
+        coverArtPath: String?,
+    )
+
     @Query("UPDATE tracks SET sourceUri = :sourceUri, durationMs = :durationMs WHERE id = :id")
     suspend fun updateTrackStream(id: String, sourceUri: String, durationMs: Long)
 
@@ -57,6 +70,14 @@ interface SoundLapaDao {
             "AND id NOT IN (SELECT trackId FROM playlist_tracks)"
     )
     suspend fun deleteUnreferencedPreviewTracks()
+
+    @Query(
+        "DELETE FROM tracks WHERE id IN ('track_terracotta_dusk','track_liquid_horizon','track_night_tram','track_neon_pawprint','track_amber_fog','track_velvet_static')"
+    )
+    suspend fun deleteStarterGeneratedTracks()
+
+    @Query("UPDATE tracks SET albumTitle = NULL WHERE albumTitle = 'SoundLapa Originals'")
+    suspend fun clearLegacyOriginalsAlbumTitle()
 
     @Query("DELETE FROM tracks WHERE id = :id")
     suspend fun deleteTrackById(id: String)
@@ -84,6 +105,9 @@ interface SoundLapaDao {
     @Upsert
     suspend fun upsertPlaylist(playlist: PlaylistEntity)
 
+    @Query("UPDATE playlists SET name = :name, description = :description, coverArtPath = :coverArtPath WHERE id = :id")
+    suspend fun updatePlaylistMetadata(id: String, name: String, description: String, coverArtPath: String?)
+
     @Query("DELETE FROM playlists WHERE id = :playlistId")
     suspend fun deletePlaylist(playlistId: String)
 
@@ -98,4 +122,24 @@ interface SoundLapaDao {
 
     @Query("DELETE FROM playlist_tracks WHERE playlistId = :playlistId AND trackId = :trackId")
     suspend fun removeTrackFromPlaylist(playlistId: String, trackId: String)
+
+    // Artist Subscriptions
+    @Query("SELECT * FROM artist_subscriptions ORDER BY subscribedAtMs DESC")
+    fun observeArtistSubscriptions(): Flow<List<ArtistSubscriptionEntity>>
+
+    @Query("SELECT * FROM artist_subscriptions ORDER BY subscribedAtMs DESC")
+    suspend fun getArtistSubscriptionsOnce(): List<ArtistSubscriptionEntity>
+
+    @Upsert
+    suspend fun upsertArtistSubscription(subscription: ArtistSubscriptionEntity)
+
+    @Query("DELETE FROM artist_subscriptions WHERE artistKey = :artistKey")
+    suspend fun deleteArtistSubscription(artistKey: String)
+
+    // Lyrics Cache
+    @Query("SELECT * FROM lyrics_cache WHERE trackKey = :trackKey LIMIT 1")
+    suspend fun getLyrics(trackKey: String): LyricsCacheEntity?
+
+    @Upsert
+    suspend fun upsertLyrics(lyrics: LyricsCacheEntity)
 }

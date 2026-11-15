@@ -49,43 +49,23 @@ class AudioCacheManager(
         File(context.filesDir, "cover_cache").apply { mkdirs() }
     }
 
-    suspend fun seedStarterLibraryIfEmpty() = withContext(Dispatchers.IO) {
-        if (dao.getTrackCount() > 0) return@withContext
-
-        val now = System.currentTimeMillis()
-        val seededTracks = mutableListOf<TrackEntity>()
-
-        AudioSynthesizer.starterPresets.forEachIndexed { index, preset ->
-            val targetFile = File(audioCacheDir, "${preset.id}.wav")
-            val peaks = AudioSynthesizer.generateWavTrack(preset, targetFile)
-            val createdAt = now - (index * 3_600_000L)
-
-            seededTracks += TrackEntity(
-                id = preset.id,
-                title = preset.title,
-                artist = preset.artist,
-                genre = preset.genre,
-                durationMs = preset.durationSeconds * 1000L,
-                waveformJson = TrackEntity.encodeWaveform(peaks),
-                cachedFilePath = targetFile.absolutePath,
-                sourceUri = null,
-                coverArtPath = null,
-                accentColorHex = preset.accentColorHex,
-                secondaryColorHex = preset.secondaryColorHex,
-                isUserUpload = false,
-                isAutoImported = false,
-                isCachedOffline = true,
-                fileSizeBytes = targetFile.length(),
-                playCount = preset.playCount,
-                likeCount = preset.likeCount,
-                isLiked = false,
-                description = preset.description,
-                createdAt = createdAt,
-                albumTitle = "SoundLapa Originals",
-            )
+    suspend fun purgeLegacyStarterTracks() = withContext(Dispatchers.IO) {
+        val legacyStarterIds = listOf(
+            "track_terracotta_dusk",
+            "track_liquid_horizon",
+            "track_night_tram",
+            "track_neon_pawprint",
+            "track_amber_fog",
+            "track_velvet_static",
+        )
+        legacyStarterIds.forEach { starterId ->
+            val wavFile = File(audioCacheDir, "$starterId.wav")
+            if (wavFile.exists()) {
+                runCatching { wavFile.delete() }
+            }
         }
-
-        dao.upsertTracks(seededTracks)
+        runCatching { dao.deleteStarterGeneratedTracks() }
+        runCatching { dao.clearLegacyOriginalsAlbumTitle() }
     }
 
     suspend fun saveCustomCover(trackId: String, imageUri: Uri): String? = withContext(Dispatchers.IO) {
@@ -258,7 +238,7 @@ class AudioCacheManager(
             likeCount = 1,
             isLiked = false,
             description = description.ifBlank {
-                if (isAutoImported) "Авто-загружено в офлайн-кэш SoundLapa" else "Загружено пользователем"
+                if (isAutoImported) "Авто-загружено с устройства (SoundLap)" else "Загружено пользователем"
             },
             createdAt = System.currentTimeMillis(),
             albumTitle = preview.albumTitle,
@@ -312,81 +292,27 @@ class AudioCacheManager(
         )
     }
 
-    suspend fun toggleOfflineCache(track: TrackEntity): TrackEntity = withContext(Dispatchers.IO) {
-        if (track.isCachedOffline) {
-            // Only remove cached copy if it can be re-created or re-read from sourceUri
-            val canRebuild = !track.isUserUpload || track.sourceUri != null
-            if (!canRebuild) return@withContext track
-
-            track.cachedFilePath?.let { path ->
-                runCatching { File(path).delete() }
-            }
-            dao.updateCacheStatus(
-                id = track.id,
-                isCached = false,
-                cachedPath = null,
-                sizeBytes = 0L,
-            )
-            return@withContext track.copy(
-                isCachedOffline = false,
-                cachedFilePath = null,
-                fileSizeBytes = 0L,
-            )
-        } else {
-            val preset = AudioSynthesizer.starterPresets.find { it.id == track.id }
-            val restoredFile: File? = when {
-                preset != null -> {
-                    val file = File(audioCacheDir, "${track.id}.wav")
-                    AudioSynthesizer.generateWavTrack(preset, file)
-                    file
-                }
-                track.sourceUri != null -> {
-                    val uri = Uri.parse(track.sourceUri)
-                    val file = File(audioCacheDir, "${track.id}.audio")
-                    val ok = runCatching {
-                        context.contentResolver.openInputStream(uri)?.use { input ->
-                            FileOutputStream(file).use { output -> input.copyTo(output) }
-                        }
-                        file.exists() && file.length() > 0L
-                    }.getOrDefault(false)
-                    if (ok) file else null
-                }
-                else -> null
-            }
-
-            if (restoredFile != null) {
-                dao.updateCacheStatus(
-                    id = track.id,
-                    isCached = true,
-                    cachedPath = restoredFile.absolutePath,
-                    sizeBytes = restoredFile.length(),
-                )
-                return@withContext track.copy(
-                    isCachedOffline = true,
-                    cachedFilePath = restoredFile.absolutePath,
-                    fileSizeBytes = restoredFile.length(),
-                )
-            }
-            return@withContext track
-        }
-    }
-
     suspend fun deleteTrack(track: TrackEntity) = withContext(Dispatchers.IO) {
         track.cachedFilePath?.let { runCatching { File(it).delete() } }
-        track.coverArtPath?.let { runCatching { File(it).delete() } }
+        track.coverArtPath?.let { cover ->
+            if (!cover.startsWith("http")) {
+                runCatching { File(cover).delete() }
+            }
+        }
         dao.deleteTrackById(track.id)
     }
 
     suspend fun calculateCacheSizeBytes(): Long = withContext(Dispatchers.IO) {
         val allTracks = dao.getAllTracksOnce()
+        val allPlaylists = dao.getAllPlaylistsOnce()
         val protectedAudioPaths = allTracks
             .filter { it.isUserUpload || it.sourceUri == null }
             .mapNotNull { it.cachedFilePath }
             .toHashSet()
-        val protectedCoverPaths = allTracks
-            .filter { it.isUserUpload }
-            .mapNotNull { it.coverArtPath }
-            .toHashSet()
+        val protectedCoverPaths = buildSet {
+            allTracks.mapNotNull { it.coverArtPath }.filter { !it.startsWith("http") }.forEach { add(it) }
+            allPlaylists.mapNotNull { it.coverArtPath }.filter { !it.startsWith("http") }.forEach { add(it) }
+        }
 
         val tempCacheBytes = directorySizeBytes(context.cacheDir)
         val audioCacheBytes = audioCacheDir.listFiles()
@@ -401,19 +327,21 @@ class AudioCacheManager(
         tempCacheBytes + audioCacheBytes + coverCacheBytes
     }
 
+    @OptIn(coil.annotation.ExperimentalCoilApi::class)
     suspend fun clearAppCache(): Long = withContext(Dispatchers.IO) {
         val sizeBefore = calculateCacheSizeBytes()
         val allTracks = dao.getAllTracksOnce()
+        val allPlaylists = dao.getAllPlaylistsOnce()
         val protectedAudioPaths = allTracks
             .filter { it.isUserUpload || it.sourceUri == null }
             .mapNotNull { it.cachedFilePath }
             .toHashSet()
-        val protectedCoverPaths = allTracks
-            .filter { it.isUserUpload }
-            .mapNotNull { it.coverArtPath }
-            .toHashSet()
+        val protectedCoverPaths = buildSet {
+            allTracks.mapNotNull { it.coverArtPath }.filter { !it.startsWith("http") }.forEach { add(it) }
+            allPlaylists.mapNotNull { it.coverArtPath }.filter { !it.startsWith("http") }.forEach { add(it) }
+        }
 
-        // 1. Clear streamed audio cache & orphaned audio files (keep user uploads and built-in wavs)
+        // 1. Clear temporary stream recovery cache & orphaned audio files (keep user uploads)
         audioCacheDir.listFiles()?.forEach { file ->
             if (file.isFile && file.absolutePath !in protectedAudioPaths) {
                 runCatching { file.delete() }

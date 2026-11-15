@@ -39,38 +39,102 @@ class SoundLapaHaptics(
     }
 
     fun tick() {
-        pulse(durationMs = 12L, amplitude = 85, viewFallback = HapticFeedbackConstants.CLOCK_TICK)
+        pulse(
+            baseDurationMs = 14L,
+            baseAmplitude = 120,
+            primitiveId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                VibrationEffect.Composition.PRIMITIVE_LOW_TICK
+            } else 0,
+            viewFallback = HapticFeedbackConstants.CLOCK_TICK,
+        )
     }
 
     fun tap() {
-        pulse(durationMs = 20L, amplitude = 140, viewFallback = HapticFeedbackConstants.CONTEXT_CLICK)
+        pulse(
+            baseDurationMs = 24L,
+            baseAmplitude = 185,
+            primitiveId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                VibrationEffect.Composition.PRIMITIVE_CLICK
+            } else 0,
+            viewFallback = HapticFeedbackConstants.CONTEXT_CLICK,
+        )
     }
 
     fun confirm() {
-        pulse(durationMs = 28L, amplitude = 190, viewFallback = HapticFeedbackConstants.LONG_PRESS)
+        pulse(
+            baseDurationMs = 36L,
+            baseAmplitude = 245,
+            primitiveId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                VibrationEffect.Composition.PRIMITIVE_CLICK
+            } else 0,
+            viewFallback = HapticFeedbackConstants.LONG_PRESS,
+        )
     }
 
     fun previewIntensity(percent: Int) {
-        val factor = percent.coerceIn(10, 100) / 100f
-        val scaledAmp = (210 * factor).roundToInt().coerceIn(24, 255)
-        val scaledDur = (22f * (0.65f + 0.55f * factor)).roundToInt().toLong().coerceIn(10L, 40L)
-        vibrateNow(scaledDur, scaledAmp, HapticFeedbackConstants.CONTEXT_CLICK)
+        val normalized = (percent.coerceIn(10, 100) - 10) / 90f // 0f at 10%, 1f at 100%
+        val primitiveScale = 0.08f + 0.92f * normalized
+        val scaledAmp = (20f + 235f * normalized).roundToInt().coerceIn(16, 255)
+        val scaledDur = (5f + 38f * normalized).roundToInt().toLong().coerceIn(4L, 45L)
+        vibrateNow(
+            durationMs = scaledDur,
+            amplitude = scaledAmp,
+            primitiveId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                VibrationEffect.Composition.PRIMITIVE_CLICK
+            } else 0,
+            primitiveScale = primitiveScale,
+            viewFallback = HapticFeedbackConstants.CONTEXT_CLICK,
+        )
     }
 
-    private fun pulse(durationMs: Long, amplitude: Int, viewFallback: Int) {
+    private fun pulse(
+        baseDurationMs: Long,
+        baseAmplitude: Int,
+        primitiveId: Int,
+        viewFallback: Int,
+    ) {
         if (!config.enabled) return
-        val factor = config.intensityPercent.coerceIn(10, 100) / 100f
-        val scaledAmp = (amplitude * factor).roundToInt().coerceIn(20, 255)
-        val scaledDur = (durationMs * (0.65f + 0.50f * factor)).roundToInt().toLong().coerceIn(8L, 42L)
-        vibrateNow(scaledDur, scaledAmp, viewFallback)
+        val normalized = (config.intensityPercent.coerceIn(10, 100) - 10) / 90f
+        val primitiveScale = 0.08f + 0.92f * normalized
+        val scaledAmp = (baseAmplitude * (0.12f + 0.88f * normalized)).roundToInt().coerceIn(16, 255)
+        val scaledDur = (4f + (baseDurationMs - 4f) * (0.12f + 1.15f * normalized))
+            .roundToInt().toLong().coerceIn(4L, 46L)
+        vibrateNow(
+            durationMs = scaledDur,
+            amplitude = scaledAmp,
+            primitiveId = primitiveId,
+            primitiveScale = primitiveScale,
+            viewFallback = viewFallback,
+        )
     }
 
-    private fun vibrateNow(durationMs: Long, amplitude: Int, viewFallback: Int) {
+    private fun vibrateNow(
+        durationMs: Long,
+        amplitude: Int,
+        primitiveId: Int,
+        primitiveScale: Float,
+        viewFallback: Int,
+    ) {
         runCatching {
             val v = vibrator
             if (v != null && v.hasVibrator()) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                    primitiveId != 0 &&
+                    v.areAllPrimitivesSupported(primitiveId)
+                ) {
+                    val effect = VibrationEffect.startComposition()
+                        .addPrimitive(primitiveId, primitiveScale.coerceIn(0.05f, 1.0f))
+                        .compose()
+                    v.vibrate(effect)
+                    return@runCatching
+                }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    v.vibrate(VibrationEffect.createOneShot(durationMs, amplitude))
+                    val effectiveAmp = if (v.hasAmplitudeControl()) {
+                        amplitude.coerceIn(1, 255)
+                    } else {
+                        VibrationEffect.DEFAULT_AMPLITUDE
+                    }
+                    v.vibrate(VibrationEffect.createOneShot(durationMs, effectiveAmp))
                 } else {
                     @Suppress("DEPRECATION")
                     v.vibrate(durationMs)

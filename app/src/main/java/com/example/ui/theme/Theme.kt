@@ -51,12 +51,12 @@ private fun buildLightColorScheme(accent: Color) = lightColorScheme(
     onBackground = FrostInk,
     surface = FrostSurface,
     onSurface = FrostInk,
-    surfaceVariant = Color(0xFFEBE4DF),
+    surfaceVariant = FrostSurfaceVariant,
     onSurfaceVariant = FrostMuted,
-    outline = Color(0x3316131A),
-    outlineVariant = Color(0x1816131A),
+    outline = Color(0x3618151D),
+    outlineVariant = Color(0x1A18151D),
     error = Color(0xFFBA1A1A),
-    onError = Color.White,
+    onError = Color(0xFFF8F4F0),
 )
 
 val SoundLapaShapes = Shapes(

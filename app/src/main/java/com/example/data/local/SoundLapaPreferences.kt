@@ -22,6 +22,17 @@ private val Context.soundLapaDataStore: DataStore<Preferences> by preferencesDat
 
 const val DEFAULT_PURPLE_ACCENT_ARGB: Long = 0xFF8B5CF6L
 
+enum class AudioFocusMode {
+    PAUSE,
+    DUCK,
+    MIX;
+
+    companion object {
+        fun fromRaw(raw: String?): AudioFocusMode =
+            entries.find { it.name.equals(raw?.trim(), ignoreCase = true) } ?: PAUSE
+    }
+}
+
 @Immutable
 @Serializable
 data class ListeningHistoryEntry(
@@ -31,6 +42,16 @@ data class ListeningHistoryEntry(
     val genre: String,
     val playCount: Int = 1,
     val lastPlayedAtMs: Long = 0L,
+)
+
+@Immutable
+@Serializable
+data class WaveFilterConfig(
+    val genre: String = "auto",
+    val language: String = "auto",
+    val vocals: String = "all",
+    val mood: String = "auto",
+    val hasCustomized: Boolean = false,
 )
 
 @Immutable
@@ -78,6 +99,11 @@ data class SoundLapaSettings(
     val avatarModerationBlocked: Boolean = false,
     val settingsUpdatedAtMs: Long = 0L,
     val pendingBugReports: List<LocalBugReport> = emptyList(),
+    val batterySaverEnabled: Boolean = false,
+    val audioFocusMode: AudioFocusMode = AudioFocusMode.PAUSE,
+    val customUsername: String? = null,
+    val devUnlockedUid: String? = null,
+    val waveFilterConfig: WaveFilterConfig = WaveFilterConfig(),
 )
 
 class SoundLapaPreferences(private val context: Context) {
@@ -114,6 +140,11 @@ class SoundLapaPreferences(private val context: Context) {
         val AVATAR_MODERATION_BLOCKED = booleanPreferencesKey("avatar_moderation_blocked")
         val SETTINGS_UPDATED_AT_MS = longPreferencesKey("settings_updated_at_ms")
         val PENDING_BUG_REPORTS_JSON = stringPreferencesKey("pending_bug_reports_json")
+        val BATTERY_SAVER_ENABLED = booleanPreferencesKey("battery_saver_enabled")
+        val AUDIO_FOCUS_MODE = stringPreferencesKey("audio_focus_mode")
+        val CUSTOM_USERNAME = stringPreferencesKey("custom_username")
+        val DEV_UNLOCKED_UID = stringPreferencesKey("dev_unlocked_uid")
+        val WAVE_FILTER_JSON = stringPreferencesKey("wave_filter_json")
     }
 
     // Synchronous SharedPreferences mirror ensures instant restoration on frame 0
@@ -172,7 +203,17 @@ class SoundLapaPreferences(private val context: Context) {
             avatarModerationBlocked = syncPrefs.getBoolean("avatar_moderation_blocked", false),
             settingsUpdatedAtMs = syncPrefs.getLong("settings_updated_at_ms", 0L),
             pendingBugReports = decodeBugReports(syncPrefs.getString("pending_bug_reports_json", null)),
+            batterySaverEnabled = syncPrefs.getBoolean("battery_saver_enabled", false),
+            audioFocusMode = AudioFocusMode.fromRaw(syncPrefs.getString("audio_focus_mode", null)),
+            customUsername = syncPrefs.getString("custom_username", null),
+            devUnlockedUid = syncPrefs.getString("dev_unlocked_uid", null),
+            waveFilterConfig = decodeWaveFilterConfig(syncPrefs.getString("wave_filter_json", null)),
         )
+    }
+
+    private fun decodeWaveFilterConfig(raw: String?): WaveFilterConfig {
+        if (raw.isNullOrBlank()) return WaveFilterConfig()
+        return runCatching { Json.decodeFromString<WaveFilterConfig>(raw) }.getOrDefault(WaveFilterConfig())
     }
 
     private fun decodeStringSet(raw: String?): Set<String> {
@@ -299,9 +340,12 @@ class SoundLapaPreferences(private val context: Context) {
         dataSaverEnabled: Boolean,
         autoUploadEnabled: Boolean,
         updatedAtMs: Long,
+        batterySaverEnabled: Boolean = false,
+        audioFocusMode: String = AudioFocusMode.PAUSE.name,
     ) {
         val clampedDur = smoothTransitionDurationSec.coerceIn(1, 10)
         val clampedHaptic = hapticIntensity.coerceIn(10, 100)
+        val parsedFocus = AudioFocusMode.fromRaw(audioFocusMode)
         updateSync({
             it.copy(
                 appLanguage = appLanguage,
@@ -315,6 +359,8 @@ class SoundLapaPreferences(private val context: Context) {
                 dataSaverEnabled = dataSaverEnabled,
                 autoUploadEnabled = autoUploadEnabled,
                 settingsUpdatedAtMs = updatedAtMs,
+                batterySaverEnabled = batterySaverEnabled,
+                audioFocusMode = parsedFocus,
             )
         }) {
             putString("app_language", appLanguage)
@@ -328,6 +374,8 @@ class SoundLapaPreferences(private val context: Context) {
             putBoolean("data_saver_enabled", dataSaverEnabled)
             putBoolean("auto_upload_enabled", autoUploadEnabled)
             putLong("settings_updated_at_ms", updatedAtMs)
+            putBoolean("battery_saver_enabled", batterySaverEnabled)
+            putString("audio_focus_mode", parsedFocus.name)
         }
         context.soundLapaDataStore.edit { prefs ->
             prefs[Keys.APP_LANGUAGE] = appLanguage
@@ -341,6 +389,8 @@ class SoundLapaPreferences(private val context: Context) {
             prefs[Keys.DATA_SAVER_ENABLED] = dataSaverEnabled
             prefs[Keys.AUTO_UPLOAD_ENABLED] = autoUploadEnabled
             prefs[Keys.SETTINGS_UPDATED_AT_MS] = updatedAtMs
+            prefs[Keys.BATTERY_SAVER_ENABLED] = batterySaverEnabled
+            prefs[Keys.AUDIO_FOCUS_MODE] = parsedFocus.name
         }
     }
 
@@ -643,5 +693,61 @@ class SoundLapaPreferences(private val context: Context) {
             putLong("last_trending_refresh_ms", timestampMs)
         }
         context.soundLapaDataStore.edit { it[Keys.LAST_TRENDING_REFRESH_MS] = timestampMs }
+    }
+
+    suspend fun setBatterySaverEnabled(enabled: Boolean) {
+        val now = System.currentTimeMillis()
+        updateSync({ it.copy(batterySaverEnabled = enabled, settingsUpdatedAtMs = now) }) {
+            putBoolean("battery_saver_enabled", enabled)
+            putLong("settings_updated_at_ms", now)
+        }
+        context.soundLapaDataStore.edit {
+            it[Keys.BATTERY_SAVER_ENABLED] = enabled
+            it[Keys.SETTINGS_UPDATED_AT_MS] = now
+        }
+    }
+
+    suspend fun setAudioFocusMode(mode: AudioFocusMode) {
+        val now = System.currentTimeMillis()
+        updateSync({ it.copy(audioFocusMode = mode, settingsUpdatedAtMs = now) }) {
+            putString("audio_focus_mode", mode.name)
+            putLong("settings_updated_at_ms", now)
+        }
+        context.soundLapaDataStore.edit {
+            it[Keys.AUDIO_FOCUS_MODE] = mode.name
+            it[Keys.SETTINGS_UPDATED_AT_MS] = now
+        }
+    }
+
+    suspend fun setCustomUsername(username: String?) {
+        val clean = username?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }?.take(24)
+        updateSync({ it.copy(customUsername = clean) }) {
+            if (clean == null) remove("custom_username") else putString("custom_username", clean)
+        }
+        context.soundLapaDataStore.edit { prefs ->
+            if (clean == null) prefs.remove(Keys.CUSTOM_USERNAME)
+            else prefs[Keys.CUSTOM_USERNAME] = clean
+        }
+    }
+
+    suspend fun setDevUnlockedUid(uid: String?) {
+        val clean = uid?.trim()?.takeIf { it.isNotEmpty() }
+        updateSync({ it.copy(devUnlockedUid = clean) }) {
+            if (clean == null) remove("dev_unlocked_uid") else putString("dev_unlocked_uid", clean)
+        }
+        context.soundLapaDataStore.edit { prefs ->
+            if (clean == null) prefs.remove(Keys.DEV_UNLOCKED_UID)
+            else prefs[Keys.DEV_UNLOCKED_UID] = clean
+        }
+    }
+
+    suspend fun setWaveFilterConfig(config: WaveFilterConfig) {
+        val encoded = Json.encodeToString(config)
+        updateSync({ it.copy(waveFilterConfig = config) }) {
+            putString("wave_filter_json", encoded)
+        }
+        context.soundLapaDataStore.edit { prefs ->
+            prefs[Keys.WAVE_FILTER_JSON] = encoded
+        }
     }
 }

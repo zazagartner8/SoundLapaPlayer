@@ -29,6 +29,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.CheckCircle
@@ -63,7 +64,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -78,13 +78,14 @@ import kotlinx.coroutines.delay
 @Composable
 fun AboutScreen(
     onClose: () -> Unit,
+    onOpenChangelogHistory: () -> Unit = {},
+    onOpenCreatorProfile: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     BackHandler(onBack = onClose)
 
     val strings = LocalAppStrings.current
     val context = LocalContext.current
-    val uriHandler = LocalUriHandler.current
     val haptics = rememberSoundLapaHaptics()
     val accent = MaterialTheme.colorScheme.primary
     var copiedFeedback by remember { mutableStateOf(false) }
@@ -98,7 +99,7 @@ fun AboutScreen(
 
     val versionSummary = remember {
         buildString {
-            appendLine("SoundLapa v${BuildConfig.VERSION_NAME}")
+            appendLine("SoundLap v${BuildConfig.VERSION_NAME}")
             appendLine("Package: ${BuildConfig.APPLICATION_ID}")
             appendLine("Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
             append("Engine: AndroidX Media3 / ExoPlayer • Compose Material 3")
@@ -192,7 +193,7 @@ fun AboutScreen(
                                 ) {
                                     Image(
                                         painter = painterResource(R.drawable.soundlapa_brand_logo),
-                                        contentDescription = "SoundLapa Logo",
+                                        contentDescription = "SoundLap Logo",
                                         contentScale = ContentScale.Crop,
                                         modifier = Modifier
                                             .size(62.dp)
@@ -209,7 +210,7 @@ fun AboutScreen(
                                         verticalArrangement = Arrangement.spacedBy(4.dp),
                                     ) {
                                         Text(
-                                            text = "SoundLapa",
+                                            text = "SoundLap",
                                             style = MaterialTheme.typography.headlineMedium,
                                             fontWeight = FontWeight.ExtraBold,
                                             color = MaterialTheme.colorScheme.onSurface,
@@ -246,7 +247,10 @@ fun AboutScreen(
                                     }
 
                                     Surface(
-                                        onClick = { runCatching { uriHandler.openUri("https://t.me/tylerw1nston") } },
+                                        onClick = {
+                                            haptics.tick()
+                                            onOpenCreatorProfile()
+                                        },
                                         shape = CircleShape,
                                         color = MaterialTheme.colorScheme.surface.copy(alpha = 0.65f),
                                         modifier = Modifier.testTag("about_creator_badge"),
@@ -270,12 +274,17 @@ fun AboutScreen(
                         }
                     }
 
-                    // 2. What's New Card
+                    // 2. What's New Card (clickable -> opens full changelog history)
                     item(key = "about_whats_new") {
                         AboutSectionCard(
                             icon = Icons.Rounded.AutoAwesome,
                             title = strings.aboutWhatsNewTitle,
                             accent = accent,
+                            onClick = {
+                                haptics.tick()
+                                onOpenChangelogHistory()
+                            },
+                            testTag = "about_whats_new_card",
                         ) {
                             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                                 strings.aboutWhatsNewItems.forEach { changeItem ->
@@ -299,6 +308,24 @@ fun AboutScreen(
                                             modifier = Modifier.weight(1f),
                                         )
                                     }
+                                }
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                ) {
+                                    Text(
+                                        text = strings.changelog.openHistoryHint,
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = accent,
+                                    )
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                                        contentDescription = strings.changelog.screenTitle,
+                                        tint = accent,
+                                    )
                                 }
                             }
                         }
@@ -378,9 +405,11 @@ fun AboutScreen(
                                         .fillMaxWidth()
                                         .clip(RoundedCornerShape(10.dp))
                                         .clickable {
-                                            runCatching { uriHandler.openUri("https://t.me/tylerw1nston") }
+                                            haptics.tick()
+                                            onOpenCreatorProfile()
                                         }
-                                        .padding(vertical = 2.dp),
+                                        .padding(vertical = 2.dp)
+                                        .testTag("about_credit_creator_row"),
                                 ) {
                                     AboutSpecRow(strings.aboutCreditCreatorLabel, strings.aboutCreditCreatorValue, accent)
                                 }
@@ -395,7 +424,7 @@ fun AboutScreen(
                         Button(
                             onClick = {
                                 val clipboard = context.getSystemService(ClipboardManager::class.java)
-                                clipboard?.setPrimaryClip(ClipData.newPlainText("SoundLapa Version", versionSummary))
+                                clipboard?.setPrimaryClip(ClipData.newPlainText("SoundLap Version", versionSummary))
                                 haptics.confirm()
                                 copiedFeedback = true
                             },
@@ -434,6 +463,8 @@ private fun AboutSectionCard(
     icon: ImageVector,
     title: String,
     accent: Color,
+    onClick: (() -> Unit)? = null,
+    testTag: String? = null,
     content: @Composable () -> Unit,
 ) {
     Surface(
@@ -443,7 +474,10 @@ private fun AboutSectionCard(
                 width = 1.dp,
                 color = MaterialTheme.colorScheme.outlineVariant,
                 shape = RoundedCornerShape(26.dp),
-            ),
+            )
+            .clip(RoundedCornerShape(26.dp))
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .then(if (testTag != null) Modifier.testTag(testTag) else Modifier),
         shape = RoundedCornerShape(26.dp),
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
         contentColor = MaterialTheme.colorScheme.onSurface,

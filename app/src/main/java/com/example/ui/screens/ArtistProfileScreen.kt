@@ -36,6 +36,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Album
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Shuffle
@@ -49,6 +51,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
@@ -82,6 +85,7 @@ import com.example.ui.ArtistProfileUiState
 import com.example.ui.components.TrackRowItem
 import com.example.ui.components.rememberSoundLapaHaptics
 import com.example.ui.i18n.LocalAppStrings
+import com.example.ui.shaders.LocalBatterySaverEnabled
 import com.example.ui.shaders.rememberIsAppForeground
 import kotlin.math.PI
 import kotlin.math.cos
@@ -94,6 +98,8 @@ fun ArtistProfileScreen(
     currentTrackId: String?,
     isPlaying: Boolean,
     bottomContentPadding: Dp,
+    isSubscribed: Boolean = false,
+    onToggleSubscribe: () -> Unit = {},
     onClose: () -> Unit,
     onPlayAll: () -> Unit,
     onShufflePlay: () -> Unit,
@@ -339,6 +345,37 @@ fun ArtistProfileScreen(
                                 fontWeight = FontWeight.SemiBold,
                             )
                         }
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            haptics.confirm()
+                            onToggleSubscribe()
+                        },
+                        shape = CircleShape,
+                        colors = if (isSubscribed) {
+                            ButtonDefaults.outlinedButtonColors(
+                                containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
+                                contentColor = MaterialTheme.colorScheme.primary,
+                            )
+                        } else {
+                            ButtonDefaults.outlinedButtonColors()
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("artist_subscribe_button"),
+                    ) {
+                        Icon(
+                            imageVector = if (isSubscribed) Icons.Rounded.Check else Icons.Rounded.NotificationsActive,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (isSubscribed) strings.social.subscribedArtist else strings.social.subscribeArtist,
+                            fontWeight = FontWeight.SemiBold,
+                        )
                     }
 
                     if (state.isLoading) {
@@ -596,7 +633,8 @@ private fun ArtistShimmeringBanner(
 ) {
     val context = LocalContext.current
     val isForeground = rememberIsAppForeground()
-    val phase = if (isForeground && collapseFraction < 0.99f) {
+    val batterySaver = LocalBatterySaverEnabled.current
+    val phase = if (!batterySaver && isForeground && collapseFraction < 0.99f) {
         val infiniteTransition = rememberInfiniteTransition(label = "artistBannerShimmer")
         val animatedPhase by infiniteTransition.animateFloat(
             initialValue = 0f,
@@ -648,10 +686,13 @@ private fun ArtistShimmeringBanner(
                         rotationZ = sin(phase) * 3.5f
                         alpha = 0.44f
                     }
-                    .blur(
-                        radius = 24.dp,
-                        edgeTreatment = BlurredEdgeTreatment.Rectangle,
-                    ),
+                    .let { base ->
+                        if (batterySaver) base
+                        else base.blur(
+                            radius = 24.dp,
+                            edgeTreatment = BlurredEdgeTreatment.Rectangle,
+                        )
+                    },
             ) {
                 SubcomposeAsyncImage(
                     model = ImageRequest.Builder(context)

@@ -4,11 +4,13 @@ import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.base.FirestoreEmulatorTestBase
+import com.example.data.local.AudioFocusMode
 import com.example.data.local.PlaylistEntity
 import com.example.data.local.SoundLapaDatabase
 import com.example.data.local.SoundLapaSettings
 import com.example.data.local.TrackEntity
 import com.google.firebase.firestore.FirebaseFirestoreException
+import org.junit.Assert.assertFalse
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.tasks.await
@@ -195,6 +197,8 @@ class CloudLibraryRepositoryRuleTest : FirestoreEmulatorTestBase() {
             autoCacheOnPlay = false,
             dataSaverEnabled = true,
             autoUploadEnabled = true,
+            batterySaverEnabled = true,
+            audioFocusMode = AudioFocusMode.MIX,
             settingsUpdatedAtMs = 999_999L,
         )
 
@@ -228,6 +232,8 @@ class CloudLibraryRepositoryRuleTest : FirestoreEmulatorTestBase() {
         assertEquals(false, parsed?.hapticsEnabled)
         assertEquals(40, parsed?.hapticIntensity)
         assertEquals(true, parsed?.dataSaverEnabled)
+        assertEquals(true, parsed?.batterySaverEnabled)
+        assertEquals("MIX", parsed?.audioFocusMode)
     }
 
     @Test
@@ -361,6 +367,78 @@ class CloudLibraryRepositoryRuleTest : FirestoreEmulatorTestBase() {
         assertTrue(stats.totalPlaylists >= 3)
         assertEquals(DEFAULT_CLOUD_QUOTA_BYTES, stats.quotaBytes)
         assertTrue(uid.isNotBlank())
+    }
+
+    @Test
+    fun usernameClaimPublicSearchFriendsAndArtistSubscriptionsWorkWithZeroPiiIsolation() = runBlocking {
+        val aliceUid = signInTestUser(ALICE_EMAIL)
+        val aliceRepo = CloudLibraryRepository(firestore, auth)
+        val suffix = UUID.randomUUID().toString().replace("-", "").take(6).lowercase()
+        val aliceHandle = "alice_$suffix"
+
+        withTimeout(DEFAULT_TIMEOUT_MS) {
+            aliceRepo.upsertUserProfile(
+                displayName = "Alice Cloud",
+                email = ALICE_EMAIL,
+                photoUrl = "https://example.com/alice.jpg",
+            ).getOrThrow()
+            val claimed = aliceRepo.claimOrUpdateUsername(
+                rawHandle = "@$aliceHandle",
+                displayName = "Alice Cloud",
+                photoUrl = "https://example.com/alice.jpg",
+                bio = "Vinyl hunter",
+            ).getOrThrow()
+            assertEquals(aliceHandle, claimed)
+        }
+
+        val bobUid = signInTestUser(BOB_EMAIL)
+        val bobRepo = CloudLibraryRepository(firestore, auth)
+        val bobHandle = "bob_$suffix"
+
+        // Bob cannot steal Alice's handle
+        val stealRes = withTimeout(DEFAULT_TIMEOUT_MS) {
+            bobRepo.claimOrUpdateUsername(
+                rawHandle = aliceHandle,
+                displayName = "Bob Thief",
+            )
+        }
+        assertTrue(stealRes.isFailure)
+
+        withTimeout(DEFAULT_TIMEOUT_MS) {
+            bobRepo.claimOrUpdateUsername(
+                rawHandle = bobHandle,
+                displayName = "Bob Producer",
+            ).getOrThrow()
+
+            val searchResults = bobRepo.searchUsersByUsername(aliceHandle).getOrThrow()
+            val foundAlice = searchResults.find { it.userId == aliceUid }
+            assertNotNull(foundAlice)
+            assertEquals(aliceHandle, foundAlice?.username)
+            assertFalse(foundAlice?.isDeveloper ?: true)
+
+            bobRepo.addFriend(foundAlice!!).getOrThrow()
+            val friends = bobRepo.getFriends().getOrThrow()
+            assertTrue(friends.any { it.friendUid == aliceUid && it.username == aliceHandle })
+
+            bobRepo.upsertArtistSubscription(
+                artistName = "Miyagi & Эндшпиль",
+                avatarUrl = "https://example.com/miyagi.jpg",
+            ).getOrThrow()
+            val subs = bobRepo.getArtistSubscriptions().getOrThrow()
+            assertTrue(subs.any { it.artistName == "Miyagi & Эндшпиль" })
+        }
+
+        // Cross-user read of Bob's friends & subscriptions from Alice fails
+        signInTestUser(ALICE_EMAIL)
+        try {
+            withTimeout(DEFAULT_TIMEOUT_MS) {
+                firestore.collection("users").document(bobUid).collection("friends").get().await()
+            }
+            fail("Expected PERMISSION_DENIED when Alice reads Bob's friends")
+        } catch (e: Exception) {
+            val fsError = e.unwrapFirestoreException()
+            assertEquals(FirebaseFirestoreException.Code.PERMISSION_DENIED, fsError?.code)
+        }
     }
 
     private companion object {

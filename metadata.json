@@ -1,6 +1,6 @@
 {
-  "name": "SoundLapa",
-  "description": "SoundLapa — музыкальная платформа с жидким стеклом, кастомными шейдерами, авто-загрузкой треков и офлайн-кэшем",
+  "name": "SoundLap",
+  "description": "SoundLap v3.3 — потоковый музыкальный плеер с жидким стеклом, видеоклипами, синхронизированным текстом песен, профилями друзей и облачной медиатекой",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

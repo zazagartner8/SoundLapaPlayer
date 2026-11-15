@@ -23,6 +23,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "SoundLapa"
+rootProject.name = "SoundLap"
 
 include(":app")

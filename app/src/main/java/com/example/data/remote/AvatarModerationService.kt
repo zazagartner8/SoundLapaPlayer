@@ -4,11 +4,16 @@ import android.graphics.Bitmap
 import android.util.Log
 import com.google.firebase.Firebase
 import com.google.firebase.ai.ai
+import com.google.firebase.ai.type.HarmBlockThreshold
+import com.google.firebase.ai.type.HarmCategory
+import com.google.firebase.ai.type.SafetySetting
 import com.google.firebase.ai.type.Schema
 import com.google.firebase.ai.type.content
 import com.google.firebase.ai.type.generationConfig
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 
@@ -20,8 +25,15 @@ sealed interface AvatarModerationVerdict {
 
 object AvatarModerationService {
     private const val TAG = "AvatarModeration"
-    private const val MODEL_NAME = "gemini-3.8-flash"
+    private const val PRIMARY_MODEL_NAME = "gemini-3.8-flash"
+    private const val FALLBACK_MODEL_NAME = "gemini-3.5-flash-lite"
     private const val MODERATION_TIMEOUT_MS = 45_000L
+    private const val MAX_MODERATION_IMAGE_PX = 384
+
+    const val ERR_APPCHECK = "moderation_appcheck_error"
+    const val ERR_NETWORK = "moderation_network_error"
+    const val ERR_TIMEOUT = "moderation_timeout"
+    const val ERR_GENERIC = "moderation_error"
 
     private val moderationSchema = Schema.obj(
         properties = mapOf(
@@ -34,53 +46,139 @@ object AvatarModerationService {
         ),
     )
 
-    private val model by lazy {
-        Firebase.ai.generativeModel(
-            modelName = MODEL_NAME,
-            generationConfig = generationConfig {
-                responseMimeType = "application/json"
-                responseSchema = moderationSchema
-            },
-        )
-    }
+    private val permissiveSafetySettings = listOf(
+        SafetySetting(HarmCategory.HARASSMENT, HarmBlockThreshold.NONE),
+        SafetySetting(HarmCategory.HATE_SPEECH, HarmBlockThreshold.NONE),
+        SafetySetting(HarmCategory.SEXUALLY_EXPLICIT, HarmBlockThreshold.NONE),
+        SafetySetting(HarmCategory.DANGEROUS_CONTENT, HarmBlockThreshold.NONE),
+    )
 
-    suspend fun checkAvatarSafety(bitmap: Bitmap): AvatarModerationVerdict {
-        return try {
-            val response = withTimeout(MODERATION_TIMEOUT_MS) {
-                model.generateContent(
-                    content {
-                        image(bitmap)
-                        text(
-                            "Analyze this profile avatar image for 18+ / NSFW content moderation. " +
-                                "Set isUnsafeAdultContent=true if it contains nudity, sexually explicit acts, " +
-                                "pornography, hentai, erotic/NSFW artwork, exposed genitalia/breasts/buttocks, " +
-                                "or explicit 18+ adult material. Normal portraits, selfies, musicians, album covers " +
-                                "without explicit nudity, landscapes, pets, cartoons, and abstract art are safe (isUnsafeAdultContent=false).",
-                        )
-                    },
+    private fun buildModel(modelName: String) = Firebase.ai.generativeModel(
+        modelName = modelName,
+        generationConfig = generationConfig {
+            responseMimeType = "application/json"
+            responseSchema = moderationSchema
+        },
+        safetySettings = permissiveSafetySettings,
+    )
+
+    private val primaryModel by lazy { buildModel(PRIMARY_MODEL_NAME) }
+    private val fallbackModel by lazy { buildModel(FALLBACK_MODEL_NAME) }
+
+    suspend fun checkAvatarSafety(bitmap: Bitmap): AvatarModerationVerdict = withContext(Dispatchers.IO) {
+        val preparedBitmap = prepareModerationBitmap(bitmap)
+        try {
+            val promptContent = content {
+                image(preparedBitmap)
+                text(
+                    "Analyze this profile avatar image for 18+ / NSFW content moderation. " +
+                        "Set isUnsafeAdultContent=true ONLY if it clearly contains explicit nudity, " +
+                        "sexually explicit acts, pornography, hentai, erotic/NSFW artwork, or exposed genitalia/breasts/buttocks. " +
+                        "Normal portraits, selfies, musicians, album covers, stylized art, anime faces, " +
+                        "landscapes, pets, cartoons, and abstract images are SAFE (isUnsafeAdultContent=false).",
                 )
             }
+
+            val firstAttempt = runCatching {
+                withTimeout(MODERATION_TIMEOUT_MS) {
+                    primaryModel.generateContent(promptContent)
+                }
+            }
+
+            val response = firstAttempt.getOrElse { primaryErr ->
+                if (primaryErr is CancellationException && primaryErr !is TimeoutCancellationException) {
+                    throw primaryErr
+                }
+                Log.w(TAG, "Primary model ($PRIMARY_MODEL_NAME) failed, trying fallback ($FALLBACK_MODEL_NAME)", primaryErr)
+                try {
+                    withTimeout(MODERATION_TIMEOUT_MS) {
+                        fallbackModel.generateContent(promptContent)
+                    }
+                } catch (fallbackErr: TimeoutCancellationException) {
+                    Log.e(TAG, "Avatar moderation timed out on fallback", fallbackErr)
+                    return@withContext AvatarModerationVerdict.Error(ERR_TIMEOUT)
+                } catch (fallbackErr: CancellationException) {
+                    throw fallbackErr
+                } catch (fallbackErr: Exception) {
+                    Log.e(TAG, "Avatar moderation failed on fallback", fallbackErr)
+                    return@withContext AvatarModerationVerdict.Error(classifyErrorCode(fallbackErr))
+                }
+            }
+
             val rawJson = response.text
             if (rawJson.isNullOrBlank()) {
                 Log.e(TAG, "Avatar moderation returned empty response")
-                AvatarModerationVerdict.Error("Moderation service returned an empty response.")
+                AvatarModerationVerdict.Error(ERR_GENERIC)
             } else {
                 parseModerationVerdictJson(rawJson)
             }
         } catch (e: TimeoutCancellationException) {
             Log.e(TAG, "Avatar moderation timed out", e)
-            AvatarModerationVerdict.Error("Moderation timed out. Please try again.")
+            AvatarModerationVerdict.Error(ERR_TIMEOUT)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "Avatar moderation failed", e)
-            AvatarModerationVerdict.Error(e.localizedMessage ?: "Failed to verify avatar safety.")
+            AvatarModerationVerdict.Error(classifyErrorCode(e))
+        } finally {
+            if (preparedBitmap !== bitmap && !preparedBitmap.isRecycled) {
+                preparedBitmap.recycle()
+            }
+        }
+    }
+
+    private fun prepareModerationBitmap(source: Bitmap): Bitmap {
+        val software = if (source.config != Bitmap.Config.ARGB_8888) {
+            source.copy(Bitmap.Config.ARGB_8888, false)
+        } else {
+            source
+        }
+        val maxDim = maxOf(software.width, software.height)
+        if (maxDim <= MAX_MODERATION_IMAGE_PX) return software
+        val scale = MAX_MODERATION_IMAGE_PX.toFloat() / maxDim.toFloat()
+        val w = (software.width * scale).toInt().coerceAtLeast(1)
+        val h = (software.height * scale).toInt().coerceAtLeast(1)
+        return Bitmap.createScaledBitmap(software, w, h, true).also { scaled ->
+            if (software !== source && scaled !== software && !software.isRecycled) {
+                software.recycle()
+            }
+        }
+    }
+
+    internal fun classifyErrorCode(error: Throwable): String {
+        val msg = generateSequence(error) { it.cause }
+            .mapNotNull { it.message }
+            .joinToString(" | ")
+            .lowercase()
+        return when {
+            msg.contains("appcheck") || msg.contains("app check") || msg.contains("403") || msg.contains("attestation") ->
+                ERR_APPCHECK
+            msg.contains("timeout") || msg.contains("timed out") ->
+                ERR_TIMEOUT
+            msg.contains("unable to resolve host") || msg.contains("network") || msg.contains("failed to connect") ||
+                msg.contains("socket") || msg.contains("unknownhost") || msg.contains("ioexception") ->
+                ERR_NETWORK
+            else -> ERR_GENERIC
         }
     }
 
     fun parseModerationVerdictJson(rawJson: String): AvatarModerationVerdict {
         return try {
-            val obj = JSONObject(rawJson)
+            val cleaned = rawJson
+                .trim()
+                .removePrefix("```json")
+                .removePrefix("```JSON")
+                .removePrefix("```")
+                .removeSuffix("```")
+                .trim()
+            val jsonSlice = if (!cleaned.startsWith("{")) {
+                val start = cleaned.indexOf('{')
+                val end = cleaned.lastIndexOf('}')
+                if (start >= 0 && end > start) cleaned.substring(start, end + 1) else cleaned
+            } else {
+                cleaned
+            }
+            val obj = JSONObject(jsonSlice)
             val isUnsafe = obj.optBoolean("isUnsafeAdultContent", false)
             val reason = obj.optString("reason", "").trim()
             if (isUnsafe) {
@@ -92,7 +190,7 @@ object AvatarModerationService {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to parse moderation response: $rawJson", e)
-            AvatarModerationVerdict.Error("Invalid moderation response.")
+            AvatarModerationVerdict.Error(ERR_GENERIC)
         }
     }
 }

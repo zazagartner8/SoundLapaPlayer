@@ -13,6 +13,10 @@
           "type": "string",
           "description": "User display name or custom nickname"
         },
+        "username": {
+          "type": "string",
+          "description": "Optional unique public @username handle"
+        },
         "email": {
           "type": "string",
           "description": "Optional user email (private to owner only)"
@@ -336,12 +340,77 @@
         "devAccessKey",
         "updatedAt"
       ]
+    },
+    "PublicProfile": {
+      "title": "PublicProfile",
+      "description": "Zero-PII public user profile visible to authenticated SoundLap users for social discovery",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "displayName": { "type": "string" },
+        "username": { "type": "string" },
+        "photoUrl": { "type": "string" },
+        "bio": { "type": "string" },
+        "isDeveloper": { "type": "boolean" },
+        "isPublic": { "type": "boolean" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "displayName", "isDeveloper", "isPublic", "updatedAt"]
+    },
+    "UsernameHandle": {
+      "title": "UsernameHandle",
+      "description": "Unique @username reservation mapping lowercase handle to owner UID",
+      "type": "object",
+      "properties": {
+        "username": { "type": "string" },
+        "userId": { "type": "string" },
+        "displayName": { "type": "string" },
+        "photoUrl": { "type": "string" },
+        "isDeveloper": { "type": "boolean" },
+        "isPublic": { "type": "boolean" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["username", "userId", "displayName", "isDeveloper", "isPublic", "updatedAt"]
+    },
+    "UserFriend": {
+      "title": "UserFriend",
+      "description": "Friend link inside authenticated owner's private friend list",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "friendUid": { "type": "string" },
+        "username": { "type": "string" },
+        "displayName": { "type": "string" },
+        "photoUrl": { "type": "string" },
+        "isDeveloper": { "type": "boolean" },
+        "addedAtMs": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "friendUid", "displayName", "isDeveloper", "addedAtMs", "createdAt", "updatedAt"]
+    },
+    "ArtistSubscription": {
+      "title": "ArtistSubscription",
+      "description": "Owner's subscribed artist record",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "artistKey": { "type": "string" },
+        "artistName": { "type": "string" },
+        "avatarUrl": { "type": "string" },
+        "soundCloudUrl": { "type": "string" },
+        "spotifyArtistId": { "type": "string" },
+        "subscribedAtMs": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "artistKey", "artistName", "subscribedAtMs", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
     "/users/{userId}": {
       "schema": { "$ref": "#/entities/UserProfile" },
-      "description": "Private user profile, custom identity, and synced settings for SoundLapa Google Sign-In account"
+      "description": "Private user profile, custom identity, and synced settings for SoundLap Google Sign-In account"
     },
     "/users/{userId}/tracks/{trackDocId}": {
       "schema": { "$ref": "#/entities/SavedTrack" },
@@ -354,6 +423,22 @@
     "/users/{userId}/playlists/{playlistDocId}/items/{itemDocId}": {
       "schema": { "$ref": "#/entities/UserPlaylistItem" },
       "description": "Ordered tracks belonging to a user's playlist"
+    },
+    "/users/{userId}/friends/{friendUid}": {
+      "schema": { "$ref": "#/entities/UserFriend" },
+      "description": "User's friends list"
+    },
+    "/users/{userId}/artist_subscriptions/{artistKey}": {
+      "schema": { "$ref": "#/entities/ArtistSubscription" },
+      "description": "User's subscribed music artists"
+    },
+    "/public_profiles/{userId}": {
+      "schema": { "$ref": "#/entities/PublicProfile" },
+      "description": "Zero-PII public profile projection searchable by authenticated users"
+    },
+    "/usernames/{handle}": {
+      "schema": { "$ref": "#/entities/UsernameHandle" },
+      "description": "Unique lowercase @username directory mapping to userId"
     },
     "/bug_reports/{reportId}": {
       "schema": { "$ref": "#/entities/BugReport" },

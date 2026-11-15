@@ -2,6 +2,7 @@ package com.example.ui.components
 
 import android.content.Intent
 import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -29,6 +30,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AddCircleOutline
+import androidx.compose.material.icons.rounded.Album
 import androidx.compose.material.icons.rounded.AudioFile
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.DeleteOutline
@@ -36,9 +38,14 @@ import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.Image
+import androidx.compose.material.icons.rounded.Lyrics
+import androidx.compose.material.icons.rounded.OndemandVideo
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.PlaylistAdd
+import androidx.compose.material.icons.rounded.PlaylistPlay
+import androidx.compose.material.icons.rounded.QueueMusic
+import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -71,6 +78,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.documentfile.provider.DocumentFile
 import coil.compose.AsyncImage
+import com.example.data.local.PlaylistEntity
 import com.example.data.local.PlaylistWithTracks
 import com.example.data.local.TrackEntity
 import com.example.ui.MainUiState
@@ -88,11 +96,22 @@ import com.example.ui.theme.LiquidRose
 fun EditTrackDialog(
     track: TrackEntity,
     onDismiss: () -> Unit,
-    onSave: (newTitle: String, newArtist: String, newCoverUri: Uri?, clearCover: Boolean) -> Unit,
+    onSave: (
+        newTitle: String,
+        newArtist: String,
+        newAlbumTitle: String?,
+        newGenre: String,
+        newCoverUri: Uri?,
+        clearCover: Boolean,
+    ) -> Unit,
 ) {
+    BackHandler(onBack = onDismiss)
+
     val strings = LocalAppStrings.current
     var title by remember(track.id) { mutableStateOf(track.title) }
     var artist by remember(track.id) { mutableStateOf(track.artist) }
+    var albumTitle by remember(track.id) { mutableStateOf(track.albumTitle.orEmpty()) }
+    var genre by remember(track.id) { mutableStateOf(track.genre) }
     var pickedCoverUri by remember(track.id) { mutableStateOf<Uri?>(null) }
     var clearCover by remember(track.id) { mutableStateOf(false) }
 
@@ -111,6 +130,7 @@ fun EditTrackDialog(
         title = { Text(strings.editTrackTitle) },
         text = {
             Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 Row(
@@ -198,11 +218,42 @@ fun EditTrackDialog(
                         .fillMaxWidth()
                         .testTag("edit_artist_input"),
                 )
+
+                OutlinedTextField(
+                    value = albumTitle,
+                    onValueChange = { albumTitle = it },
+                    label = { Text(strings.playerV33.albumTitleLabel) },
+                    singleLine = true,
+                    shape = RoundedCornerShape(18.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("edit_album_input"),
+                )
+
+                OutlinedTextField(
+                    value = genre,
+                    onValueChange = { genre = it },
+                    label = { Text(strings.genreLabel) },
+                    singleLine = true,
+                    shape = RoundedCornerShape(18.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("edit_genre_input"),
+                )
             }
         },
         confirmButton = {
             Button(
-                onClick = { onSave(title, artist, pickedCoverUri, clearCover) },
+                onClick = {
+                    onSave(
+                        title,
+                        artist,
+                        albumTitle.trim().takeIf { it.isNotEmpty() },
+                        genre.trim().ifEmpty { track.genre },
+                        pickedCoverUri,
+                        clearCover,
+                    )
+                },
                 enabled = title.isNotBlank() && artist.isNotBlank(),
                 shape = CircleShape,
                 colors = ButtonDefaults.buttonColors(
@@ -210,6 +261,168 @@ fun EditTrackDialog(
                     contentColor = MaterialTheme.colorScheme.onPrimary,
                 ),
                 modifier = Modifier.testTag("save_track_edit_button"),
+            ) {
+                Text(strings.save)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(strings.cancel)
+            }
+        },
+    )
+}
+
+@Composable
+fun EditPlaylistDialog(
+    playlist: PlaylistEntity,
+    fallbackTracks: List<TrackEntity> = emptyList(),
+    onDismiss: () -> Unit,
+    onSave: (newName: String, newDescription: String, newCoverUri: Uri?, clearCover: Boolean) -> Unit,
+) {
+    BackHandler(onBack = onDismiss)
+
+    val strings = LocalAppStrings.current
+    val accent = MaterialTheme.colorScheme.primary
+    var name by remember(playlist.id) { mutableStateOf(playlist.name) }
+    var description by remember(playlist.id) { mutableStateOf(playlist.description) }
+    var pickedCoverUri by remember(playlist.id) { mutableStateOf<Uri?>(null) }
+    var clearCover by remember(playlist.id) { mutableStateOf(false) }
+
+    val fallbackTrack = remember(fallbackTracks) {
+        fallbackTracks.firstOrNull { !it.coverArtPath.isNullOrBlank() } ?: fallbackTracks.firstOrNull()
+    }
+
+    val photoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia(),
+    ) { uri ->
+        if (uri != null) {
+            pickedCoverUri = uri
+            clearCover = false
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        shape = RoundedCornerShape(28.dp),
+        title = { Text(strings.playerV33.editPlaylistTitle) },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(72.dp)
+                            .clip(RoundedCornerShape(18.dp))
+                            .background(accent.copy(alpha = 0.16f))
+                            .clickable {
+                                photoPickerLauncher.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                                )
+                            }
+                            .testTag("edit_playlist_cover_preview"),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        when {
+                            pickedCoverUri != null && !clearCover -> {
+                                AsyncImage(
+                                    model = pickedCoverUri,
+                                    contentDescription = strings.changeCover,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.matchParentSize(),
+                                )
+                            }
+                            !clearCover && !playlist.coverArtPath.isNullOrBlank() -> {
+                                AsyncImage(
+                                    model = playlist.coverArtPath,
+                                    contentDescription = strings.changeCover,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.matchParentSize(),
+                                )
+                            }
+                            fallbackTrack != null -> {
+                                TrackCoverArtwork(
+                                    track = fallbackTrack,
+                                    modifier = Modifier.matchParentSize(),
+                                    cornerRadius = 18.dp,
+                                )
+                            }
+                            else -> {
+                                Icon(
+                                    imageVector = Icons.Rounded.QueueMusic,
+                                    contentDescription = null,
+                                    tint = accent,
+                                    modifier = Modifier.size(30.dp),
+                                )
+                            }
+                        }
+                    }
+
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        OutlinedButton(
+                            onClick = {
+                                photoPickerLauncher.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                                )
+                            },
+                            shape = CircleShape,
+                            modifier = Modifier.testTag("pick_playlist_cover_button"),
+                        ) {
+                            Icon(Icons.Rounded.Image, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(strings.changeCover)
+                        }
+                        if (!playlist.coverArtPath.isNullOrBlank() || pickedCoverUri != null) {
+                            TextButton(
+                                onClick = {
+                                    pickedCoverUri = null
+                                    clearCover = true
+                                },
+                            ) {
+                                Text(strings.resetCover, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                }
+
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text(strings.playlistNameLabel) },
+                    singleLine = true,
+                    shape = RoundedCornerShape(18.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("edit_playlist_name_input"),
+                )
+
+                OutlinedTextField(
+                    value = description,
+                    onValueChange = { description = it },
+                    label = { Text(strings.descriptionOptionalLabel) },
+                    maxLines = 3,
+                    shape = RoundedCornerShape(18.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("edit_playlist_description_input"),
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onSave(name, description, pickedCoverUri, clearCover) },
+                enabled = name.isNotBlank(),
+                shape = CircleShape,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = accent,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                ),
+                modifier = Modifier.testTag("save_playlist_edit_button"),
             ) {
                 Text(strings.save)
             }
@@ -231,6 +444,12 @@ fun TrackOptionsBottomSheet(
     onAddToPlaylistClick: () -> Unit,
     onDeleteClick: (() -> Unit)?,
     onOpenArtistProfile: (() -> Unit)? = null,
+    onPlayNextClick: (() -> Unit)? = null,
+    onAddToQueueClick: (() -> Unit)? = null,
+    onOpenAlbumClick: (() -> Unit)? = null,
+    onLyricsClick: (() -> Unit)? = null,
+    onWatchClipClick: (() -> Unit)? = null,
+    onShareClick: (() -> Unit)? = null,
 ) {
     val strings = LocalAppStrings.current
     val haptics = rememberSoundLapaHaptics()
@@ -241,8 +460,9 @@ fun TrackOptionsBottomSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -254,30 +474,67 @@ fun TrackOptionsBottomSheet(
                     modifier = Modifier.size(48.dp),
                     cornerRadius = 14.dp,
                 )
-                Column {
-                    Text(text = track.title, style = MaterialTheme.typography.titleMedium)
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = track.artist,
+                        text = track.title,
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = buildString {
+                            append(track.artist)
+                            track.albumTitle?.takeIf { it.isNotBlank() }?.let {
+                                append(" • ")
+                                append(it)
+                            }
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
             }
 
-            HorizontalDivider()
+            HorizontalDivider(modifier = Modifier.padding(bottom = 4.dp))
 
-            if (onOpenArtistProfile != null) {
+            if (onPlayNextClick != null) {
                 SheetActionRow(
-                    icon = Icons.Rounded.Person,
-                    label = strings.artistProfileMenu,
+                    icon = Icons.Rounded.PlaylistPlay,
+                    label = strings.playerV33.playNextMenu,
                     onClick = {
                         haptics.tick()
                         onDismiss()
-                        onOpenArtistProfile()
+                        onPlayNextClick()
                     },
-                    testTag = "sheet_artist_profile",
+                    testTag = "sheet_play_next",
                 )
             }
+
+            if (onAddToQueueClick != null) {
+                SheetActionRow(
+                    icon = Icons.Rounded.QueueMusic,
+                    label = strings.playerV33.addToQueueMenu,
+                    onClick = {
+                        haptics.tick()
+                        onDismiss()
+                        onAddToQueueClick()
+                    },
+                    testTag = "sheet_add_to_queue",
+                )
+            }
+
+            SheetActionRow(
+                icon = Icons.Rounded.PlaylistAdd,
+                label = strings.addToPlaylistMenu,
+                onClick = {
+                    haptics.tick()
+                    onDismiss()
+                    onAddToPlaylistClick()
+                },
+                testTag = "sheet_add_to_playlist",
+            )
 
             if (onEditClick != null) {
                 SheetActionRow(
@@ -292,16 +549,70 @@ fun TrackOptionsBottomSheet(
                 )
             }
 
-            SheetActionRow(
-                icon = Icons.Rounded.PlaylistAdd,
-                label = strings.addToPlaylistMenu,
-                onClick = {
-                    haptics.tick()
-                    onDismiss()
-                    onAddToPlaylistClick()
-                },
-                testTag = "sheet_add_to_playlist",
-            )
+            if (onOpenArtistProfile != null) {
+                SheetActionRow(
+                    icon = Icons.Rounded.Person,
+                    label = strings.artistProfileMenu,
+                    onClick = {
+                        haptics.tick()
+                        onDismiss()
+                        onOpenArtistProfile()
+                    },
+                    testTag = "sheet_artist_profile",
+                )
+            }
+
+            if (onOpenAlbumClick != null) {
+                SheetActionRow(
+                    icon = Icons.Rounded.Album,
+                    label = strings.playerV33.openAlbumMenu,
+                    onClick = {
+                        haptics.tick()
+                        onDismiss()
+                        onOpenAlbumClick()
+                    },
+                    testTag = "sheet_open_album",
+                )
+            }
+
+            if (onLyricsClick != null) {
+                SheetActionRow(
+                    icon = Icons.Rounded.Lyrics,
+                    label = strings.playerV33.lyricsMenu,
+                    onClick = {
+                        haptics.tick()
+                        onDismiss()
+                        onLyricsClick()
+                    },
+                    testTag = "sheet_lyrics",
+                )
+            }
+
+            if (onWatchClipClick != null) {
+                SheetActionRow(
+                    icon = Icons.Rounded.OndemandVideo,
+                    label = strings.playerV33.clipMenu,
+                    onClick = {
+                        haptics.tick()
+                        onDismiss()
+                        onWatchClipClick()
+                    },
+                    testTag = "sheet_watch_clip",
+                )
+            }
+
+            if (onShareClick != null) {
+                SheetActionRow(
+                    icon = Icons.Rounded.Share,
+                    label = strings.shareTrackAction,
+                    onClick = {
+                        haptics.tick()
+                        onDismiss()
+                        onShareClick()
+                    },
+                    testTag = "sheet_share_track",
+                )
+            }
 
             if (onDeleteClick != null) {
                 SheetActionRow(
@@ -483,6 +794,7 @@ fun CreatePlaylistDialog(
     onDismiss: () -> Unit,
     onConfirm: (name: String, description: String) -> Unit,
 ) {
+    BackHandler(onBack = onDismiss)
     val strings = LocalAppStrings.current
     var name by remember { mutableStateOf("") }
     var description by remember { mutableStateOf("") }

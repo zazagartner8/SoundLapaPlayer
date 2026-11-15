@@ -113,6 +113,100 @@ fun decodeAvatarBitmapForModeration(context: Context, uri: Uri, maxDimPx: Int = 
     }.getOrNull()
 }
 
+fun decodeAvatarSourceBitmap(context: Context, uri: Uri, maxDimPx: Int = 1024): Bitmap? =
+    decodeAvatarBitmapForModeration(context, uri, maxDimPx = maxDimPx)
+
+fun renderCroppedAvatarBitmap(
+    source: Bitmap,
+    zoom: Float,
+    normalizedOffsetX: Float,
+    normalizedOffsetY: Float,
+    outputPx: Int = 512,
+): Bitmap {
+    val safeZoom = zoom.coerceIn(1f, 5f)
+    val result = Bitmap.createBitmap(outputPx, outputPx, Bitmap.Config.ARGB_8888)
+    val canvas = android.graphics.Canvas(result)
+    val baseScale = max(outputPx.toFloat() / source.width, outputPx.toFloat() / source.height)
+    val totalScale = baseScale * safeZoom
+    val drawnW = source.width * totalScale
+    val drawnH = source.height * totalScale
+    val maxPanX = max(0f, (drawnW - outputPx) / 2f)
+    val maxPanY = max(0f, (drawnH - outputPx) / 2f)
+    val panX = normalizedOffsetX.coerceIn(-1f, 1f) * maxPanX
+    val panY = normalizedOffsetY.coerceIn(-1f, 1f) * maxPanY
+
+    val matrix = android.graphics.Matrix().apply {
+        postTranslate(-source.width / 2f, -source.height / 2f)
+        postScale(totalScale, totalScale)
+        postTranslate(outputPx / 2f + panX, outputPx / 2f + panY)
+    }
+    val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG or android.graphics.Paint.FILTER_BITMAP_FLAG)
+    canvas.drawBitmap(source, matrix, paint)
+    return result
+}
+
+fun bitmapToModerationBitmap(cropped: Bitmap, maxDimPx: Int = 384): Bitmap {
+    val safeSource = if (cropped.config != Bitmap.Config.ARGB_8888) {
+        cropped.copy(Bitmap.Config.ARGB_8888, false)
+    } else {
+        cropped
+    }
+    if (safeSource.width <= maxDimPx && safeSource.height <= maxDimPx) return safeSource
+    val maxDim = max(safeSource.width, safeSource.height)
+    val scale = maxDimPx.toFloat() / maxDim.toFloat()
+    val w = (safeSource.width * scale).toInt().coerceAtLeast(1)
+    val h = (safeSource.height * scale).toInt().coerceAtLeast(1)
+    return Bitmap.createScaledBitmap(safeSource, w, h, true).also { scaled ->
+        if (safeSource !== cropped && scaled !== safeSource && !safeSource.isRecycled) {
+            safeSource.recycle()
+        }
+    }
+}
+
+fun bitmapToWebpDataUrl(cropped: Bitmap, targetPx: Int = 128, maxBytes: Int = 13_500): String {
+    val software = if (cropped.config != Bitmap.Config.ARGB_8888) {
+        cropped.copy(Bitmap.Config.ARGB_8888, false)
+    } else {
+        cropped
+    }
+    var curPx = targetPx
+    var resultUrl = ""
+    while (curPx >= 72) {
+        val scaled = if (software.width != curPx || software.height != curPx) {
+            Bitmap.createScaledBitmap(software, curPx, curPx, true)
+        } else {
+            software
+        }
+        val format = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            Bitmap.CompressFormat.WEBP_LOSSY
+        } else {
+            @Suppress("DEPRECATION")
+            Bitmap.CompressFormat.WEBP
+        }
+        var quality = 74
+        var bytes: ByteArray
+        do {
+            val out = ByteArrayOutputStream()
+            scaled.compress(format, quality, out)
+            bytes = out.toByteArray()
+            quality -= 10
+        } while (bytes.size > maxBytes && quality >= 20)
+        if (scaled !== software && scaled !== cropped) {
+            scaled.recycle()
+        }
+        resultUrl = "data:image/webp;base64," + Base64.encodeToString(bytes, Base64.NO_WRAP)
+        if (resultUrl.length <= 18_500 || curPx == 72) {
+            break
+        }
+        curPx = (curPx * 3) / 4
+    }
+    if (software !== cropped && !software.isRecycled) {
+        software.recycle()
+    }
+    return resultUrl
+}
+
+
 @Composable
 fun AccountAvatarImage(
     avatarUrlOrData: String?,

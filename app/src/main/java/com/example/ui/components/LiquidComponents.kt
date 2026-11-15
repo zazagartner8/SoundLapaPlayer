@@ -7,7 +7,6 @@ import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -22,6 +21,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
@@ -32,6 +32,7 @@ import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.Flag
 import androidx.compose.material.icons.rounded.GraphicEq
+import androidx.compose.material.icons.rounded.Group
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Pause
@@ -70,16 +71,11 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.luminance
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -99,80 +95,60 @@ fun SystemUtilityTopBar(
     onBugReportClick: () -> Unit,
     onAboutClick: () -> Unit,
     onSettingsClick: () -> Unit,
+    onFriendsClick: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
-    val uriHandler = LocalUriHandler.current
     val strings = LocalAppStrings.current
     val accent = MaterialTheme.colorScheme.primary
-    val onSurfaceVariant = MaterialTheme.colorScheme.onSurfaceVariant
-    val creatorLabel = remember(accent, onSurfaceVariant) {
-        buildAnnotatedString {
-            withStyle(SpanStyle(color = onSurfaceVariant, fontWeight = FontWeight.Medium)) {
-                append("by ")
-            }
-            withStyle(SpanStyle(color = accent, fontWeight = FontWeight.Bold)) {
-                append("@TylerW1nston")
-            }
-        }
-    }
 
-    Row(
+    Box(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween,
+            .clip(RoundedCornerShape(bottomStart = 24.dp, bottomEnd = 24.dp)),
     ) {
-        Surface(
-            onClick = { runCatching { uriHandler.openUri("https://t.me/tylerw1nston") } },
-            shape = CircleShape,
-            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
-            modifier = Modifier.testTag("top_creator_badge"),
-        ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(7.dp),
-            ) {
-                Image(
-                    painter = painterResource(R.drawable.soundlapa_brand_logo),
-                    contentDescription = "SoundLapa Logo",
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier
-                        .size(21.dp)
-                        .clip(CircleShape),
-                )
-                Text(
-                    text = creatorLabel,
-                    style = MaterialTheme.typography.labelLarge,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-        }
+        TopBannerVideo(
+            accent = accent,
+            modifier = Modifier.matchParentSize(),
+        )
 
         Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .windowInsetsPadding(WindowInsets.statusBars)
+                .padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 18.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             CompactTopBarIconButton(
-                icon = Icons.Rounded.Flag,
-                contentDescription = strings.bugReportButtonCd,
-                onClick = onBugReportClick,
-                testTag = "top_bug_report_button",
+                icon = Icons.Rounded.Group,
+                contentDescription = strings.social.friendsTitle,
+                onClick = onFriendsClick,
+                testTag = "top_friends_button",
             )
-            CompactTopBarIconButton(
-                icon = Icons.Rounded.Info,
-                contentDescription = stringResource(R.string.cd_about_app),
-                onClick = onAboutClick,
-                testTag = "top_about_button",
-            )
-            CompactTopBarIconButton(
-                icon = Icons.Rounded.Settings,
-                contentDescription = stringResource(R.string.cd_settings),
-                onClick = onSettingsClick,
-                testTag = "top_settings_button",
-            )
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                CompactTopBarIconButton(
+                    icon = Icons.Rounded.Flag,
+                    contentDescription = strings.bugReportButtonCd,
+                    onClick = onBugReportClick,
+                    testTag = "top_bug_report_button",
+                )
+                CompactTopBarIconButton(
+                    icon = Icons.Rounded.Info,
+                    contentDescription = stringResource(R.string.cd_about_app),
+                    onClick = onAboutClick,
+                    testTag = "top_about_button",
+                )
+                CompactTopBarIconButton(
+                    icon = Icons.Rounded.Settings,
+                    contentDescription = stringResource(R.string.cd_settings),
+                    onClick = onSettingsClick,
+                    testTag = "top_settings_button",
+                )
+            }
         }
     }
 }
@@ -195,7 +171,12 @@ private fun CompactTopBarIconButton(
             modifier = Modifier
                 .size(40.dp)
                 .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.62f)),
+                .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.74f))
+                .border(
+                    width = 1.dp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.14f),
+                    shape = CircleShape,
+                ),
             contentAlignment = Alignment.Center,
         ) {
             Icon(
@@ -732,7 +713,7 @@ fun LiquidBottomNavBar(
             modifier = Modifier
                 .fillMaxWidth()
                 .windowInsetsPadding(WindowInsets.navigationBars)
-                .padding(horizontal = 24.dp, vertical = 6.dp),
+                .padding(horizontal = 12.dp, vertical = 6.dp),
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -743,6 +724,15 @@ fun LiquidBottomNavBar(
                 unselectedIconRes = R.drawable.ic_nav_home_outline,
                 testTag = "nav_tab_home",
                 onClick = { onSelectTab(SoundLapaTab.HOME) },
+                modifier = Modifier.weight(1f),
+            )
+            NavTabItem(
+                selected = selectedTab == SoundLapaTab.WAVE,
+                label = strings.tabWave,
+                selectedIconRes = R.drawable.ic_nav_wave_filled,
+                unselectedIconRes = R.drawable.ic_nav_wave_outline,
+                testTag = "nav_tab_wave",
+                onClick = { onSelectTab(SoundLapaTab.WAVE) },
                 modifier = Modifier.weight(1f),
             )
             NavTabItem(
@@ -859,6 +849,22 @@ fun LiquidNavigationRail(
                 )
             },
             label = { Text(strings.tabHome) },
+            colors = NavigationRailItemDefaults.colors(indicatorColor = accent.copy(alpha = 0.18f)),
+        )
+        NavigationRailItem(
+            selected = selectedTab == SoundLapaTab.WAVE,
+            onClick = { onSelectTab(SoundLapaTab.WAVE) },
+            icon = {
+                Icon(
+                    painter = painterResource(
+                        if (selectedTab == SoundLapaTab.WAVE) R.drawable.ic_nav_wave_filled
+                        else R.drawable.ic_nav_wave_outline,
+                    ),
+                    contentDescription = strings.tabWave,
+                    modifier = Modifier.size(22.dp),
+                )
+            },
+            label = { Text(strings.tabWave) },
             colors = NavigationRailItemDefaults.colors(indicatorColor = accent.copy(alpha = 0.18f)),
         )
         NavigationRailItem(

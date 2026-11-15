@@ -445,7 +445,7 @@ class PlaylistImporter(
 
         if (payload.queries.isNotEmpty()) {
             val limitedQueries = payload.queries.take(MAX_IMPORT_TRACKS)
-            val semaphore = Semaphore(6)
+            val semaphore = Semaphore(5)
             val foundOrdered = coroutineScope {
                 limitedQueries.mapIndexed { idx, item ->
                     async {
@@ -458,21 +458,44 @@ class PlaylistImporter(
                                 append(item.title)
                             }.trim()
                             if (searchQuery.isBlank()) return@withPermit idx to null
-                            val matched = withTimeoutOrNull(7000L) {
-                                FullStreamResolver.searchSoundCloud(searchQuery, limit = 2).firstOrNull()
-                                    ?: FullStreamResolver.searchYouTubeMusic(searchQuery, limit = 2).firstOrNull()
-                                    ?: audiusRepository.searchTracks(searchQuery, limit = 2).getOrNull()?.firstOrNull()
+                            val matched = withTimeoutOrNull(8500L) {
+                                val scDef = async {
+                                    runCatching { FullStreamResolver.searchSoundCloud(searchQuery, limit = 6) }
+                                        .getOrDefault(emptyList())
+                                }
+                                val ytDef = async {
+                                    runCatching { FullStreamResolver.searchYouTubeMusic(searchQuery, limit = 6) }
+                                        .getOrDefault(emptyList())
+                                }
+                                val combinedCandidates = scDef.await() + ytDef.await()
+                                FullStreamResolver.pickBestTrackMatch(
+                                    candidates = combinedCandidates,
+                                    targetArtist = item.artist,
+                                    targetTitle = item.title,
+                                    expectedDurationMs = item.durationMs,
+                                ) ?: audiusRepository.searchTracks(searchQuery, limit = 5).getOrNull()?.let { list ->
+                                    FullStreamResolver.pickBestTrackMatch(
+                                        candidates = list,
+                                        targetArtist = item.artist,
+                                        targetTitle = item.title,
+                                        expectedDurationMs = item.durationMs,
+                                    )
+                                }
                             }
                             val finalMatched = if (matched != null) {
+                                val resolvedTitle = item.title.takeIf { it.isNotBlank() } ?: matched.title
+                                val resolvedArtist = item.artist.takeIf { it.isNotBlank() } ?: matched.artist
                                 val preferredCover = item.coverArtUrl?.takeIf { it.isNotBlank() }
                                     ?: matched.coverArtPath?.takeIf { FullStreamResolver.isSpotifyOrSoundCloudArtwork(it) }
                                     ?: audiusRepository.resolvePreferredCoverArt(
-                                        artist = item.artist.ifBlank { matched.artist },
-                                        title = item.title.ifBlank { matched.title },
+                                        artist = resolvedArtist,
+                                        title = resolvedTitle,
                                     )
                                     ?: matched.coverArtPath
                                 matched.copy(
-                                    albumTitle = matched.albumTitle ?: item.albumTitle,
+                                    title = resolvedTitle,
+                                    artist = resolvedArtist,
+                                    albumTitle = item.albumTitle?.takeIf { it.isNotBlank() } ?: matched.albumTitle,
                                     coverArtPath = preferredCover,
                                 )
                             } else {

@@ -41,6 +41,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.NotificationsActive
+import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.Shuffle
@@ -57,6 +60,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -82,15 +86,17 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import coil.compose.SubcomposeAsyncImage
 import coil.request.ImageRequest
+import com.example.data.local.ArtistSubscriptionEntity
+import com.example.data.local.PlaylistEntity
 import com.example.data.local.PlaylistWithTracks
 import com.example.data.local.TrackEntity
-import com.example.data.remote.isTrackPlayableOffline
 import com.example.ui.MainUiState
 import com.example.ui.components.CreatePlaylistDialog
 import com.example.ui.components.TrackRowItem
 import com.example.ui.components.rememberSoundLapaHaptics
 import com.example.ui.i18n.AppStrings
 import com.example.ui.i18n.LocalAppStrings
+import com.example.ui.shaders.LocalBatterySaverEnabled
 import com.example.ui.shaders.TrackCoverArtwork
 import com.example.ui.shaders.rememberIsAppForeground
 import com.example.ui.theme.LiquidRose
@@ -104,6 +110,7 @@ fun LibraryScreen(
     requestedSection: Int? = null,
     onConsumeRequestedSection: () -> Unit = {},
     onCreatePlaylist: (name: String, description: String) -> Unit,
+    onEditPlaylist: (PlaylistEntity) -> Unit = {},
     onDeletePlaylist: (playlistId: String) -> Unit,
     onPlayPlaylist: (PlaylistWithTracks) -> Unit,
     onPlayPlaylistShuffle: (PlaylistWithTracks) -> Unit = { onPlayPlaylist(it) },
@@ -112,6 +119,9 @@ fun LibraryScreen(
     onToggleLike: (TrackEntity) -> Unit,
     onOpenTrackOptions: (TrackEntity) -> Unit,
     onOpenUploadSheet: () -> Unit,
+    onOpenSubscribedArtist: (ArtistSubscriptionEntity) -> Unit = {},
+    onToggleUnsubscribeArtist: (ArtistSubscriptionEntity) -> Unit = {},
+    onPlaylistDetailOpenChanged: (Boolean) -> Unit = {},
     bottomContentPadding: Dp,
     modifier: Modifier = Modifier,
 ) {
@@ -137,8 +147,12 @@ fun LibraryScreen(
     }
     val likedTracks = remember(state.tracks) { state.tracks.filter { it.isLiked } }
     val userTracks = remember(state.tracks) { state.tracks.filter { it.isUserUpload } }
-    val cachedOfflineTracks = remember(state.tracks) {
-        state.tracks.filter { !it.isUserUpload && isTrackPlayableOffline(it) }
+
+    LaunchedEffect(openedPlaylist != null) {
+        onPlaylistDetailOpenChanged(openedPlaylist != null)
+    }
+    DisposableEffect(Unit) {
+        onDispose { onPlaylistDetailOpenChanged(false) }
     }
 
     if (openedPlaylist != null) {
@@ -237,6 +251,7 @@ fun LibraryScreen(
                     onBack = { openedPlaylistId = null },
                     onPlayAll = { onPlayPlaylist(targetPlaylist) },
                     onShufflePlay = { onPlayPlaylistShuffle(targetPlaylist) },
+                    onEditPlaylist = { onEditPlaylist(targetPlaylist.playlist) },
                     onDeletePlaylist = {
                         pendingDeletePlaylist = targetPlaylist
                     },
@@ -412,7 +427,6 @@ fun LibraryScreen(
                             ) { pl ->
                                 PlaylistRowCard(
                                     playlistWithTracks = pl,
-                                    appLanguage = state.settings.appLanguage,
                                     onOpen = {
                                         haptics.tick()
                                         openedPlaylistId = pl.playlist.id
@@ -482,54 +496,58 @@ fun LibraryScreen(
                                 )
                             }
                         }
-                        if (userTracks.isEmpty() && cachedOfflineTracks.isEmpty()) {
+                        if (userTracks.isEmpty()) {
                             item(key = "empty_user_tracks") {
                                 EmptyLibraryNotice(strings.emptyMyTracks)
                             }
                         } else {
-                            val offlineQueue = userTracks + cachedOfflineTracks
-                            if (userTracks.isNotEmpty()) {
-                                items(
-                                    items = userTracks,
-                                    key = { "my_${it.id}" },
-                                    contentType = { "track_row" },
-                                ) { track ->
-                                    val isCurrent = state.playback.currentTrackId == track.id
-                                    TrackRowItem(
-                                        track = track,
-                                        isCurrentTrack = isCurrent,
-                                        isPlaying = isCurrent && state.playback.isPlaying,
-                                        onPlayClick = { onPlayTrack(track, offlineQueue) },
-                                        onLikeClick = { onToggleLike(track) },
-                                        onMoreClick = { onOpenTrackOptions(track) },
-                                    )
-                                }
+                            items(
+                                items = userTracks,
+                                key = { "my_${it.id}" },
+                                contentType = { "track_row" },
+                            ) { track ->
+                                val isCurrent = state.playback.currentTrackId == track.id
+                                TrackRowItem(
+                                    track = track,
+                                    isCurrentTrack = isCurrent,
+                                    isPlaying = isCurrent && state.playback.isPlaying,
+                                    onPlayClick = { onPlayTrack(track, userTracks) },
+                                    onLikeClick = { onToggleLike(track) },
+                                    onMoreClick = { onOpenTrackOptions(track) },
+                                )
                             }
-                            if (cachedOfflineTracks.isNotEmpty()) {
-                                item(key = "cached_offline_header") {
-                                    Text(
-                                        text = strings.offlineCachedTracksHeader,
-                                        style = MaterialTheme.typography.titleMedium,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.onBackground,
-                                        modifier = Modifier.padding(top = 8.dp),
-                                    )
-                                }
-                                items(
-                                    items = cachedOfflineTracks,
-                                    key = { "cached_${it.id}" },
-                                    contentType = { "track_row" },
-                                ) { track ->
-                                    val isCurrent = state.playback.currentTrackId == track.id
-                                    TrackRowItem(
-                                        track = track,
-                                        isCurrentTrack = isCurrent,
-                                        isPlaying = isCurrent && state.playback.isPlaying,
-                                        onPlayClick = { onPlayTrack(track, offlineQueue) },
-                                        onLikeClick = { onToggleLike(track) },
-                                        onMoreClick = { onOpenTrackOptions(track) },
-                                    )
-                                }
+                        }
+
+                        if (state.subscribedArtists.isNotEmpty()) {
+                            item(key = "subscribed_artists_header") {
+                                Text(
+                                    text = "${strings.social.subscribedArtistsHeader} (${state.subscribedArtists.size})",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onBackground,
+                                    modifier = Modifier.padding(top = 10.dp),
+                                )
+                            }
+                            items(
+                                items = state.subscribedArtists,
+                                key = { "sub_${it.artistKey}" },
+                                contentType = { "subscribed_artist" },
+                            ) { sub ->
+                                SubscribedArtistRowCard(
+                                    subscription = sub,
+                                    onOpen = {
+                                        haptics.tick()
+                                        onOpenSubscribedArtist(sub)
+                                    },
+                                    onToggleUnsubscribe = {
+                                        haptics.tick()
+                                        onToggleUnsubscribeArtist(sub)
+                                    },
+                                )
+                            }
+                        } else {
+                            item(key = "empty_subscribed_artists") {
+                                EmptyLibraryNotice(strings.social.emptySubscribedArtists)
                             }
                         }
                     }
@@ -560,7 +578,6 @@ private fun formatPlaylistDurationValue(
 @Composable
 private fun PlaylistRowCard(
     playlistWithTracks: PlaylistWithTracks,
-    appLanguage: String,
     onOpen: () -> Unit,
     onPlay: () -> Unit,
 ) {
@@ -575,14 +592,8 @@ private fun PlaylistRowCard(
         playlistWithTracks.playlist.coverArtPath?.takeIf { it.isNotBlank() }
             ?: backdropTrack?.coverArtPath
     }
-    val durationLabel = remember(playlistWithTracks.tracks, appLanguage, strings) {
-        strings.playlistDurationLabel(
-            formatPlaylistDurationValue(
-                tracks = playlistWithTracks.tracks,
-                appLanguage = appLanguage,
-                strings = strings,
-            ),
-        )
+    val tracksCountLabel = remember(playlistWithTracks.tracks.size, strings) {
+        strings.settingsV33.libraryPlaylistTracksCount(playlistWithTracks.tracks.size)
     }
 
     val shape = RoundedCornerShape(20.dp)
@@ -602,23 +613,22 @@ private fun PlaylistRowCard(
         contentColor = MaterialTheme.colorScheme.onSurface,
     ) {
         Box(modifier = Modifier.fillMaxWidth()) {
-            // Translucent floating cover backdrop inside the playlist card
+            // Subtle translucent cover backdrop without expensive blur
             Box(
                 modifier = Modifier
                     .matchParentSize()
                     .graphicsLayer {
-                        scaleX = 1.38f
-                        scaleY = 1.38f
-                        alpha = 0.34f
-                    }
-                    .blur(18.dp, edgeTreatment = BlurredEdgeTreatment.Rectangle),
+                        scaleX = 1.24f
+                        scaleY = 1.24f
+                        alpha = 0.24f
+                    },
             ) {
                 if (!backdropCoverUrl.isNullOrBlank()) {
                     SubcomposeAsyncImage(
                         model = ImageRequest.Builder(context)
                             .data(backdropCoverUrl)
                             .allowHardware(true)
-                            .size(220)
+                            .size(180)
                             .crossfade(true)
                             .build(),
                         contentDescription = null,
@@ -629,7 +639,7 @@ private fun PlaylistRowCard(
                     TrackCoverArtwork(
                         track = backdropTrack,
                         cornerRadius = 0.dp,
-                        targetSizePx = 180,
+                        targetSizePx = 140,
                         modifier = Modifier.fillMaxSize(),
                     )
                 } else {
@@ -648,7 +658,7 @@ private fun PlaylistRowCard(
             Box(
                 modifier = Modifier
                     .matchParentSize()
-                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.72f)),
+                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.78f)),
             )
 
             Row(
@@ -677,7 +687,7 @@ private fun PlaylistRowCard(
                         overflow = TextOverflow.Ellipsis,
                     )
                     Text(
-                        text = durationLabel,
+                        text = tracksCountLabel,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
@@ -829,6 +839,7 @@ private fun PlaylistDetailView(
     onBack: () -> Unit,
     onPlayAll: () -> Unit,
     onShufflePlay: () -> Unit,
+    onEditPlaylist: () -> Unit,
     onDeletePlaylist: () -> Unit,
     onPlayTrack: (TrackEntity) -> Unit,
     onRemoveTrack: (TrackEntity) -> Unit,
@@ -939,22 +950,45 @@ private fun PlaylistDetailView(
                             )
                         }
 
-                        IconButton(
-                            onClick = {
-                                haptics.tick()
-                                onDeletePlaylist()
-                            },
-                            modifier = Modifier
-                                .minimumInteractiveComponentSize()
-                                .clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.62f))
-                                .testTag("delete_playlist_button"),
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            Icon(
-                                imageVector = Icons.Rounded.DeleteOutline,
-                                contentDescription = strings.deleteTrackMenu,
-                                tint = LiquidRose,
-                            )
+                            IconButton(
+                                onClick = {
+                                    haptics.tick()
+                                    onEditPlaylist()
+                                },
+                                modifier = Modifier
+                                    .minimumInteractiveComponentSize()
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.62f))
+                                    .testTag("edit_playlist_button"),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Edit,
+                                    contentDescription = strings.playerV33.editPlaylistMenu,
+                                    tint = MaterialTheme.colorScheme.onBackground,
+                                )
+                            }
+
+                            IconButton(
+                                onClick = {
+                                    haptics.tick()
+                                    onDeletePlaylist()
+                                },
+                                modifier = Modifier
+                                    .minimumInteractiveComponentSize()
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.62f))
+                                    .testTag("delete_playlist_button"),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.DeleteOutline,
+                                    contentDescription = strings.deleteTrackMenu,
+                                    tint = LiquidRose,
+                                )
+                            }
                         }
                     }
 
@@ -1103,7 +1137,8 @@ private fun PlaylistFloatingCoverBackdrop(
 ) {
     val context = LocalContext.current
     val isForeground = rememberIsAppForeground()
-    val phase = if (isForeground && collapseFraction < 0.99f) {
+    val batterySaver = LocalBatterySaverEnabled.current
+    val phase = if (!batterySaver && isForeground && collapseFraction < 0.99f) {
         val infiniteTransition = rememberInfiniteTransition(label = "playlistBannerFloat")
         val animatedPhase by infiniteTransition.animateFloat(
             initialValue = 0f,
@@ -1153,10 +1188,13 @@ private fun PlaylistFloatingCoverBackdrop(
                     rotationZ = sin(phase) * 3.5f
                     alpha = 0.46f
                 }
-                .blur(
-                    radius = 26.dp,
-                    edgeTreatment = BlurredEdgeTreatment.Rectangle,
-                ),
+                .let { base ->
+                    if (batterySaver) base
+                    else base.blur(
+                        radius = 26.dp,
+                        edgeTreatment = BlurredEdgeTreatment.Rectangle,
+                    )
+                },
         ) {
             if (!coverArtUrl.isNullOrBlank()) {
                 SubcomposeAsyncImage(
@@ -1195,6 +1233,109 @@ private fun PlaylistFloatingCoverBackdrop(
                 .fillMaxSize()
                 .background(fadeScrim),
         )
+    }
+}
+
+@Composable
+private fun SubscribedArtistRowCard(
+    subscription: ArtistSubscriptionEntity,
+    onOpen: () -> Unit,
+    onToggleUnsubscribe: () -> Unit,
+) {
+    val strings = LocalAppStrings.current
+    val context = LocalContext.current
+    val accent = MaterialTheme.colorScheme.primary
+
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(20.dp))
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f), RoundedCornerShape(20.dp))
+            .clickable(onClick = onOpen)
+            .testTag("subscribed_artist_card_${subscription.artistKey}"),
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.50f),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(50.dp)
+                    .clip(CircleShape)
+                    .background(accent.copy(alpha = 0.18f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (!subscription.avatarUrl.isNullOrBlank()) {
+                    SubcomposeAsyncImage(
+                        model = ImageRequest.Builder(context)
+                            .data(subscription.avatarUrl)
+                            .size(160)
+                            .crossfade(true)
+                            .build(),
+                        contentDescription = subscription.artistName,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize(),
+                        error = {
+                            Icon(
+                                imageVector = Icons.Rounded.Person,
+                                contentDescription = null,
+                                tint = accent,
+                                modifier = Modifier.size(24.dp),
+                            )
+                        },
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.Rounded.Person,
+                        contentDescription = null,
+                        tint = accent,
+                        modifier = Modifier.size(24.dp),
+                    )
+                }
+            }
+
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Text(
+                    text = subscription.artistName,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = strings.social.subscribedArtist,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = accent,
+                )
+            }
+
+            OutlinedButton(
+                onClick = onToggleUnsubscribe,
+                shape = CircleShape,
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.NotificationsActive,
+                    contentDescription = null,
+                    modifier = Modifier.size(15.dp),
+                )
+                Spacer(Modifier.width(5.dp))
+                Text(
+                    text = strings.social.subscribedArtist,
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1,
+                )
+            }
+        }
     }
 }
 

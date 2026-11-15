@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -11,8 +12,10 @@ import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
@@ -22,9 +25,11 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -74,12 +79,14 @@ import coil.imageLoader
 import coil.request.ImageRequest
 import com.example.R
 import com.example.SoundLapaApplication
+import com.example.data.local.PlaylistEntity
 import com.example.data.local.TrackEntity
 import com.example.data.remote.CloudLibraryRepository
 import com.example.ui.auth.GoogleAuthManager
 import com.example.ui.auth.authStateFlow
 import com.example.ui.components.AddToPlaylistBottomSheet
 import com.example.ui.components.BugReportDialog
+import com.example.ui.components.EditPlaylistDialog
 import com.example.ui.components.EditTrackDialog
 import com.example.ui.components.FloatingMiniPlayer
 import com.example.ui.components.HapticConfig
@@ -98,6 +105,7 @@ import com.example.ui.i18n.LocalAppStrings
 import com.example.ui.i18n.stringsForLanguage
 import com.example.ui.screens.AboutScreen
 import com.example.ui.screens.ArtistProfileScreen
+import com.example.ui.screens.ChangelogHistoryScreen
 import com.example.ui.screens.DeveloperScreen
 import com.example.ui.screens.GoogleAuthScreen
 import com.example.ui.screens.LibraryScreen
@@ -105,6 +113,9 @@ import com.example.ui.screens.NowPlayingSheet
 import com.example.ui.screens.SearchScreen
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.screens.StreamScreen
+import com.example.ui.screens.UserProfileAndFriendsScreen
+import com.example.ui.screens.WaveScreen
+import com.example.ui.shaders.LocalBatterySaverEnabled
 import com.example.ui.shaders.LocalDataSaverEnabled
 import com.example.ui.theme.LiquidRose
 import com.example.ui.theme.SoundLapaTheme
@@ -119,9 +130,13 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.Serializable
+import java.util.concurrent.atomic.AtomicInteger
 
 @Serializable
 object HomeRoute
+
+@Serializable
+object WaveRoute
 
 @Serializable
 object SearchRoute
@@ -132,8 +147,9 @@ object LibraryRoute
 private val SilkyEaseOut = CubicBezierEasing(0.22f, 1f, 0.36f, 1f)
 
 private fun tabIndexForRoute(route: String?): Int = when {
-    route?.contains("SearchRoute") == true -> 1
-    route?.contains("LibraryRoute") == true -> 2
+    route?.contains("WaveRoute") == true -> 1
+    route?.contains("SearchRoute") == true -> 2
+    route?.contains("LibraryRoute") == true -> 3
     else -> 0
 }
 
@@ -162,6 +178,7 @@ fun SoundLapaApp() {
             CompositionLocalProvider(
                 LocalAppStrings provides preAuthStrings,
                 LocalDataSaverEnabled provides preAuthSettings.dataSaverEnabled,
+                LocalBatterySaverEnabled provides preAuthSettings.batterySaverEnabled,
                 LocalHapticsConfig provides HapticConfig(
                     enabled = preAuthSettings.hapticsEnabled,
                     intensityPercent = preAuthSettings.hapticIntensity,
@@ -221,6 +238,10 @@ private fun SoundLapaAuthenticatedShell(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val homeState by viewModel.homeUiState.collectAsStateWithLifecycle()
+    val waveState by viewModel.waveUiState.collectAsStateWithLifecycle()
+    val socialState by viewModel.socialState.collectAsStateWithLifecycle()
+    val lyricsState by viewModel.lyricsState.collectAsStateWithLifecycle()
+    val musicVideoState by viewModel.musicVideoState.collectAsStateWithLifecycle()
     val isPlayerExpanded by viewModel.isPlayerExpanded.collectAsStateWithLifecycle()
     val artistProfile by viewModel.artistProfileState.collectAsStateWithLifecycle()
     val queueTracks by viewModel.playbackController.queueTracks.collectAsStateWithLifecycle()
@@ -234,11 +255,16 @@ private fun SoundLapaAuthenticatedShell(
     var showSettingsSheet by remember { mutableStateOf(false) }
     var showDeveloperScreen by remember { mutableStateOf(false) }
     var showAboutScreen by remember { mutableStateOf(false) }
+    var showSocialScreen by remember { mutableStateOf(false) }
+    var showChangelogHistory by remember { mutableStateOf(false) }
+    var isPlaylistDetailOpen by remember { mutableStateOf(false) }
+    var pendingScrollToLyrics by remember { mutableStateOf(false) }
     var showBugReportDialog by remember { mutableStateOf(false) }
     var showUploadSheet by remember { mutableStateOf(false) }
     var showQueueSheet by remember { mutableStateOf(false) }
     var optionsMenuTrack by remember { mutableStateOf<TrackEntity?>(null) }
     var editingTrack by remember { mutableStateOf<TrackEntity?>(null) }
+    var editingPlaylist by remember { mutableStateOf<PlaylistEntity?>(null) }
     var playlistPickerTrack by remember { mutableStateOf<TrackEntity?>(null) }
     var pendingDeleteTrack by remember { mutableStateOf<TrackEntity?>(null) }
     var isPlayerDragging by remember { mutableStateOf(false) }
@@ -247,25 +273,50 @@ private fun SoundLapaAuthenticatedShell(
     var loadedCoversCount by remember { mutableIntStateOf(0) }
     var totalCoversCount by remember { mutableIntStateOf(0) }
     val latestUiState by rememberUpdatedState(state)
+    val latestHomeState by rememberUpdatedState(homeState)
+
+    LaunchedEffect(state.currentTrack?.id) {
+        viewModel.clearMusicVideoForTrackChange(state.currentTrack?.id)
+    }
+
+    LaunchedEffect(pendingScrollToLyrics) {
+        if (pendingScrollToLyrics) {
+            delay(500L)
+            pendingScrollToLyrics = false
+        }
+    }
 
     LaunchedEffect(isStartupReady) {
         if (isStartupReady) return@LaunchedEffect
         val startMs = System.currentTimeMillis()
-        withTimeoutOrNull(900L) {
-            viewModel.uiState.first { it.tracks.isNotEmpty() }
+        withTimeoutOrNull(6000L) {
+            viewModel.homeUiState.first {
+                it.trendingCarousel.isNotEmpty() || it.quickPickRows.isNotEmpty() || it.filteredTracks.isNotEmpty()
+            }
         }
         val snapshot = latestUiState
+        val homeSnapshot = latestHomeState
         val coverUrls = buildList {
+            homeSnapshot.trendingCarousel.forEach { t ->
+                t.coverArtPath?.takeIf { it.isNotBlank() }?.let { add(it) }
+            }
+            homeSnapshot.quickPickRows.flatten().forEach { t ->
+                t.coverArtPath?.takeIf { it.isNotBlank() }?.let { add(it) }
+            }
+            homeSnapshot.recommendedTracks.forEach { t ->
+                t.coverArtPath?.takeIf { it.isNotBlank() }?.let { add(it) }
+            }
             snapshot.tracks.forEach { t ->
                 t.coverArtPath?.takeIf { it.isNotBlank() }?.let { add(it) }
             }
             snapshot.cloudSync.photoUrl?.takeIf { it.isNotBlank() }?.let { add(it) }
-        }.distinct().take(8)
+        }.distinct().take(16)
 
         totalCoversCount = coverUrls.size
         if (snapshot.isOnline && coverUrls.isNotEmpty()) {
             val imageLoader = context.imageLoader
-            withTimeoutOrNull(2200L) {
+            val counter = AtomicInteger(0)
+            withTimeoutOrNull(6500L) {
                 coroutineScope {
                     coverUrls.map { url ->
                         async {
@@ -273,11 +324,11 @@ private fun SoundLapaAuthenticatedShell(
                                 imageLoader.execute(
                                     ImageRequest.Builder(context)
                                         .data(url)
-                                        .size(320)
+                                        .size(360)
                                         .build(),
                                 )
                             }
-                            loadedCoversCount += 1
+                            loadedCoversCount = counter.incrementAndGet()
                         }
                     }.awaitAll()
                 }
@@ -286,8 +337,8 @@ private fun SoundLapaAuthenticatedShell(
             loadedCoversCount = coverUrls.size
         }
         val elapsed = System.currentTimeMillis() - startMs
-        if (elapsed < 550L) {
-            delay(550L - elapsed)
+        if (elapsed < 650L) {
+            delay(650L - elapsed)
         }
         isStartupReady = true
     }
@@ -325,6 +376,7 @@ private fun SoundLapaAuthenticatedShell(
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
     val selectedTab = when {
+        currentRoute?.contains("WaveRoute") == true -> SoundLapaTab.WAVE
         currentRoute?.contains("SearchRoute") == true -> SoundLapaTab.SEARCH
         currentRoute?.contains("LibraryRoute") == true -> SoundLapaTab.LIBRARY
         else -> SoundLapaTab.HOME
@@ -341,6 +393,7 @@ private fun SoundLapaAuthenticatedShell(
         CompositionLocalProvider(
             LocalAppStrings provides appStrings,
             LocalDataSaverEnabled provides state.settings.dataSaverEnabled,
+            LocalBatterySaverEnabled provides state.settings.batterySaverEnabled,
             LocalHapticsConfig provides HapticConfig(
                 enabled = state.settings.hapticsEnabled,
                 intensityPercent = state.settings.hapticIntensity,
@@ -348,13 +401,42 @@ private fun SoundLapaAuthenticatedShell(
         ) {
             val haptics = rememberSoundLapaHaptics()
 
+            fun shareTrackExternal(track: TrackEntity) {
+                val shareText = buildString {
+                    append("${track.artist} — ${track.title}")
+                    val link = track.sourceUri?.takeIf { it.startsWith("http") }
+                    if (link != null) {
+                        append("\n")
+                        append(link)
+                    }
+                }
+                runCatching {
+                    val intent = Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_SUBJECT, "${track.artist} — ${track.title}")
+                        putExtra(Intent.EXTRA_TEXT, shareText)
+                    }
+                    context.startActivity(
+                        Intent.createChooser(intent, appStrings.shareTrackChooserTitle),
+                    )
+                }
+            }
+
             fun navigateToTab(tab: SoundLapaTab) {
                 haptics.tick()
                 if (artistProfile.isVisible) {
                     viewModel.closeArtistProfile()
                 }
+                if (showSocialScreen) {
+                    viewModel.clearInspectedPublicProfile()
+                    showSocialScreen = false
+                }
+                if (showChangelogHistory) {
+                    showChangelogHistory = false
+                }
                 val route: Any = when (tab) {
                     SoundLapaTab.HOME -> HomeRoute
+                    SoundLapaTab.WAVE -> WaveRoute
                     SoundLapaTab.SEARCH -> SearchRoute
                     SoundLapaTab.LIBRARY -> LibraryRoute
                 }
@@ -370,6 +452,8 @@ private fun SoundLapaAuthenticatedShell(
                 showDeveloperScreen = false
                 showSettingsSheet = false
                 showAboutScreen = false
+                showSocialScreen = false
+                showChangelogHistory = false
                 viewModel.requestOpenDownloadedTracksSection()
                 navigateToTab(SoundLapaTab.LIBRARY)
             }
@@ -382,12 +466,18 @@ private fun SoundLapaAuthenticatedShell(
             developerTransition.targetState = showDeveloperScreen
             val aboutTransition = remember { MutableTransitionState(false) }
             aboutTransition.targetState = showAboutScreen
+            val socialTransition = remember { MutableTransitionState(false) }
+            socialTransition.targetState = showSocialScreen
+            val changelogTransition = remember { MutableTransitionState(false) }
+            changelogTransition.targetState = showChangelogHistory
 
             val isMainScreenCovered =
                 (!isPlayerDragging && playerTransition.currentState && playerTransition.targetState && playerTransition.isIdle) ||
                     (settingsTransition.currentState && settingsTransition.targetState && settingsTransition.isIdle) ||
                     (developerTransition.currentState && developerTransition.targetState && developerTransition.isIdle) ||
-                    (aboutTransition.currentState && aboutTransition.targetState && aboutTransition.isIdle)
+                    (aboutTransition.currentState && aboutTransition.targetState && aboutTransition.isIdle) ||
+                    (socialTransition.currentState && socialTransition.targetState && socialTransition.isIdle) ||
+                    (changelogTransition.currentState && changelogTransition.targetState && changelogTransition.isIdle)
 
             // Simple clean dark background for main screens; Liquid Glass shader is reserved for Now Playing
             Box(
@@ -420,26 +510,47 @@ private fun SoundLapaAuthenticatedShell(
 
                     Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
                         Column(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .windowInsetsPadding(WindowInsets.statusBars),
+                            modifier = Modifier.fillMaxSize(),
                         ) {
-                            SystemUtilityTopBar(
-                                onBugReportClick = {
-                                    haptics.tick()
-                                    viewModel.clearBugReportStatus()
-                                    showBugReportDialog = true
-                                },
-                                onAboutClick = {
-                                    haptics.tick()
-                                    showAboutScreen = true
-                                },
-                                onSettingsClick = {
-                                    haptics.tick()
-                                    viewModel.refreshCacheSize()
-                                    showSettingsSheet = true
-                                },
-                            )
+                            val showTopBar = !artistProfile.isVisible &&
+                                !isPlaylistDetailOpen &&
+                                !showSocialScreen &&
+                                !showChangelogHistory
+                            AnimatedVisibility(
+                                visible = showTopBar,
+                                enter = fadeIn(animationSpec = tween(200)) + expandVertically(animationSpec = tween(220)),
+                                exit = fadeOut(animationSpec = tween(180)) + shrinkVertically(animationSpec = tween(220)),
+                            ) {
+                                SystemUtilityTopBar(
+                                    onBugReportClick = {
+                                        haptics.tick()
+                                        viewModel.clearBugReportStatus()
+                                        showBugReportDialog = true
+                                    },
+                                    onAboutClick = {
+                                        haptics.tick()
+                                        showAboutScreen = true
+                                    },
+                                    onSettingsClick = {
+                                        haptics.tick()
+                                        viewModel.refreshCacheSize()
+                                        showSettingsSheet = true
+                                    },
+                                    onFriendsClick = {
+                                        haptics.tick()
+                                        viewModel.clearInspectedPublicProfile()
+                                        viewModel.loadFriends()
+                                        showSocialScreen = true
+                                    },
+                                )
+                            }
+                            if (!showTopBar) {
+                                Spacer(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .windowInsetsPadding(WindowInsets.statusBars),
+                                )
+                            }
 
                             AnimatedVisibility(visible = !state.isOnline) {
                                 OfflineNetworkErrorBanner(
@@ -511,6 +622,34 @@ private fun SoundLapaAuthenticatedShell(
                                     )
                                 }
 
+                                composable<WaveRoute> {
+                                    WaveScreen(
+                                        state = waveState,
+                                        onTogglePlayPause = {
+                                            ensureNotificationPermissionOnce()
+                                            viewModel.toggleWavePlayPause()
+                                        },
+                                        onSkipNext = {
+                                            ensureNotificationPermissionOnce()
+                                            viewModel.skipWaveNext()
+                                        },
+                                        onSelectMood = { mood ->
+                                            viewModel.selectWaveFilter(mood = mood)
+                                        },
+                                        onSelectGenre = { genre ->
+                                            viewModel.selectWaveFilter(genre = genre)
+                                        },
+                                        onSelectLanguage = { lang ->
+                                            viewModel.selectWaveFilter(language = lang)
+                                        },
+                                        onSelectVocals = { vocals ->
+                                            viewModel.selectWaveFilter(vocals = vocals)
+                                        },
+                                        onResetToTaste = viewModel::resetWaveToPersonalTaste,
+                                        bottomContentPadding = bottomOverlaySpace,
+                                    )
+                                }
+
                                 composable<SearchRoute> {
                                     SearchScreen(
                                         state = state,
@@ -547,6 +686,9 @@ private fun SoundLapaAuthenticatedShell(
                                         onCreatePlaylist = { name, desc ->
                                             viewModel.createPlaylist(name, desc)
                                         },
+                                        onEditPlaylist = { playlist ->
+                                            editingPlaylist = playlist
+                                        },
                                         onDeletePlaylist = viewModel::deletePlaylist,
                                         onPlayPlaylist = { pl ->
                                             ensureNotificationPermissionOnce()
@@ -564,6 +706,22 @@ private fun SoundLapaAuthenticatedShell(
                                         onToggleLike = viewModel::toggleLike,
                                         onOpenTrackOptions = { optionsMenuTrack = it },
                                         onOpenUploadSheet = { showUploadSheet = true },
+                                        onOpenSubscribedArtist = { sub ->
+                                            viewModel.openArtistProfile(
+                                                artistName = sub.artistName,
+                                                spotifyId = sub.spotifyArtistId,
+                                                soundCloudUrl = sub.soundCloudUrl,
+                                            )
+                                        },
+                                        onToggleUnsubscribeArtist = { sub ->
+                                            viewModel.toggleArtistSubscription(
+                                                artistName = sub.artistName,
+                                                avatarUrl = sub.avatarUrl,
+                                                soundCloudUrl = sub.soundCloudUrl,
+                                                spotifyArtistId = sub.spotifyArtistId,
+                                            )
+                                        },
+                                        onPlaylistDetailOpenChanged = { isPlaylistDetailOpen = it },
                                         bottomContentPadding = bottomOverlaySpace,
                                     )
                                 }
@@ -581,11 +739,23 @@ private fun SoundLapaAuthenticatedShell(
                                 animationSpec = tween(260, easing = SilkyEaseOut),
                             ) + fadeOut(animationSpec = tween(180, easing = FastOutSlowInEasing)),
                         ) {
+                            val isSubscribed = remember(state.subscribedArtists, artistProfile.artistName) {
+                                state.subscribedArtists.any {
+                                    it.artistName.equals(artistProfile.artistName, ignoreCase = true)
+                                }
+                            }
                             ArtistProfileScreen(
                                 state = artistProfile,
                                 currentTrackId = state.playback.currentTrackId,
                                 isPlaying = state.playback.isPlaying,
                                 bottomContentPadding = bottomOverlaySpace,
+                                isSubscribed = isSubscribed,
+                                onToggleSubscribe = {
+                                    viewModel.toggleArtistSubscription(
+                                        artistName = artistProfile.artistName,
+                                        avatarUrl = artistProfile.avatarUrl,
+                                    )
+                                },
                                 onClose = viewModel::closeArtistProfile,
                                 onPlayAll = {
                                     ensureNotificationPermissionOnce()
@@ -692,8 +862,15 @@ private fun SoundLapaAuthenticatedShell(
                         isInPlaylist = isInPlaylist,
                         nextTrack = nextTrack,
                         queueCount = activeQueue.size,
+                        lyricsState = lyricsState,
+                        musicVideoState = musicVideoState,
+                        initialScrollToLyrics = pendingScrollToLyrics,
+                        onLoadLyrics = { viewModel.loadLyricsForTrack(track) },
+                        onSeekToMs = { ms -> viewModel.playbackController.seekTo(ms) },
+                        onToggleMusicVideoMode = { enable -> viewModel.toggleMusicVideoMode(track, enable) },
                         onCollapse = {
                             isPlayerDragging = false
+                            pendingScrollToLyrics = false
                             viewModel.setPlayerExpanded(false)
                         },
                         onDragStateChange = { isPlayerDragging = it },
@@ -718,26 +895,7 @@ private fun SoundLapaAuthenticatedShell(
                         onOpenTrackOptions = { optionsMenuTrack = track },
                         onAddToPlaylist = { playlistPickerTrack = track },
                         onOpenQueue = { showQueueSheet = true },
-                        onShareTrack = {
-                            val shareText = buildString {
-                                append("${track.artist} — ${track.title}")
-                                val link = track.sourceUri?.takeIf { it.startsWith("http") }
-                                if (link != null) {
-                                    append("\n")
-                                    append(link)
-                                }
-                            }
-                            runCatching {
-                                val intent = Intent(Intent.ACTION_SEND).apply {
-                                    type = "text/plain"
-                                    putExtra(Intent.EXTRA_SUBJECT, "${track.artist} — ${track.title}")
-                                    putExtra(Intent.EXTRA_TEXT, shareText)
-                                }
-                                context.startActivity(
-                                    Intent.createChooser(intent, appStrings.shareTrackChooserTitle),
-                                )
-                            }
-                        },
+                        onShareTrack = { shareTrackExternal(track) },
                         onOpenArtistProfile = {
                             viewModel.setPlayerExpanded(false)
                             viewModel.openArtistProfile(track.artist, track)
@@ -777,8 +935,9 @@ private fun SoundLapaAuthenticatedShell(
                     onToggleHaptics = viewModel::setHapticsEnabled,
                     onChangeHapticIntensity = viewModel::setHapticIntensity,
                     onToggleAutoUpload = viewModel::setAutoUploadEnabled,
-                    onToggleAutoCache = viewModel::setAutoCacheOnPlay,
                     onToggleDataSaver = viewModel::setDataSaverEnabled,
+                    onToggleBatterySaver = viewModel::setBatterySaverEnabled,
+                    onChangeAudioFocusMode = viewModel::setAudioFocusMode,
                     onClearCache = viewModel::clearAppCache,
                     onImportFromInput = viewModel::importExternalPlaylistFromInput,
                     onImportFromFile = viewModel::importExternalPlaylistFromFile,
@@ -788,6 +947,7 @@ private fun SoundLapaAuthenticatedShell(
                     onSignOutGoogle = {
                         showDeveloperScreen = false
                         showSettingsSheet = false
+                        showSocialScreen = false
                         settingsScope.launch {
                             appPrefs.setGuestMode(false)
                             appPrefs.setAvatarModerationBlocked(false)
@@ -807,6 +967,7 @@ private fun SoundLapaAuthenticatedShell(
                             onAuthSuccess = {
                                 showDeveloperScreen = false
                                 showSettingsSheet = false
+                                showSocialScreen = false
                             },
                             onAuthError = { _ -> },
                             scope = settingsScope,
@@ -814,6 +975,11 @@ private fun SoundLapaAuthenticatedShell(
                     },
                     onUpdateProfile = viewModel::updateAccountProfile,
                     onClearProfileStatus = viewModel::clearProfileStatusMessage,
+                    onOpenFriendsScreen = {
+                        viewModel.clearInspectedPublicProfile()
+                        viewModel.loadFriends()
+                        showSocialScreen = true
+                    },
                     onOpenDeveloperScreen = {
                         if (state.developerMode.isUnlocked) {
                             viewModel.refreshDeveloperDashboard()
@@ -860,6 +1026,69 @@ private fun SoundLapaAuthenticatedShell(
             ) {
                 AboutScreen(
                     onClose = { showAboutScreen = false },
+                    onOpenChangelogHistory = { showChangelogHistory = true },
+                    onOpenCreatorProfile = {
+                        viewModel.openCreatorProfile()
+                        showSocialScreen = true
+                    },
+                )
+            }
+
+            // Social / Friends & Public Profiles Screen
+            AnimatedVisibility(
+                visibleState = socialTransition,
+                enter = slideInHorizontally(
+                    initialOffsetX = { it },
+                    animationSpec = tween(310, easing = SilkyEaseOut),
+                ) + fadeIn(animationSpec = tween(200, easing = FastOutSlowInEasing)),
+                exit = slideOutHorizontally(
+                    targetOffsetX = { it },
+                    animationSpec = tween(260, easing = SilkyEaseOut),
+                ) + fadeOut(animationSpec = tween(180, easing = FastOutSlowInEasing)),
+            ) {
+                UserProfileAndFriendsScreen(
+                    isSignedIn = !state.cloudSync.isGuest,
+                    currentUid = state.cloudSync.userId,
+                    currentProfile = socialState.currentPublicProfile,
+                    inspectedProfile = socialState.inspectedProfile,
+                    friends = socialState.friends,
+                    searchResults = socialState.searchResults,
+                    isSearching = socialState.isSearching,
+                    isClaimingUsername = socialState.isClaimingUsername,
+                    statusMessage = socialState.statusMessage,
+                    accent = MaterialTheme.colorScheme.primary,
+                    onBack = {
+                        viewModel.clearInspectedPublicProfile()
+                        showSocialScreen = false
+                    },
+                    onClearInspectedProfile = viewModel::clearInspectedPublicProfile,
+                    onClaimUsername = viewModel::claimUsername,
+                    onSearchUsers = viewModel::searchSocialUsers,
+                    onInspectProfile = viewModel::inspectPublicProfile,
+                    onAddFriend = viewModel::addFriend,
+                    onRemoveFriend = viewModel::removeFriend,
+                    onSignInRequest = {
+                        showSocialScreen = false
+                        showSettingsSheet = true
+                    },
+                )
+            }
+
+            // Full Version History / Changelog Screen
+            AnimatedVisibility(
+                visibleState = changelogTransition,
+                enter = slideInHorizontally(
+                    initialOffsetX = { it },
+                    animationSpec = tween(310, easing = SilkyEaseOut),
+                ) + fadeIn(animationSpec = tween(200, easing = FastOutSlowInEasing)),
+                exit = slideOutHorizontally(
+                    targetOffsetX = { it },
+                    animationSpec = tween(260, easing = SilkyEaseOut),
+                ) + fadeOut(animationSpec = tween(180, easing = FastOutSlowInEasing)),
+            ) {
+                ChangelogHistoryScreen(
+                    accent = MaterialTheme.colorScheme.primary,
+                    onBack = { showChangelogHistory = false },
                 )
             }
 
@@ -900,9 +1129,7 @@ private fun SoundLapaAuthenticatedShell(
             TrackOptionsBottomSheet(
                 track = track,
                 onDismiss = { optionsMenuTrack = null },
-                onEditClick = if (track.isUserUpload) {
-                    { editingTrack = track }
-                } else null,
+                onEditClick = { editingTrack = track },
                 onAddToPlaylistClick = { playlistPickerTrack = track },
                 onDeleteClick = if (track.isUserUpload) {
                     { pendingDeleteTrack = track }
@@ -911,6 +1138,46 @@ private fun SoundLapaAuthenticatedShell(
                     viewModel.setPlayerExpanded(false)
                     viewModel.openArtistProfile(track.artist, track)
                 },
+                onPlayNextClick = {
+                    viewModel.playNextInQueue(track)
+                    Toast.makeText(
+                        context,
+                        appStrings.playerV33.queuedNextNotice(track.title),
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                },
+                onAddToQueueClick = {
+                    viewModel.addToQueue(track)
+                    Toast.makeText(
+                        context,
+                        appStrings.playerV33.addedToQueueNotice(track.title),
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                },
+                onOpenAlbumClick = if (!track.albumTitle.isNullOrBlank()) {
+                    {
+                        viewModel.setPlayerExpanded(false)
+                        viewModel.openArtistProfile(track.artist, track)
+                    }
+                } else null,
+                onLyricsClick = {
+                    ensureNotificationPermissionOnce()
+                    if (state.currentTrack?.id != track.id) {
+                        viewModel.playOrToggleTrack(track)
+                    }
+                    viewModel.loadLyricsForTrack(track)
+                    pendingScrollToLyrics = true
+                    viewModel.setPlayerExpanded(true)
+                },
+                onWatchClipClick = {
+                    ensureNotificationPermissionOnce()
+                    if (state.currentTrack?.id != track.id) {
+                        viewModel.playOrToggleTrack(track)
+                    }
+                    viewModel.toggleMusicVideoMode(track, true)
+                    viewModel.setPlayerExpanded(true)
+                },
+                onShareClick = { shareTrackExternal(track) },
             )
         }
 
@@ -942,9 +1209,48 @@ private fun SoundLapaAuthenticatedShell(
             EditTrackDialog(
                 track = track,
                 onDismiss = { editingTrack = null },
-                onSave = { newTitle, newArtist, newCoverUri, clearCover ->
-                    viewModel.updateTrackDetails(track, newTitle, newArtist, newCoverUri, clearCover)
+                onSave = { newTitle, newArtist, newAlbumTitle, newGenre, newCoverUri, clearCover ->
+                    viewModel.updateTrackDetails(
+                        track = track,
+                        newTitle = newTitle,
+                        newArtist = newArtist,
+                        newAlbumTitle = newAlbumTitle,
+                        newGenre = newGenre,
+                        newCoverUri = newCoverUri,
+                        clearCover = clearCover,
+                    )
+                    Toast.makeText(
+                        context,
+                        appStrings.playerV33.trackUpdatedNotice,
+                        Toast.LENGTH_SHORT,
+                    ).show()
                     editingTrack = null
+                },
+            )
+        }
+
+        editingPlaylist?.let { playlist ->
+            val fallbackTracks = remember(state.playlists, playlist.id) {
+                state.playlists.find { it.playlist.id == playlist.id }?.tracks.orEmpty()
+            }
+            EditPlaylistDialog(
+                playlist = playlist,
+                fallbackTracks = fallbackTracks,
+                onDismiss = { editingPlaylist = null },
+                onSave = { newName, newDescription, newCoverUri, clearCover ->
+                    viewModel.updatePlaylistDetails(
+                        playlist = playlist,
+                        newName = newName,
+                        newDescription = newDescription,
+                        newCoverUri = newCoverUri,
+                        clearCover = clearCover,
+                    )
+                    Toast.makeText(
+                        context,
+                        appStrings.playerV33.playlistUpdatedNotice,
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                    editingPlaylist = null
                 },
             )
         }

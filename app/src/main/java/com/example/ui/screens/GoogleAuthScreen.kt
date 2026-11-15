@@ -27,7 +27,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.AccountCircle
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.CloudDone
 import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.PersonOutline
@@ -67,10 +67,11 @@ import androidx.compose.ui.unit.sp
 import androidx.credentials.CredentialManager
 import com.example.R
 import com.example.ui.auth.GoogleAuthManager
+import com.example.ui.components.CountryFlagIcon
+import com.example.ui.components.GoogleGLogoIcon
 import com.example.ui.components.rememberSoundLapaHaptics
 import com.example.ui.i18n.AppLanguage
 import com.example.ui.i18n.LocalAppStrings
-import com.example.ui.theme.LiquidMint
 import com.example.ui.theme.LiquidRose
 import com.example.ui.theme.SoundLapaAmber
 
@@ -128,7 +129,7 @@ fun GoogleAuthScreen(
                 ) {
                     AppLanguage.entries.forEach { lang ->
                         val selected = currentLanguageCode == lang.code
-                        Box(
+                        Row(
                             modifier = Modifier
                                 .clip(CircleShape)
                                 .background(
@@ -144,12 +145,20 @@ fun GoogleAuthScreen(
                                     haptics.tick()
                                     onSelectLanguage(lang.code)
                                 }
-                                .padding(horizontal = 9.dp, vertical = 6.dp)
+                                .padding(horizontal = 11.dp, vertical = 7.dp)
                                 .testTag("auth_lang_${lang.code}"),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
+                            CountryFlagIcon(
+                                languageCode = lang.code,
+                                width = 20.dp,
+                                height = 14.dp,
+                            )
                             Text(
-                                text = "${lang.badge} ${lang.code.uppercase()}",
-                                style = MaterialTheme.typography.labelSmall,
+                                text = lang.code.uppercase(),
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
                                 color = if (selected) accent else MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
@@ -198,7 +207,7 @@ fun GoogleAuthScreen(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(18.dp),
                 ) {
-                    // SoundLapa Emblem using logo_v2.jpg
+                    // SoundLap Emblem using logo_v2.jpg
                     Box(
                         modifier = Modifier
                             .size(98.dp)
@@ -208,7 +217,7 @@ fun GoogleAuthScreen(
                     ) {
                         Image(
                             painter = painterResource(R.drawable.logo_v2),
-                            contentDescription = "SoundLapa Logo",
+                            contentDescription = "SoundLap Logo",
                             contentScale = ContentScale.Crop,
                             modifier = Modifier
                                 .fillMaxSize()
@@ -265,7 +274,41 @@ fun GoogleAuthScreen(
                             AuthBenefitRow(
                                 icon = Icons.Rounded.CloudDone,
                                 text = "Firebase Cloud Sync",
-                                accent = LiquidMint,
+                                accent = accent,
+                            )
+                        }
+                    }
+
+                    // Ad-Free Pure Audio Promise Card
+                    Surface(
+                        shape = RoundedCornerShape(20.dp),
+                        color = accent.copy(alpha = 0.12f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .border(
+                                1.dp,
+                                accent.copy(alpha = 0.34f),
+                                RoundedCornerShape(20.dp),
+                            )
+                            .testTag("auth_ad_free_promise_card"),
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.AutoAwesome,
+                                contentDescription = null,
+                                tint = accent,
+                                modifier = Modifier.size(20.dp),
+                            )
+                            Text(
+                                text = strings.settingsV33.authAdFreePromise,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                lineHeight = 18.sp,
                             )
                         }
                     }
@@ -328,11 +371,15 @@ fun GoogleAuthScreen(
                                 style = MaterialTheme.typography.titleMedium,
                             )
                         } else {
-                            Icon(
-                                imageVector = Icons.Rounded.AccountCircle,
-                                contentDescription = null,
-                                modifier = Modifier.size(22.dp),
-                            )
+                            Box(
+                                modifier = Modifier
+                                    .size(26.dp)
+                                    .clip(CircleShape)
+                                    .background(Color.White),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                GoogleGLogoIcon(size = 18.dp)
+                            }
                             Spacer(modifier = Modifier.width(10.dp))
                             Text(
                                 text = strings.authGoogleButton,

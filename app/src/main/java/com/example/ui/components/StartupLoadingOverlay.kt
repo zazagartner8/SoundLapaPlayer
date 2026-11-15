@@ -166,7 +166,7 @@ fun StartupLoadingOverlay(
                 Spacer(modifier = Modifier.height(26.dp))
 
                 Text(
-                    text = "SoundLapa",
+                    text = "SoundLap",
                     style = MaterialTheme.typography.headlineMedium,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onBackground,

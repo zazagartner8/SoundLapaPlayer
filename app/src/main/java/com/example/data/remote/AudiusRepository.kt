@@ -122,7 +122,7 @@ class AudiusRepository(
     private val context: Context,
     private val dao: SoundLapaDao,
 ) {
-    private val appName = "SoundLapa"
+    private val appName = "SoundLap"
     private val baseUrls = listOf(
         "https://api.audius.co/v1",
         "https://discoveryprovider.audius.co/v1",
@@ -769,7 +769,24 @@ class AudiusRepository(
                     scProfile?.name,
                 ).map { it.trim() }.filter { it.isNotBlank() }.distinct()
 
-                val strictScSearchTracks = scSearchTracks.filter { isTrackByArtist(it, targetNames) }
+                val displayArtistName = spInfo?.name?.takeIf { it.isNotBlank() }
+                    ?: scProfile?.name?.takeIf { it.isNotBlank() }
+                    ?: cleanName
+
+                val strictScSearchTracks = scSearchTracks
+                    .filter { isTrackByArtist(it, targetNames) }
+                    .filterNot { FullStreamResolver.isUnwantedVariantTitle(it.title, displayArtistName) }
+                val cleanScChannelTracks = scChannelTracks
+                    .filterNot { FullStreamResolver.isUnwantedVariantTitle(it.title, displayArtistName) }
+                    .map { t ->
+                        if (t.artist.equals("SoundCloud", ignoreCase = true) ||
+                            t.artist.equals("YouTube Music", ignoreCase = true)
+                        ) {
+                            t.copy(artist = displayArtistName)
+                        } else {
+                            t
+                        }
+                    }
                 val persistedById = localTracks.associateBy { it.id }
 
                 val mergedTracks = LinkedHashMap<String, TrackEntity>()
@@ -787,9 +804,10 @@ class AudiusRepository(
                     appendTrackUnique(seedTrack)
                 }
                 spTracks.forEach(::appendTrackUnique)
-                scChannelTracks.forEach(::appendTrackUnique)
+                cleanScChannelTracks.forEach(::appendTrackUnique)
 
                 val secondaryRemote = (audiusTracks + strictScSearchTracks + ytFallbackTracks)
+                    .filterNot { FullStreamResolver.isUnwantedVariantTitle(it.title, displayArtistName) }
                     .map { persistedById[it.id] ?: it }
                     .sortedByDescending { track -> artistMatchScore(track, targetNames) }
                 secondaryRemote.forEach(::appendTrackUnique)
@@ -807,10 +825,6 @@ class AudiusRepository(
                     }
                     .distinctBy { normalizeStrictToken(it.title) }
                     .take(20)
-
-                val displayArtistName = spInfo?.name?.takeIf { it.isNotBlank() }
-                    ?: scProfile?.name?.takeIf { it.isNotBlank() }
-                    ?: cleanName
 
                 val resolvedAvatar = spInfo?.avatarUrl
                     ?: scProfile?.avatarUrl
@@ -1315,7 +1329,7 @@ class AudiusRepository(
                 val request = Request.Builder()
                     .url("$base$pathAndQuery")
                     .header("Accept", "application/json")
-                    .header("User-Agent", "SoundLapa/1.0")
+                    .header("User-Agent", "SoundLap/3.3")
                     .build()
                 httpClient.newCall(request).execute().use { response ->
                     if (response.isSuccessful) {

@@ -50,12 +50,25 @@ class CloudLibraryRepository(
 
     private fun userDocRef(uid: String) = db.collection("users").document(uid)
 
+    private fun friendsCollection(uid: String) = userDocRef(uid).collection("friends")
+
+    private fun artistSubscriptionsCollection(uid: String) = userDocRef(uid).collection("artist_subscriptions")
+
+    private fun publicProfilesCollection() = db.collection("public_profiles")
+
+    private fun usernamesCollection() = db.collection("usernames")
+
     private fun tracksCollection(uid: String) = userDocRef(uid).collection("tracks")
 
     private fun playlistsCollection(uid: String) = userDocRef(uid).collection("playlists")
 
     private fun playlistItemsCollection(uid: String, playlistId: String) =
         playlistsCollection(uid).document(safeFirestoreDocId(playlistId)).collection("items")
+
+    fun isCurrentUserVerifiedDeveloper(): Boolean {
+        val user = auth.currentUser ?: return false
+        return user.email.equals(DEVELOPER_EMAIL, ignoreCase = true) && user.isEmailVerified
+    }
 
     suspend fun upsertUserProfile(
         displayName: String?,
@@ -71,7 +84,7 @@ class CloudLibraryRepository(
         val docRef = userDocRef(uid)
         val fallbackName = displayName?.trim()?.ifBlank { null }
             ?: email?.substringBefore('@')?.takeIf { it.isNotBlank() }
-            ?: "SoundLapa User"
+            ?: "SoundLap User"
         try {
             val snapshot = docRef.get().await()
             if (snapshot.exists()) {
@@ -80,8 +93,10 @@ class CloudLibraryRepository(
                     DocumentSnapshot.ServerTimestampBehavior.ESTIMATE,
                 )
                 val isBlocked = existing?.avatarBlocked == true || localSettings?.avatarModerationBlocked == true
-                // Preserve user's custom displayName, bio, and custom photoUrl unless avatar is blocked!
+                // Preserve user's custom displayName, username, bio, and custom photoUrl unless avatar is blocked!
                 val resolvedName = existing?.displayName?.takeIf { it.isNotBlank() } ?: fallbackName
+                val resolvedUsername = existing?.username?.takeIf { isValidUsernameHandle(it) }
+                    ?: localSettings?.customUsername?.let(::normalizeUsernameHandle)?.takeIf(::isValidUsernameHandle)
                 val resolvedEmail = existing?.email?.takeIf { it.isNotBlank() } ?: email
                 val resolvedPhoto = if (isBlocked) null else (existing?.photoUrl?.takeIf { it.isNotBlank() } ?: photoUrl)
                 val resolvedBio = existing?.bio
@@ -98,6 +113,7 @@ class CloudLibraryRepository(
                     docId = snapshot.id,
                     userId = uid,
                     displayName = resolvedName,
+                    username = resolvedUsername,
                     email = resolvedEmail,
                     photoUrl = resolvedPhoto,
                     bio = resolvedBio,
@@ -105,6 +121,7 @@ class CloudLibraryRepository(
                     settings = mergedSettingsMap,
                 )
                 val needsCloudWrite = existing?.displayName.isNullOrBlank() ||
+                    (existing?.username.isNullOrBlank() && !resolvedUsername.isNullOrBlank()) ||
                     (existing?.email.isNullOrBlank() && !resolvedEmail.isNullOrBlank()) ||
                     (!isBlocked && existing?.photoUrl.isNullOrBlank() && !resolvedPhoto.isNullOrBlank()) ||
                     (isBlocked && (existing?.avatarBlocked != true || !existing?.photoUrl.isNullOrBlank())) ||
@@ -118,14 +135,27 @@ class CloudLibraryRepository(
                     }
                     docRef.update(updateMap).await()
                 }
+                runCatching {
+                    syncPublicProfileInternal(
+                        uid = uid,
+                        displayName = resolvedName,
+                        username = resolvedUsername,
+                        photoUrl = resolvedPhoto,
+                        bio = resolvedBio,
+                    )
+                }
                 Result.success(merged)
             } else {
                 val isBlocked = localSettings?.avatarModerationBlocked == true
                 val settingsMap = localSettings?.let { CloudUserSettings.fromSoundLapaSettings(it).toMap() }
+                val initialUsername = localSettings?.customUsername
+                    ?.let(::normalizeUsernameHandle)
+                    ?.takeIf(::isValidUsernameHandle)
                 val profile = CloudUserProfile(
                     docId = uid,
                     userId = uid,
                     displayName = fallbackName,
+                    username = initialUsername,
                     email = email,
                     photoUrl = if (isBlocked) null else photoUrl,
                     bio = null,
@@ -133,6 +163,15 @@ class CloudLibraryRepository(
                     settings = settingsMap,
                 )
                 docRef.set(profile.toCreateMap(uid)).await()
+                runCatching {
+                    syncPublicProfileInternal(
+                        uid = uid,
+                        displayName = fallbackName,
+                        username = initialUsername,
+                        photoUrl = if (isBlocked) null else photoUrl,
+                        bio = null,
+                    )
+                }
                 Result.success(profile)
             }
         } catch (e: CancellationException) {
@@ -167,7 +206,7 @@ class CloudLibraryRepository(
             } else {
                 val fallbackName = displayName?.trim()?.takeIf { it.isNotEmpty() }
                     ?: auth.currentUser?.displayName?.takeIf { it.isNotBlank() }
-                    ?: "SoundLapa User"
+                    ?: "SoundLap User"
                 val profile = CloudUserProfile(
                     docId = uid,
                     userId = uid,
@@ -177,6 +216,17 @@ class CloudLibraryRepository(
                     avatarBlocked = true,
                 )
                 docRef.set(profile.toCreateMap(uid)).await()
+            }
+            runCatching {
+                val pubSnap = publicProfilesCollection().document(uid).get().await()
+                if (pubSnap.exists()) {
+                    publicProfilesCollection().document(uid).update(
+                        mapOf(
+                            "photoUrl" to com.google.firebase.firestore.FieldValue.delete(),
+                            "updatedAt" to com.google.firebase.firestore.FieldValue.serverTimestamp(),
+                        ),
+                    ).await()
+                }
             }
             Result.success(Unit)
         } catch (e: CancellationException) {
@@ -193,6 +243,7 @@ class CloudLibraryRepository(
         photoUrl: String?,
         email: String? = null,
         clearAvatar: Boolean = false,
+        username: String? = null,
     ): Result<CloudUserProfile> = withContext(Dispatchers.IO) {
         val uid = try {
             requireUserId()
@@ -200,16 +251,22 @@ class CloudLibraryRepository(
             return@withContext Result.failure(e)
         }
         val docRef = userDocRef(uid)
-        val cleanName = displayName.trim().ifBlank { "SoundLapa User" }.take(64)
+        val cleanName = displayName.trim().ifBlank { "SoundLap User" }.take(64)
         val cleanBio = bio?.trim()?.take(180)
         val cleanPhoto = photoUrl?.trim()?.takeIf { it.isNotEmpty() }?.take(24_000)
+        val cleanHandle = username?.let(::normalizeUsernameHandle)?.takeIf(::isValidUsernameHandle)
         try {
             val snap = docRef.get().await()
             if (snap.exists()) {
                 val isBlocked = snap.getBoolean("avatarBlocked") == true
+                val existingUsername = snap.getString("username")?.takeIf(::isValidUsernameHandle)
+                val resolvedHandle = cleanHandle ?: existingUsername
                 val updateMap = buildMap<String, Any> {
                     put("displayName", cleanName)
                     put("bio", cleanBio ?: "")
+                    if (cleanHandle != null) {
+                        put("username", cleanHandle)
+                    }
                     when {
                         isBlocked -> {
                             put("avatarBlocked", true)
@@ -226,11 +283,21 @@ class CloudLibraryRepository(
                 }
                 docRef.update(updateMap).await()
                 val effectivePhoto = if (isBlocked || clearAvatar) null else (cleanPhoto ?: snap.getString("photoUrl"))
+                runCatching {
+                    syncPublicProfileInternal(
+                        uid = uid,
+                        displayName = cleanName,
+                        username = resolvedHandle,
+                        photoUrl = effectivePhoto,
+                        bio = cleanBio,
+                    )
+                }
                 Result.success(
                     CloudUserProfile(
                         docId = uid,
                         userId = uid,
                         displayName = cleanName,
+                        username = resolvedHandle,
                         email = email,
                         photoUrl = effectivePhoto,
                         bio = cleanBio,
@@ -242,11 +309,21 @@ class CloudLibraryRepository(
                 val profile = CloudUserProfile(
                     userId = uid,
                     displayName = cleanName,
+                    username = cleanHandle,
                     email = email,
                     photoUrl = effectivePhoto,
                     bio = cleanBio,
                 )
                 docRef.set(profile.toCreateMap(uid)).await()
+                runCatching {
+                    syncPublicProfileInternal(
+                        uid = uid,
+                        displayName = cleanName,
+                        username = cleanHandle,
+                        photoUrl = effectivePhoto,
+                        bio = cleanBio,
+                    )
+                }
                 Result.success(profile.copy(docId = uid))
             }
         } catch (e: CancellationException) {
@@ -279,7 +356,8 @@ class CloudLibraryRepository(
                     val isBlocked = settings.avatarModerationBlocked
                     val profile = CloudUserProfile(
                         userId = uid,
-                        displayName = settings.customDisplayName ?: auth.currentUser?.displayName ?: "SoundLapa User",
+                        displayName = settings.customDisplayName ?: auth.currentUser?.displayName ?: "SoundLap User",
+                        username = settings.customUsername?.let(::normalizeUsernameHandle)?.takeIf(::isValidUsernameHandle),
                         email = auth.currentUser?.email,
                         photoUrl = if (isBlocked) null else (settings.customAvatarData ?: auth.currentUser?.photoUrl?.toString()),
                         bio = settings.customBio,
@@ -487,15 +565,6 @@ class CloudLibraryRepository(
                 val currentUserTracks = tracksSnap.size()
                 val currentUserPlaylists = playlistsSnap.size()
 
-                // Keep /cloud_metrics/{uid} synchronized with the exact live cloud bytes
-                runCatching {
-                    syncCloudMetricsSnapshot(
-                        storageBytes = currentUserBytes,
-                        tracksCount = currentUserTracks,
-                        playlistsCount = currentUserPlaylists,
-                    )
-                }
-
                 val metricsSnapshot = db.collection("cloud_metrics")
                     .whereEqualTo("devAccessKey", accessPassword)
                     .get()
@@ -504,7 +573,20 @@ class CloudLibraryRepository(
                     CloudUserMetrics::class.java,
                     DocumentSnapshot.ServerTimestampBehavior.ESTIMATE,
                 )
+                val selfMetric = userMetrics.find { it.userId == uid }
                 val otherMetrics = userMetrics.filter { it.userId != uid }
+                val effectiveUserBytes = maxOf(
+                    currentUserBytes,
+                    selfMetric?.storageBytes?.coerceAtLeast(0L) ?: 0L,
+                )
+                val effectiveUserTracks = maxOf(
+                    currentUserTracks,
+                    selfMetric?.tracksCount?.coerceAtLeast(0) ?: 0,
+                )
+                val effectiveUserPlaylists = maxOf(
+                    currentUserPlaylists,
+                    selfMetric?.playlistsCount?.coerceAtLeast(0) ?: 0,
+                )
                 val metricsDocsBytes = metricsSnapshot.documents.sumOf { doc ->
                     estimateFirestoreDocBytes(doc.reference.path, doc.data)
                 }
@@ -518,9 +600,9 @@ class CloudLibraryRepository(
                 }
 
                 val otherUsersBytes = otherMetrics.sumOf { it.storageBytes.coerceAtLeast(0L) }
-                val totalUsed = (currentUserBytes + otherUsersBytes + metricsDocsBytes + reportsBytes).coerceAtLeast(0L)
+                val totalUsed = (effectiveUserBytes + otherUsersBytes + metricsDocsBytes + reportsBytes).coerceAtLeast(0L)
 
-                val hasCurrentUserData = userSnap.exists() || currentUserTracks > 0 || currentUserPlaylists > 0
+                val hasCurrentUserData = userSnap.exists() || effectiveUserTracks > 0 || effectiveUserPlaylists > 0
                 val distinctUsers = buildSet {
                     otherMetrics.forEach { if (it.userId.isNotBlank()) add(it.userId) }
                     if (hasCurrentUserData) add(uid)
@@ -531,8 +613,8 @@ class CloudLibraryRepository(
                         usedBytes = totalUsed,
                         quotaBytes = DEFAULT_CLOUD_QUOTA_BYTES,
                         activeUsersCount = distinctUsers.size,
-                        totalTracks = currentUserTracks + otherMetrics.sumOf { it.tracksCount.coerceAtLeast(0) },
-                        totalPlaylists = currentUserPlaylists + otherMetrics.sumOf { it.playlistsCount.coerceAtLeast(0) },
+                        totalTracks = effectiveUserTracks + otherMetrics.sumOf { it.tracksCount.coerceAtLeast(0) },
+                        totalPlaylists = effectiveUserPlaylists + otherMetrics.sumOf { it.playlistsCount.coerceAtLeast(0) },
                         totalBugReports = reportsSnapshot.size(),
                         isCloudLive = true,
                     ),
@@ -1060,6 +1142,464 @@ class CloudLibraryRepository(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    private suspend fun syncPublicProfileInternal(
+        uid: String,
+        displayName: String,
+        username: String?,
+        photoUrl: String?,
+        bio: String?,
+    ): CloudPublicProfile {
+        val isDev = isCurrentUserVerifiedDeveloper()
+        val cleanHandle = username?.let(::normalizeUsernameHandle)?.takeIf(::isValidUsernameHandle)
+        val model = CloudPublicProfile(
+            docId = uid,
+            userId = uid,
+            displayName = displayName.trim().ifBlank { "SoundLap User" }.take(64),
+            username = cleanHandle,
+            photoUrl = photoUrl?.trim()?.takeIf { it.isNotEmpty() }?.take(24_000),
+            bio = bio?.trim()?.takeIf { it.isNotEmpty() }?.take(180),
+            isDeveloper = isDev,
+            isPublic = true,
+        )
+        publicProfilesCollection().document(uid)
+            .set(model.toWriteMap(uid, allowDeveloperFlag = isDev))
+            .await()
+        if (cleanHandle != null) {
+            val handleDocRef = usernamesCollection().document(cleanHandle)
+            val existingHandle = runCatching { handleDocRef.get().await() }.getOrNull()
+            if (existingHandle == null || !existingHandle.exists() || existingHandle.getString("userId") == uid) {
+                val handleModel = CloudUsernameHandle(
+                    docId = cleanHandle,
+                    username = cleanHandle,
+                    userId = uid,
+                    displayName = model.displayName,
+                    photoUrl = model.photoUrl,
+                    isDeveloper = isDev,
+                    isPublic = true,
+                )
+                handleDocRef.set(handleModel.toWriteMap(uid, allowDeveloperFlag = isDev)).await()
+            }
+        }
+        return model
+    }
+
+    suspend fun syncPublicProfile(
+        displayName: String,
+        username: String? = null,
+        photoUrl: String? = null,
+        bio: String? = null,
+    ): Result<CloudPublicProfile> = withContext(Dispatchers.IO) {
+        val uid = try {
+            requireUserId()
+        } catch (e: Exception) {
+            return@withContext Result.failure(e)
+        }
+        val docRef = publicProfilesCollection().document(uid)
+        try {
+            val model = syncPublicProfileInternal(uid, displayName, username, photoUrl, bio)
+            Result.success(model)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, docRef.path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun claimOrUpdateUsername(
+        rawHandle: String,
+        displayName: String,
+        photoUrl: String? = null,
+        bio: String? = null,
+    ): Result<String> = withContext(Dispatchers.IO) {
+        val uid = try {
+            requireUserId()
+        } catch (e: Exception) {
+            return@withContext Result.failure(e)
+        }
+        val handle = normalizeUsernameHandle(rawHandle)
+        if (!isValidUsernameHandle(handle)) {
+            return@withContext Result.failure(
+                IllegalArgumentException("Handle must be 3-24 characters: a-z, 0-9, _"),
+            )
+        }
+        val handleDocRef = usernamesCollection().document(handle)
+        try {
+            val existingHandleSnap = handleDocRef.get().await()
+            val ownerUid = existingHandleSnap.getString("userId")
+            if (existingHandleSnap.exists() && ownerUid != null && ownerUid != uid) {
+                return@withContext Result.failure(IllegalStateException("Username @$handle is already taken"))
+            }
+
+            val userSnap = userDocRef(uid).get().await()
+            val previousHandle = userSnap.getString("username")?.let(::normalizeUsernameHandle)
+                ?.takeIf(::isValidUsernameHandle)
+
+            val isDev = isCurrentUserVerifiedDeveloper()
+            val cleanName = displayName.trim().ifBlank { "SoundLap User" }.take(64)
+            val cleanPhoto = photoUrl?.trim()?.takeIf { it.isNotEmpty() }?.take(24_000)
+
+            val handleModel = CloudUsernameHandle(
+                docId = handle,
+                username = handle,
+                userId = uid,
+                displayName = cleanName,
+                photoUrl = cleanPhoto,
+                isDeveloper = isDev,
+                isPublic = true,
+            )
+            handleDocRef.set(handleModel.toWriteMap(uid, allowDeveloperFlag = isDev)).await()
+
+            if (userSnap.exists()) {
+                userDocRef(uid).update(
+                    mapOf(
+                        "username" to handle,
+                        "updatedAt" to com.google.firebase.firestore.FieldValue.serverTimestamp(),
+                    ),
+                ).await()
+            } else {
+                val createdProfile = CloudUserProfile(
+                    userId = uid,
+                    displayName = cleanName,
+                    username = handle,
+                    email = auth.currentUser?.email,
+                    photoUrl = cleanPhoto,
+                    bio = bio,
+                )
+                userDocRef(uid).set(createdProfile.toCreateMap(uid)).await()
+            }
+
+            syncPublicProfileInternal(
+                uid = uid,
+                displayName = cleanName,
+                username = handle,
+                photoUrl = cleanPhoto,
+                bio = bio ?: userSnap.getString("bio"),
+            )
+
+            if (previousHandle != null && previousHandle != handle) {
+                runCatching {
+                    val prevSnap = usernamesCollection().document(previousHandle).get().await()
+                    if (prevSnap.exists() && prevSnap.getString("userId") == uid) {
+                        usernamesCollection().document(previousHandle).delete().await()
+                    }
+                }
+            }
+            Result.success(handle)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, handleDocRef.path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun getPublicProfile(userId: String): Result<CloudPublicProfile?> = withContext(Dispatchers.IO) {
+        try {
+            requireUserId()
+        } catch (e: Exception) {
+            return@withContext Result.failure(e)
+        }
+        val docId = safeFirestoreDocId(userId)
+        val docRef = publicProfilesCollection().document(docId)
+        try {
+            val snap = docRef.get().await()
+            val profile = snap.toObject(
+                CloudPublicProfile::class.java,
+                DocumentSnapshot.ServerTimestampBehavior.ESTIMATE,
+            )
+            Result.success(profile)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.GET, docRef.path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun getDeveloperPublicProfile(): Result<CloudPublicProfile?> = withContext(Dispatchers.IO) {
+        try {
+            requireUserId()
+        } catch (e: Exception) {
+            return@withContext Result.failure(e)
+        }
+        try {
+            val devSnap = publicProfilesCollection()
+                .whereEqualTo("isDeveloper", true)
+                .limit(1)
+                .get()
+                .await()
+            val found = devSnap.toObjects(
+                CloudPublicProfile::class.java,
+                DocumentSnapshot.ServerTimestampBehavior.ESTIMATE,
+            ).firstOrNull()
+            if (found != null) {
+                return@withContext Result.success(found)
+            }
+            val handleSnap = usernamesCollection().document(DEVELOPER_DEFAULT_HANDLE).get().await()
+            if (handleSnap.exists()) {
+                val handleObj = handleSnap.toObject(
+                    CloudUsernameHandle::class.java,
+                    DocumentSnapshot.ServerTimestampBehavior.ESTIMATE,
+                )
+                if (handleObj != null && handleObj.userId.isNotBlank()) {
+                    val pub = getPublicProfile(handleObj.userId).getOrNull()
+                    if (pub != null) return@withContext Result.success(pub)
+                    return@withContext Result.success(
+                        CloudPublicProfile(
+                            docId = handleObj.userId,
+                            userId = handleObj.userId,
+                            displayName = handleObj.displayName.ifBlank { "TylerW1nston" },
+                            username = handleObj.username,
+                            photoUrl = handleObj.photoUrl,
+                            isDeveloper = handleObj.isDeveloper,
+                            isPublic = true,
+                        ),
+                    )
+                }
+            }
+            Result.success(null)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.LIST, "public_profiles")
+            Result.failure(e)
+        }
+    }
+
+    suspend fun searchUsersByUsername(query: String): Result<List<CloudPublicProfile>> =
+        withContext(Dispatchers.IO) {
+            val myUid = try {
+                requireUserId()
+            } catch (e: Exception) {
+                return@withContext Result.failure(e)
+            }
+            val cleanQuery = normalizeUsernameHandle(query)
+            try {
+                val resultsByUid = LinkedHashMap<String, CloudPublicProfile>()
+                if (isValidUsernameHandle(cleanQuery)) {
+                    val exactSnap = runCatching { usernamesCollection().document(cleanQuery).get().await() }.getOrNull()
+                    if (exactSnap != null && exactSnap.exists()) {
+                        val handleObj = exactSnap.toObject(
+                            CloudUsernameHandle::class.java,
+                            DocumentSnapshot.ServerTimestampBehavior.ESTIMATE,
+                        )
+                        if (handleObj != null && handleObj.userId.isNotBlank()) {
+                            val pub = getPublicProfile(handleObj.userId).getOrNull()
+                            val profile = pub ?: CloudPublicProfile(
+                                docId = handleObj.userId,
+                                userId = handleObj.userId,
+                                displayName = handleObj.displayName,
+                                username = handleObj.username,
+                                photoUrl = handleObj.photoUrl,
+                                isDeveloper = handleObj.isDeveloper,
+                                isPublic = true,
+                            )
+                            resultsByUid[profile.userId] = profile
+                        }
+                    }
+                }
+
+                val listSnap = publicProfilesCollection()
+                    .whereEqualTo("isPublic", true)
+                    .limit(100)
+                    .get()
+                    .await()
+                val publicUsers = listSnap.toObjects(
+                    CloudPublicProfile::class.java,
+                    DocumentSnapshot.ServerTimestampBehavior.ESTIMATE,
+                )
+                for (profile in publicUsers) {
+                    val matches = cleanQuery.isBlank() ||
+                        (profile.username?.contains(cleanQuery, ignoreCase = true) == true) ||
+                        profile.displayName.contains(cleanQuery, ignoreCase = true)
+                    if (matches && profile.userId.isNotBlank()) {
+                        resultsByUid.putIfAbsent(profile.userId, profile)
+                    }
+                }
+
+                val sorted = resultsByUid.values
+                    .filter { cleanQuery.isNotBlank() || it.userId != myUid }
+                    .sortedWith(
+                        compareByDescending<CloudPublicProfile> { it.isDeveloper }
+                            .thenByDescending { it.username?.equals(cleanQuery, ignoreCase = true) == true }
+                            .thenBy { it.displayName.lowercase() },
+                    )
+                Result.success(sorted)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                handleFirestoreError(e, OperationType.LIST, "public_profiles")
+                Result.failure(e)
+            }
+        }
+
+    suspend fun addFriend(friend: CloudPublicProfile): Result<CloudFriend> = withContext(Dispatchers.IO) {
+        val uid = try {
+            requireUserId()
+        } catch (e: Exception) {
+            return@withContext Result.failure(e)
+        }
+        val safeFriendUid = safeFirestoreDocId(friend.userId)
+        if (safeFriendUid == uid || friend.userId.isBlank()) {
+            return@withContext Result.failure(IllegalArgumentException("Cannot add yourself as friend"))
+        }
+        val docRef = friendsCollection(uid).document(safeFriendUid)
+        val model = CloudFriend(
+            docId = safeFriendUid,
+            userId = uid,
+            friendUid = safeFriendUid,
+            username = friend.username?.let(::normalizeUsernameHandle)?.takeIf(::isValidUsernameHandle),
+            displayName = friend.displayName.ifBlank { "SoundLap User" },
+            photoUrl = friend.photoUrl,
+            isDeveloper = friend.isDeveloper,
+            addedAtMs = System.currentTimeMillis(),
+        )
+        try {
+            val snap = docRef.get().await()
+            if (snap.exists()) {
+                docRef.update(model.toUpdateMap()).await()
+            } else {
+                docRef.set(model.toCreateMap(uid)).await()
+            }
+            Result.success(model)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, docRef.path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun removeFriend(friendUid: String): Result<Unit> = withContext(Dispatchers.IO) {
+        val uid = try {
+            requireUserId()
+        } catch (e: Exception) {
+            return@withContext Result.failure(e)
+        }
+        val docRef = friendsCollection(uid).document(safeFirestoreDocId(friendUid))
+        try {
+            docRef.delete().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, docRef.path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun getFriends(): Result<List<CloudFriend>> = withContext(Dispatchers.IO) {
+        val uid = try {
+            requireUserId()
+        } catch (e: Exception) {
+            return@withContext Result.failure(e)
+        }
+        val path = "users/$uid/friends"
+        try {
+            val snap = friendsCollection(uid).get().await()
+            val list = snap.toObjects(
+                CloudFriend::class.java,
+                DocumentSnapshot.ServerTimestampBehavior.ESTIMATE,
+            ).sortedWith(compareByDescending<CloudFriend> { it.isDeveloper }.thenBy { it.displayName.lowercase() })
+            Result.success(list)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.LIST, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun upsertArtistSubscription(
+        artistName: String,
+        avatarUrl: String? = null,
+        soundCloudUrl: String? = null,
+        spotifyArtistId: String? = null,
+        subscribedAtMs: Long = System.currentTimeMillis(),
+    ): Result<String> = withContext(Dispatchers.IO) {
+        val uid = try {
+            requireUserId()
+        } catch (e: Exception) {
+            return@withContext Result.failure(e)
+        }
+        val cleanName = artistName.trim().take(120)
+        if (cleanName.isBlank()) {
+            return@withContext Result.failure(IllegalArgumentException("Blank artist name"))
+        }
+        val artistKey = artistSubscriptionDocId(cleanName)
+        val docRef = artistSubscriptionsCollection(uid).document(artistKey)
+        val model = CloudArtistSubscription(
+            docId = artistKey,
+            userId = uid,
+            artistKey = artistKey,
+            artistName = cleanName,
+            avatarUrl = avatarUrl,
+            soundCloudUrl = soundCloudUrl,
+            spotifyArtistId = spotifyArtistId,
+            subscribedAtMs = subscribedAtMs,
+        )
+        try {
+            val snap = docRef.get().await()
+            if (snap.exists()) {
+                docRef.update(model.toUpdateMap()).await()
+            } else {
+                docRef.set(model.toCreateMap(uid)).await()
+            }
+            Result.success(artistKey)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, docRef.path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun removeArtistSubscription(artistKeyOrName: String): Result<Unit> = withContext(Dispatchers.IO) {
+        val uid = try {
+            requireUserId()
+        } catch (e: Exception) {
+            return@withContext Result.failure(e)
+        }
+        val key = if (artistKeyOrName.startsWith("art_")) {
+            safeFirestoreDocId(artistKeyOrName)
+        } else {
+            artistSubscriptionDocId(artistKeyOrName)
+        }
+        val docRef = artistSubscriptionsCollection(uid).document(key)
+        try {
+            docRef.delete().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, docRef.path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun getArtistSubscriptions(): Result<List<CloudArtistSubscription>> = withContext(Dispatchers.IO) {
+        val uid = try {
+            requireUserId()
+        } catch (e: Exception) {
+            return@withContext Result.failure(e)
+        }
+        val path = "users/$uid/artist_subscriptions"
+        try {
+            val snap = artistSubscriptionsCollection(uid).get().await()
+            val list = snap.toObjects(
+                CloudArtistSubscription::class.java,
+                DocumentSnapshot.ServerTimestampBehavior.ESTIMATE,
+            ).sortedByDescending { it.subscribedAtMs }
+            Result.success(list)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.LIST, path)
             Result.failure(e)
         }
     }

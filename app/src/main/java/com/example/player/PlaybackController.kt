@@ -108,6 +108,8 @@ class PlaybackController(
         scope.launch {
             preferences.settings.collect { settings ->
                 FullStreamResolver.isDataSaverEnabled = settings.dataSaverEnabled
+                FullStreamResolver.isBatterySaverEnabled = settings.batterySaverEnabled
+                SoundLapaPlaybackService.setAudioFocusMode(settings.audioFocusMode)
                 smoothTransitionEnabled = settings.smoothTransitionEnabled
                 smoothTransitionDurationSec = settings.smoothTransitionDurationSec.coerceIn(1, 10)
                 if (!smoothTransitionEnabled) {
@@ -187,6 +189,63 @@ class PlaybackController(
         playTrack(track, active, startPositionMs = 0L)
     }
 
+    fun playNextInQueue(track: TrackEntity) {
+        knownTracksById[track.id] = track
+        val mediaItem = toMediaItem(track) ?: return
+        val controller = mediaController
+        val currentQueue = _queueTracks.value.ifEmpty { cachedQueue }.toMutableList()
+        if (controller == null || controller.mediaItemCount == 0) {
+            playTrack(track, (listOf(track) + currentQueue).distinctBy { it.id })
+            return
+        }
+        val currentId = controller.currentMediaItem?.mediaId ?: _playbackState.value.currentTrackId
+        val insertQueueIdx = currentQueue.indexOfFirst { it.id == currentId }.let { idx ->
+            if (idx >= 0) idx + 1 else 0
+        }
+        currentQueue.removeAll { it.id == track.id && currentQueue.indexOf(it) != idxOfCurrent(currentQueue, currentId) }
+        val safeQueueIdx = insertQueueIdx.coerceIn(0, currentQueue.size)
+        currentQueue.add(safeQueueIdx, track)
+        _queueTracks.value = currentQueue
+
+        val insertControllerIdx = (controller.currentMediaItemIndex + 1).coerceIn(0, controller.mediaItemCount)
+        controller.addMediaItem(insertControllerIdx, mediaItem)
+        FullStreamResolver.prefetchTracks(listOf(track), dao)
+    }
+
+    fun addToQueue(track: TrackEntity) {
+        knownTracksById[track.id] = track
+        val mediaItem = toMediaItem(track) ?: return
+        val controller = mediaController
+        val currentQueue = _queueTracks.value.ifEmpty { cachedQueue }.toMutableList()
+        if (controller == null || controller.mediaItemCount == 0) {
+            playTrack(track, (currentQueue + track).distinctBy { it.id })
+            return
+        }
+        if (currentQueue.none { it.id == track.id }) {
+            currentQueue.add(track)
+            _queueTracks.value = currentQueue
+        }
+        controller.addMediaItem(mediaItem)
+    }
+
+    fun appendTracksToQueue(tracks: List<TrackEntity>) {
+        if (tracks.isEmpty()) return
+        tracks.forEach { knownTracksById[it.id] = it }
+        val controller = mediaController ?: return
+        if (controller.mediaItemCount == 0) return
+        val existingIds = _queueTracks.value.mapTo(HashSet()) { it.id }
+        val newTracks = tracks.filter { it.id !in existingIds && resolveTrackUri(it) != null }
+        if (newTracks.isEmpty()) return
+        val newItems = newTracks.mapNotNull { toMediaItem(it) }
+        if (newItems.isEmpty()) return
+        _queueTracks.value = _queueTracks.value + newTracks
+        controller.addMediaItems(newItems)
+        FullStreamResolver.prefetchTracks(newTracks.take(2), dao)
+    }
+
+    private fun idxOfCurrent(list: List<TrackEntity>, currentId: String?): Int =
+        if (currentId == null) -1 else list.indexOfFirst { it.id == currentId }
+
     fun playTrack(track: TrackEntity, queue: List<TrackEntity> = cachedQueue, startPositionMs: Long = 0L) {
         knownTracksById[track.id] = track
         queue.forEach { knownTracksById[it.id] = it }
@@ -242,13 +301,13 @@ class PlaybackController(
             }
 
             rapidSkipTrackId = track.id
-            rapidSkipExpiresAtMs = System.currentTimeMillis() + 900L
+            rapidSkipExpiresAtMs = System.currentTimeMillis() + 9_500L
 
             SoundLapaPlaybackService.performDualDeckCrossfade(
                 mediaItems = mediaItems,
                 targetIndex = targetIndex,
                 startPositionMs = startPositionMs,
-                fadeDurationMs = effectiveFadeMs,
+                fadeDurationMs = min(effectiveFadeMs, 1_400L),
                 repeatMode = controller.repeatMode,
                 shuffleEnabled = controller.shuffleModeEnabled,
                 maxLeadWaitMs = 0L,
@@ -274,7 +333,7 @@ class PlaybackController(
             )
         } else {
             rapidSkipTrackId = track.id
-            rapidSkipExpiresAtMs = System.currentTimeMillis() + 900L
+            rapidSkipExpiresAtMs = System.currentTimeMillis() + 9_500L
             SoundLapaPlaybackService.stopActiveCrossfade(restorePrimaryVolume = true)
             startMediaItems(
                 controller = controller,
@@ -515,12 +574,10 @@ class PlaybackController(
             return
         }
 
+        errorRecoveryJob?.cancel()
         autoCrossfadeTriggeredTrackId = null
         val now = System.currentTimeMillis()
-        val rapidIdx = if (!controller.shuffleModeEnabled &&
-            rapidSkipTrackId != null &&
-            now < rapidSkipExpiresAtMs
-        ) {
+        val rapidIdx = if (rapidSkipTrackId != null && now < rapidSkipExpiresAtMs) {
             mediaItems.indexOfFirst { it.mediaId == rapidSkipTrackId }
         } else {
             -1
@@ -539,9 +596,9 @@ class PlaybackController(
         val targetMediaId = mediaItems[nextIdx].mediaId
         val targetTrack = knownTracksById[targetMediaId] ?: cachedQueue.find { t -> t.id == targetMediaId }
         rapidSkipTrackId = targetMediaId
-        rapidSkipExpiresAtMs = now + 2_500L
+        rapidSkipExpiresAtMs = now + 10_000L
         pendingSeekTargetMs = 0L
-        pendingSeekExpiresAt = now + 2_500L
+        pendingSeekExpiresAt = now + 5_000L
 
         val upcomingNext = mediaItems.getOrNull((nextIdx + 1) % mediaItems.size)
             ?.let { knownTracksById[it.mediaId] }
@@ -561,25 +618,18 @@ class PlaybackController(
             )
         }
 
-        if (smoothTransitionEnabled && controller.isPlaying) {
-            val configuredFadeMs = (smoothTransitionDurationSec * 1000L).coerceIn(1000L, 10_000L)
-            val currentPos = controller.currentPosition.coerceAtLeast(0L)
-            val totalDur = controller.duration.takeIf { it > 0L } ?: 0L
-            val effectiveFadeMs = if (totalDur > currentPos + 450L) {
-                min(configuredFadeMs, totalDur - currentPos).coerceAtLeast(500L)
-            } else {
-                configuredFadeMs
-            }
-
+        if (smoothTransitionEnabled && controller.isPlaying && rapidIdx < 0) {
+            val manualFadeMs = min(smoothTransitionDurationSec * 1000L, 1_200L).coerceAtLeast(650L)
             SoundLapaPlaybackService.performDualDeckCrossfade(
                 mediaItems = mediaItems,
                 targetIndex = nextIdx,
                 startPositionMs = 0L,
-                fadeDurationMs = effectiveFadeMs,
+                fadeDurationMs = manualFadeMs,
                 repeatMode = controller.repeatMode,
                 shuffleEnabled = controller.shuffleModeEnabled,
                 maxLeadWaitMs = 0L,
                 fallbackApplyOnActive = {
+                    SoundLapaPlaybackService.stopActiveCrossfade(restorePrimaryVolume = true)
                     controller.volume = 1f
                     controller.seekTo(nextIdx, 0L)
                     controller.playWhenReady = true
@@ -590,6 +640,7 @@ class PlaybackController(
                     _playbackState.update { it.copy(transitionCounter = it.transitionCounter + 1) }
                 },
                 onDeckActivated = { _, isReady ->
+                    rapidSkipTrackId = null
                     if (targetTrack != null) {
                         val activeQueue = _queueTracks.value.ifEmpty { cachedQueue }
                         onCrossfadeDeckActivated(targetTrack, activeQueue, 0L, isReady = isReady)
@@ -643,6 +694,8 @@ class PlaybackController(
         }
         val inRapidSkipWindow = rapidSkipTrackId != null && now < rapidSkipExpiresAtMs
         if (controller.mediaItemCount > 0 && effectivePos > 3000L && !inRapidSkipWindow) {
+            rapidSkipTrackId = controller.currentMediaItem?.mediaId ?: _playbackState.value.currentTrackId
+            rapidSkipExpiresAtMs = now + 3_500L
             seekTo(0L)
             return
         }
@@ -660,8 +713,9 @@ class PlaybackController(
             return
         }
 
+        errorRecoveryJob?.cancel()
         autoCrossfadeTriggeredTrackId = null
-        val rapidIdx = if (!controller.shuffleModeEnabled && inRapidSkipWindow) {
+        val rapidIdx = if (inRapidSkipWindow) {
             mediaItems.indexOfFirst { it.mediaId == rapidSkipTrackId }
         } else {
             -1
@@ -683,9 +737,9 @@ class PlaybackController(
         val targetMediaId = mediaItems[prevIdx].mediaId
         val targetTrack = knownTracksById[targetMediaId] ?: cachedQueue.find { t -> t.id == targetMediaId }
         rapidSkipTrackId = targetMediaId
-        rapidSkipExpiresAtMs = now + 2_500L
+        rapidSkipExpiresAtMs = now + 10_000L
         pendingSeekTargetMs = 0L
-        pendingSeekExpiresAt = now + 2_500L
+        pendingSeekExpiresAt = now + 5_000L
 
         _positionMs.value = 0L
         _playbackState.update {
@@ -699,17 +753,18 @@ class PlaybackController(
             )
         }
 
-        if (smoothTransitionEnabled && controller.isPlaying) {
-            val configuredFadeMs = (smoothTransitionDurationSec * 1000L).coerceIn(1000L, 10_000L)
+        if (smoothTransitionEnabled && controller.isPlaying && rapidIdx < 0) {
+            val manualFadeMs = min(smoothTransitionDurationSec * 1000L, 1_200L).coerceAtLeast(650L)
             SoundLapaPlaybackService.performDualDeckCrossfade(
                 mediaItems = mediaItems,
                 targetIndex = prevIdx,
                 startPositionMs = 0L,
-                fadeDurationMs = configuredFadeMs,
+                fadeDurationMs = manualFadeMs,
                 repeatMode = controller.repeatMode,
                 shuffleEnabled = controller.shuffleModeEnabled,
                 maxLeadWaitMs = 0L,
                 fallbackApplyOnActive = {
+                    SoundLapaPlaybackService.stopActiveCrossfade(restorePrimaryVolume = true)
                     controller.volume = 1f
                     controller.seekTo(prevIdx, 0L)
                     controller.playWhenReady = true
@@ -720,6 +775,7 @@ class PlaybackController(
                     _playbackState.update { it.copy(transitionCounter = it.transitionCounter + 1) }
                 },
                 onDeckActivated = { _, isReady ->
+                    rapidSkipTrackId = null
                     if (targetTrack != null) {
                         val activeQueue = _queueTracks.value.ifEmpty { cachedQueue }
                         onCrossfadeDeckActivated(targetTrack, activeQueue, 0L, isReady = isReady)
@@ -1079,12 +1135,16 @@ class PlaybackController(
         val uri = resolveTrackUri(track) ?: return null
         val extras = Bundle().apply {
             track.sourceUri?.let { putString("source_uri", it) }
+            putLong("duration_ms", track.durationMs)
         }
         val metadataBuilder = MediaMetadata.Builder()
             .setTitle(track.title)
             .setArtist(track.artist)
             .setGenre(track.genre)
             .setExtras(extras)
+        track.albumTitle?.takeIf { it.isNotBlank() }?.let { album ->
+            metadataBuilder.setAlbumTitle(album)
+        }
 
         track.coverArtPath?.let { cover ->
             if (cover.startsWith("http://") || cover.startsWith("https://")) {

@@ -28,6 +28,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -112,14 +113,17 @@ fun rememberIsAppForeground(): Boolean {
     return isForeground
 }
 
+val LocalBatterySaverEnabled = compositionLocalOf { false }
+
 @Composable
 fun FloatingCoverBackdrop(
     track: TrackEntity,
     isPlaying: Boolean,
     modifier: Modifier = Modifier,
 ) {
+    val batterySaver = LocalBatterySaverEnabled.current
     val isForeground = rememberIsAppForeground()
-    val phase = if (isForeground) {
+    val phase = if (isForeground && !batterySaver) {
         val infiniteTransition = rememberInfiniteTransition(label = "floatingCoverLoop")
         val animatedPhase by infiniteTransition.animateFloat(
             initialValue = 0f,
@@ -166,21 +170,33 @@ fun FloatingCoverBackdrop(
                 modifier = Modifier
                     .fillMaxSize()
                     .graphicsLayer {
-                        val ampX = size.width * 0.08f * motionEnergy
-                        val ampY = size.height * 0.08f * motionEnergy
-                        val driftX = sin(phase) * ampX + cos(phase * 2f) * (ampX * 0.35f)
-                        val driftY = cos(phase) * ampY + sin(phase * 2f) * (ampY * 0.35f)
-                        val scale = 1.48f + 0.09f * sin(phase) * motionEnergy
-                        scaleX = scale
-                        scaleY = scale
-                        translationX = driftX
-                        translationY = driftY
-                        rotationZ = sin(phase) * 4.0f * motionEnergy
-                        alpha = 0.40f
+                        if (batterySaver) {
+                            scaleX = 1.25f
+                            scaleY = 1.25f
+                            alpha = 0.28f
+                        } else {
+                            val ampX = size.width * 0.08f * motionEnergy
+                            val ampY = size.height * 0.08f * motionEnergy
+                            val driftX = sin(phase) * ampX + cos(phase * 2f) * (ampX * 0.35f)
+                            val driftY = cos(phase) * ampY + sin(phase * 2f) * (ampY * 0.35f)
+                            val scale = 1.48f + 0.09f * sin(phase) * motionEnergy
+                            scaleX = scale
+                            scaleY = scale
+                            translationX = driftX
+                            translationY = driftY
+                            rotationZ = sin(phase) * 4.0f * motionEnergy
+                            alpha = 0.40f
+                        }
                     }
-                    .blur(
-                        radius = 26.dp,
-                        edgeTreatment = BlurredEdgeTreatment.Rectangle,
+                    .then(
+                        if (batterySaver) {
+                            Modifier
+                        } else {
+                            Modifier.blur(
+                                radius = 26.dp,
+                                edgeTreatment = BlurredEdgeTreatment.Rectangle,
+                            )
+                        },
                     ),
             ) {
                 TrackCoverArtwork(
@@ -210,8 +226,28 @@ fun LiquidShaderBackdrop(
     transitionKey: Int,
     modifier: Modifier = Modifier,
 ) {
+    val batterySaver = LocalBatterySaverEnabled.current
     val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
     val baseColor = MaterialTheme.colorScheme.background
+
+    if (batterySaver) {
+        val staticGradient = remember(baseColor, primaryColor, isDark) {
+            Brush.verticalGradient(
+                colors = listOf(
+                    primaryColor.copy(alpha = if (isDark) 0.14f else 0.09f),
+                    baseColor,
+                    baseColor,
+                ),
+            )
+        }
+        Box(
+            modifier = modifier
+                .fillMaxSize()
+                .background(baseColor)
+                .background(staticGradient),
+        )
+        return
+    }
 
     val animPrimary by animateColorAsState(
         targetValue = primaryColor,
@@ -368,8 +404,9 @@ fun LiquidGlassCard(
     content: @Composable BoxScope.() -> Unit,
 ) {
     val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    val softSurface = MaterialTheme.colorScheme.surface
 
-    val fillBrush = remember(isDark, accentTint) {
+    val fillBrush = remember(isDark, accentTint, softSurface) {
         if (isDark) {
             Brush.linearGradient(
                 colors = listOf(
@@ -381,9 +418,9 @@ fun LiquidGlassCard(
         } else {
             Brush.linearGradient(
                 colors = listOf(
-                    Color.White.copy(alpha = 0.86f),
-                    accentTint.copy(alpha = 0.08f),
-                    Color.White.copy(alpha = 0.62f),
+                    softSurface.copy(alpha = 0.94f),
+                    accentTint.copy(alpha = 0.07f),
+                    softSurface.copy(alpha = 0.80f),
                 ),
             )
         }
@@ -401,9 +438,9 @@ fun LiquidGlassCard(
         } else {
             Brush.linearGradient(
                 colors = listOf(
-                    Color.White.copy(alpha = 0.95f),
-                    Color(0x2816131A),
-                    accentTint.copy(alpha = 0.30f),
+                    Color.White.copy(alpha = 0.55f),
+                    Color(0x2618151D),
+                    accentTint.copy(alpha = 0.28f),
                 ),
             )
         }

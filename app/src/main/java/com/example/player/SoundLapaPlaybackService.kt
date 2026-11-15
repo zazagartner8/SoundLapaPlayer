@@ -3,7 +3,11 @@ package com.example.player
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.media.AudioAttributes as PlatformAudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.net.Uri
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -16,6 +20,7 @@ import androidx.media3.common.Timeline
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.TransferListener
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
@@ -33,8 +38,10 @@ import androidx.media3.extractor.DefaultExtractorsFactory
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import com.example.MainActivity
+import com.example.data.local.AudioFocusMode
 import com.example.data.local.SoundLapaDao
 import com.example.data.local.SoundLapaDatabase
+import com.example.data.local.SoundLapaPreferences
 import com.example.data.remote.FullStreamResolver
 import com.example.data.remote.ResolvedAudioStream
 import com.google.common.util.concurrent.Futures
@@ -76,6 +83,91 @@ class SoundLapaPlaybackService : MediaSessionService() {
     private var crossfadeGeneration: Long = 0L
     private var isReplacingCrossfade = false
     private var isTransitioningSwap = false
+    private var currentFocusMode: AudioFocusMode = AudioFocusMode.PAUSE
+    private var audioManager: AudioManager? = null
+    private var appAudioFocusRequest: AudioFocusRequest? = null
+    private var appAudioFocusModeBuilt: AudioFocusMode? = null
+    private var isDuckedByFocus: Boolean = false
+    private var pausedByFocusLoss: Boolean = false
+
+    private val appAudioFocusListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
+        when (currentFocusMode) {
+            AudioFocusMode.MIX -> {
+                isDuckedByFocus = false
+                pausedByFocusLoss = false
+                if (crossfadeJob?.isActive != true) {
+                    activePlayer?.volume = 1f
+                }
+                activePlayer?.let { updateAudioFocusTelemetry(it, it.playbackSuppressionReason) }
+            }
+            AudioFocusMode.DUCK -> {
+                when (focusChange) {
+                    AudioManager.AUDIOFOCUS_GAIN -> {
+                        isDuckedByFocus = false
+                        pausedByFocusLoss = false
+                        if (crossfadeJob?.isActive != true) {
+                            activePlayer?.volume = 1f
+                        }
+                        activePlayer?.let { updateAudioFocusTelemetry(it, it.playbackSuppressionReason) }
+                    }
+                    AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
+                    AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK,
+                    -> {
+                        isDuckedByFocus = true
+                        activePlayer?.volume = 0.25f
+                        _audioFocusStatus.value = AudioFocusUiStatus.DUCKING
+                    }
+                    AudioManager.AUDIOFOCUS_LOSS -> {
+                        isDuckedByFocus = false
+                        pausedByFocusLoss = false
+                        activePlayer?.pause()
+                        _audioFocusStatus.value = AudioFocusUiStatus.IDLE
+                    }
+                }
+            }
+            AudioFocusMode.PAUSE -> {
+                when (focusChange) {
+                    AudioManager.AUDIOFOCUS_GAIN -> {
+                        isDuckedByFocus = false
+                        val shouldResume = pausedByFocusLoss
+                        pausedByFocusLoss = false
+                        val player = activePlayer
+                        if (player != null) {
+                            if (crossfadeJob?.isActive != true) {
+                                player.volume = 1f
+                            }
+                            if (shouldResume) {
+                                player.playWhenReady = true
+                                player.play()
+                            }
+                            updateAudioFocusTelemetry(player, player.playbackSuppressionReason)
+                        } else {
+                            _audioFocusStatus.value = AudioFocusUiStatus.IDLE
+                        }
+                    }
+                    AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
+                    AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK,
+                    -> {
+                        isDuckedByFocus = false
+                        val player = activePlayer
+                        if (player != null && (player.isPlaying || player.playWhenReady)) {
+                            pausedByFocusLoss = true
+                            cancelCrossfade(restorePrimaryVolume = true)
+                            player.pause()
+                        }
+                        _audioFocusStatus.value = AudioFocusUiStatus.TRANSIENT_LOSS
+                    }
+                    AudioManager.AUDIOFOCUS_LOSS -> {
+                        isDuckedByFocus = false
+                        pausedByFocusLoss = false
+                        cancelCrossfade(restorePrimaryVolume = true)
+                        activePlayer?.pause()
+                        _audioFocusStatus.value = AudioFocusUiStatus.IDLE
+                    }
+                }
+            }
+        }
+    }
 
     private val activePlayerListener = object : Player.Listener {
         override fun onPlaybackSuppressionReasonChanged(playbackSuppressionReason: Int) {
@@ -83,13 +175,23 @@ class SoundLapaPlaybackService : MediaSessionService() {
         }
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
+            if (isPlaying && currentFocusMode != AudioFocusMode.MIX) {
+                ensureAppAudioFocusRequested()
+            }
             activePlayer?.let { updateAudioFocusTelemetry(it, it.playbackSuppressionReason) }
         }
 
         override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+            if (playWhenReady && currentFocusMode != AudioFocusMode.MIX) {
+                ensureAppAudioFocusRequested()
+            }
+            if (!playWhenReady && reason == Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST) {
+                pausedByFocusLoss = false
+            }
             if (!isTransitioningSwap && !playWhenReady && crossfadeJob?.isActive == true) {
                 cancelCrossfade(restorePrimaryVolume = true)
             }
+            activePlayer?.let { updateAudioFocusTelemetry(it, it.playbackSuppressionReason) }
         }
     }
 
@@ -97,6 +199,10 @@ class SoundLapaPlaybackService : MediaSessionService() {
     override fun onCreate() {
         super.onCreate()
         activeInstance = this
+        audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+        currentFocusMode = runCatching {
+            SoundLapaPreferences(this).currentSettings().audioFocusMode
+        }.getOrDefault(AudioFocusMode.PAUSE)
 
         val audioAttributes = AudioAttributes.Builder()
             .setUsage(C.USAGE_MEDIA)
@@ -109,7 +215,7 @@ class SoundLapaPlaybackService : MediaSessionService() {
         val dao = SoundLapaDatabase.getInstance(this).soundLapaDao()
         sharedDao = dao
 
-        val playerA = buildDeckPlayer(handleAudioFocus = true)
+        val playerA = buildDeckPlayer(handleAudioFocus = false)
         playerA.addListener(activePlayerListener)
 
         deckA = playerA
@@ -175,7 +281,20 @@ class SoundLapaPlaybackService : MediaSessionService() {
             resolveScope = serviceScope,
             extractorsFactory = extractorsFactory,
         ).apply {
-            setLoadErrorHandlingPolicy(DefaultLoadErrorHandlingPolicy(6))
+            setLoadErrorHandlingPolicy(
+                object : DefaultLoadErrorHandlingPolicy(4) {
+                    override fun getRetryDelayMsFor(loadErrorInfo: LoadErrorHandlingPolicy.LoadErrorInfo): Long {
+                        val cause = loadErrorInfo.exception
+                        if (cause is HttpDataSource.InvalidResponseCodeException &&
+                            (cause.responseCode == 403 || cause.responseCode == 410 || cause.responseCode == 404)
+                        ) {
+                            // Fail immediately on expired signed CDN URLs so PlaybackController re-resolves cleanly
+                            return C.TIME_UNSET
+                        }
+                        return super.getRetryDelayMsFor(loadErrorInfo)
+                    }
+                },
+            )
         }
 
         return ExoPlayer.Builder(this)
@@ -325,7 +444,7 @@ class SoundLapaPlaybackService : MediaSessionService() {
                 isTransitioningSwap = true
                 outgoing.removeListener(activePlayerListener)
                 outgoing.setAudioAttributes(attrs, /* handleAudioFocus = */ false)
-                incoming.setAudioAttributes(attrs, /* handleAudioFocus = */ true)
+                incoming.setAudioAttributes(attrs, /* handleAudioFocus = */ false)
                 incoming.addListener(activePlayerListener)
                 activePlayer = incoming
                 standbyPlayer = outgoing
@@ -404,12 +523,94 @@ class SoundLapaPlaybackService : MediaSessionService() {
             }
         }
         if (restorePrimaryVolume) {
-            activePlayer?.volume = 1f
+            activePlayer?.volume = if (isDuckedByFocus && currentFocusMode == AudioFocusMode.DUCK) 0.25f else 1f
         }
+    }
+
+    private fun ensureAppAudioFocusRequested() {
+        val am = audioManager ?: return
+        val mode = currentFocusMode
+        if (mode == AudioFocusMode.MIX) {
+            abandonAppAudioFocus()
+            return
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            if (appAudioFocusRequest != null && appAudioFocusModeBuilt != mode) {
+                appAudioFocusRequest?.let { am.abandonAudioFocusRequest(it) }
+                appAudioFocusRequest = null
+            }
+            if (appAudioFocusRequest == null) {
+                val attrs = PlatformAudioAttributes.Builder()
+                    .setUsage(PlatformAudioAttributes.USAGE_MEDIA)
+                    .setContentType(PlatformAudioAttributes.CONTENT_TYPE_MUSIC)
+                    .build()
+                appAudioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                    .setAudioAttributes(attrs)
+                    .setOnAudioFocusChangeListener(appAudioFocusListener, Handler(Looper.getMainLooper()))
+                    .setWillPauseWhenDucked(mode == AudioFocusMode.PAUSE)
+                    .setAcceptsDelayedFocusGain(true)
+                    .build()
+                appAudioFocusModeBuilt = mode
+            }
+            appAudioFocusRequest?.let { am.requestAudioFocus(it) }
+        } else {
+            @Suppress("DEPRECATION")
+            am.requestAudioFocus(
+                appAudioFocusListener,
+                AudioManager.STREAM_MUSIC,
+                AudioManager.AUDIOFOCUS_GAIN,
+            )
+        }
+    }
+
+    private fun abandonAppAudioFocus() {
+        val am = audioManager ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            appAudioFocusRequest?.let { am.abandonAudioFocusRequest(it) }
+        } else {
+            @Suppress("DEPRECATION")
+            am.abandonAudioFocus(appAudioFocusListener)
+        }
+        appAudioFocusRequest = null
+        appAudioFocusModeBuilt = null
+        isDuckedByFocus = false
+        pausedByFocusLoss = false
+    }
+
+    private fun applyAudioFocusMode(mode: AudioFocusMode) {
+        currentFocusMode = mode
+        val attrs = sharedAudioAttributes ?: return
+        activePlayer?.setAudioAttributes(attrs, /* handleAudioFocus = */ false)
+        when (mode) {
+            AudioFocusMode.PAUSE -> {
+                isDuckedByFocus = false
+                if (crossfadeJob?.isActive != true) {
+                    activePlayer?.volume = 1f
+                }
+                if (activePlayer?.isPlaying == true || activePlayer?.playWhenReady == true) {
+                    ensureAppAudioFocusRequested()
+                }
+            }
+            AudioFocusMode.DUCK -> {
+                pausedByFocusLoss = false
+                if (activePlayer?.isPlaying == true || activePlayer?.playWhenReady == true) {
+                    ensureAppAudioFocusRequested()
+                }
+            }
+            AudioFocusMode.MIX -> {
+                abandonAppAudioFocus()
+                if (crossfadeJob?.isActive != true) {
+                    activePlayer?.volume = 1f
+                }
+            }
+        }
+        activePlayer?.let { updateAudioFocusTelemetry(it, it.playbackSuppressionReason) }
     }
 
     private fun updateAudioFocusTelemetry(player: Player, suppressionReason: Int) {
         _audioFocusStatus.value = when {
+            isDuckedByFocus && currentFocusMode == AudioFocusMode.DUCK -> AudioFocusUiStatus.DUCKING
+            pausedByFocusLoss && currentFocusMode == AudioFocusMode.PAUSE -> AudioFocusUiStatus.TRANSIENT_LOSS
             suppressionReason == Player.PLAYBACK_SUPPRESSION_REASON_TRANSIENT_AUDIO_FOCUS_LOSS ->
                 AudioFocusUiStatus.TRANSIENT_LOSS
             player.isPlaying ->
@@ -434,6 +635,7 @@ class SoundLapaPlaybackService : MediaSessionService() {
         if (activeInstance === this) {
             activeInstance = null
         }
+        abandonAppAudioFocus()
         cancelCrossfade(restorePrimaryVolume = true)
         serviceScope.cancel()
         deckA?.removeListener(activePlayerListener)
@@ -488,6 +690,10 @@ class SoundLapaPlaybackService : MediaSessionService() {
 
         fun stopActiveCrossfade(restorePrimaryVolume: Boolean = true) {
             activeInstance?.cancelCrossfade(restorePrimaryVolume)
+        }
+
+        fun setAudioFocusMode(mode: AudioFocusMode) {
+            activeInstance?.applyAudioFocusMode(mode)
         }
     }
 }
@@ -589,6 +795,7 @@ private class ResolvingCompositeMediaSource(
         val artist = initialMediaItem.mediaMetadata.artist?.toString()
         val trackId = initialMediaItem.mediaId.takeIf { it.isNotBlank() }
         val originalSourceUri = initialMediaItem.mediaMetadata.extras?.getString("source_uri")
+        val expectedDurationMs = initialMediaItem.mediaMetadata.extras?.getLong("duration_ms", 0L) ?: 0L
 
         resolveJob?.cancel()
         resolveJob = resolveScope.launch(Dispatchers.IO) {
@@ -600,6 +807,7 @@ private class ResolvingCompositeMediaSource(
                     trackId = trackId,
                     originalSourceUri = originalSourceUri,
                     dao = dao,
+                    expectedDurationMs = expectedDurationMs,
                 )
             }.getOrNull()
 

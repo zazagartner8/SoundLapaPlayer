@@ -49,10 +49,13 @@ class SoundLapaApplication : Application(), ImageLoaderFactory {
 
     override fun onCreate() {
         super.onCreate()
+        val initialSettings = preferences.currentSettings()
+        FullStreamResolver.isDataSaverEnabled = initialSettings.dataSaverEnabled
+        FullStreamResolver.isBatterySaverEnabled = initialSettings.batterySaverEnabled
         FullStreamResolver.configureHttpCache(cacheDir)
         FullStreamResolver.warmUpAsync()
         appScope.launch(Dispatchers.IO) {
-            audioCacheManager.seedStarterLibraryIfEmpty()
+            audioCacheManager.purgeLegacyStarterTracks()
         }
     }
 }

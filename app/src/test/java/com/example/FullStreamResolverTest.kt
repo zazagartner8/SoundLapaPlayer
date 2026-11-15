@@ -58,7 +58,7 @@ class FullStreamResolverTest {
         assertFalse(FullStreamResolver.isShortPreviewTrack(fullYtTrack))
 
         val upgradeUri = FullStreamResolver.buildLegacyUpgradeUri(itunesTrack)
-        assertTrue(upgradeUri.startsWith("soundlapa://resolve-full"))
+        assertTrue(upgradeUri.startsWith("soundlap://resolve-full"))
         assertTrue(FullStreamResolver.isResolvablePageOrUpgradeUri(upgradeUri))
     }
 

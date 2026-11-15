@@ -22,8 +22,10 @@ val ObsidianSurface = Color(0xFF13111C)
 val ObsidianCard = Color(0xFF1B1826)
 val GlassWhiteTint = Color(0xFFFFFFFF)
 
-// Light Frost Surfaces
-val FrostCanvas = Color(0xFFF4F1EE)
-val FrostSurface = Color(0xFFFFFFFF)
-val FrostInk = Color(0xFF16131A)
-val FrostMuted = Color(0xFF5E5768)
+// Soft Warm Light Surfaces (comfortable cream & stone palette)
+val FrostCanvas = Color(0xFFF3EFEA)
+val FrostSurface = Color(0xFFEAE4DC)
+val FrostSurfaceVariant = Color(0xFFE0D8CE)
+val FrostInk = Color(0xFF18151D)
+val FrostMuted = Color(0xFF5A5266)
+

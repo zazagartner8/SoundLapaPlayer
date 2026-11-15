@@ -197,7 +197,8 @@ test("User profile supports custom bio, compressed avatar data URI, and synced s
   await assertSucceeds(
     aliceDoc.set({
       ...validProfile(ALICE_UID),
-      displayName: "SoundLapa Pro",
+      username: "alice_v33",
+      displayName: "SoundLap Pro",
       bio: "Basshead & producer",
       photoUrl: "data:image/jpeg;base64,/9j/4AAQSkZJRg==",
       settings: {
@@ -211,8 +212,21 @@ test("User profile supports custom bio, compressed avatar data URI, and synced s
         autoCacheOnPlay: true,
         dataSaverEnabled: false,
         autoUploadEnabled: true,
+        batterySaverEnabled: true,
+        audioFocusMode: "MIX",
         updatedAtMs: 1700000000000,
       },
+    })
+  );
+
+  // Rejects invalid audioFocusMode
+  await assertFails(
+    aliceDoc.update({
+      settings: {
+        appLanguage: "en",
+        audioFocusMode: "INVALID_MODE",
+      },
+      updatedAt: ts(),
     })
   );
 
@@ -239,7 +253,7 @@ test("Bug reports enforce authenticated create, password-filtered list query, an
     reporterName: "Alice",
     reporterAvatarUrl: "https://example.com/a.jpg",
     message: "Button alignment issue",
-    appVersion: "2.5-stable",
+    appVersion: "3.3",
     devAccessKey: "shelban852",
     createdAtMs: 1700000001000,
     createdAt: ts(),
@@ -343,5 +357,166 @@ test("Cloud metrics allow owner writes and developer devAccessKey queries while 
   await assertFails(bobDb.collection("cloud_metrics").where("devAccessKey", "==", "wrong").get());
   await assertSucceeds(bobDb.collection("cloud_metrics").where("devAccessKey", "==", "shelban852").get());
 });
+
+test("Public profiles, @username registry, and exclusive verified developer badge boundaries", async () => {
+  const unauthDb = testEnv.unauthenticatedContext().firestore();
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID, {
+    email: "alice@example.com",
+    email_verified: true,
+  }).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID, {
+    email: "bob@example.com",
+    email_verified: true,
+  }).firestore();
+  const unverifiedDevDb = testEnv.authenticatedContext("dev_unverified", {
+    email: "livex0464@gmail.com",
+    email_verified: false,
+  }).firestore();
+  const devDb = testEnv.authenticatedContext("dev_uid_1", {
+    email: "livex0464@gmail.com",
+    email_verified: true,
+  }).firestore();
+
+  // Regular user cannot claim isDeveloper: true
+  await assertFails(
+    aliceDb.collection("public_profiles").doc(ALICE_UID).set({
+      userId: ALICE_UID,
+      displayName: "Fake Dev",
+      username: "fake_dev",
+      isDeveloper: true,
+      isPublic: true,
+      updatedAt: ts(),
+    })
+  );
+
+  // Unverified developer email also cannot claim isDeveloper: true
+  await assertFails(
+    unverifiedDevDb.collection("public_profiles").doc("dev_unverified").set({
+      userId: "dev_unverified",
+      displayName: "Unverified Dev",
+      isDeveloper: true,
+      isPublic: true,
+      updatedAt: ts(),
+    })
+  );
+
+  // Alice writes non-dev public profile and claims @alice_music
+  await assertSucceeds(
+    aliceDb.collection("public_profiles").doc(ALICE_UID).set({
+      userId: ALICE_UID,
+      displayName: "Alice",
+      username: "alice_music",
+      isDeveloper: false,
+      isPublic: true,
+      updatedAt: ts(),
+    })
+  );
+  await assertSucceeds(
+    aliceDb.collection("usernames").doc("alice_music").set({
+      username: "alice_music",
+      userId: ALICE_UID,
+      displayName: "Alice",
+      isDeveloper: false,
+      isPublic: true,
+      updatedAt: ts(),
+    })
+  );
+
+  // Bob cannot steal Alice's handle or overwrite her public profile
+  await assertFails(
+    bobDb.collection("usernames").doc("alice_music").set({
+      username: "alice_music",
+      userId: BOB_UID,
+      displayName: "Bob",
+      isDeveloper: false,
+      isPublic: true,
+      updatedAt: ts(),
+    })
+  );
+  await assertFails(bobDb.collection("public_profiles").doc(ALICE_UID).delete());
+
+  // Verified developer (livex0464@gmail.com) can set isDeveloper: true
+  await assertSucceeds(
+    devDb.collection("public_profiles").doc("dev_uid_1").set({
+      userId: "dev_uid_1",
+      displayName: "TylerW1nston",
+      username: "tylerw1nston",
+      isDeveloper: true,
+      isPublic: true,
+      updatedAt: ts(),
+    })
+  );
+  await assertSucceeds(
+    devDb.collection("usernames").doc("tylerw1nston").set({
+      username: "tylerw1nston",
+      userId: "dev_uid_1",
+      displayName: "TylerW1nston",
+      isDeveloper: true,
+      isPublic: true,
+      updatedAt: ts(),
+    })
+  );
+
+  // List queries require isPublic==true (or isDeveloper==true); unauthenticated denied
+  await assertFails(unauthDb.collection("public_profiles").where("isPublic", "==", true).get());
+  await assertFails(bobDb.collection("public_profiles").get());
+  await assertSucceeds(bobDb.collection("public_profiles").where("isPublic", "==", true).get());
+  await assertSucceeds(bobDb.collection("public_profiles").where("isDeveloper", "==", true).get());
+  await assertSucceeds(bobDb.collection("usernames").doc("tylerw1nston").get());
+});
+
+test("Friends and artist subscriptions enforce owner isolation and schema validation", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+
+  // Adding self as friend fails
+  await assertFails(
+    aliceDb.collection("users").doc(ALICE_UID).collection("friends").doc(ALICE_UID).set({
+      userId: ALICE_UID,
+      friendUid: ALICE_UID,
+      displayName: "Self",
+      isDeveloper: false,
+      addedAtMs: 1700000000000,
+      createdAt: ts(),
+      updatedAt: ts(),
+    })
+  );
+
+  // Adding Bob as friend succeeds
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).collection("friends").doc(BOB_UID).set({
+      userId: ALICE_UID,
+      friendUid: BOB_UID,
+      username: "bob_beats",
+      displayName: "Bob",
+      isDeveloper: false,
+      addedAtMs: 1700000000000,
+      createdAt: ts(),
+      updatedAt: ts(),
+    })
+  );
+
+  // Artist subscription create/list/delete
+  const subRef = aliceDb.collection("users").doc(ALICE_UID).collection("artist_subscriptions").doc("art_miyagi");
+  await assertSucceeds(
+    subRef.set({
+      userId: ALICE_UID,
+      artistKey: "art_miyagi",
+      artistName: "Miyagi",
+      avatarUrl: "https://example.com/miyagi.jpg",
+      subscribedAtMs: 1700000000000,
+      createdAt: ts(),
+      updatedAt: ts(),
+    })
+  );
+  await assertSucceeds(aliceDb.collection("users").doc(ALICE_UID).collection("artist_subscriptions").get());
+
+  // Cross-user access denied
+  await assertFails(bobDb.collection("users").doc(ALICE_UID).collection("friends").get());
+  await assertFails(bobDb.collection("users").doc(ALICE_UID).collection("artist_subscriptions").get());
+
+  await assertSucceeds(subRef.delete());
+});
+
 
 

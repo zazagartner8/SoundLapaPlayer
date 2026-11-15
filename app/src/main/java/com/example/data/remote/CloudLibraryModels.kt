@@ -47,7 +47,7 @@ private val STRIP_TRACKING_PARAMS = setOf(
 internal fun compactCloudUrl(raw: String?, maxLen: Int = MAX_CLOUD_URL_LEN): String? {
     val trimmed = raw?.trim().orEmpty()
     if (trimmed.isEmpty()) return null
-    if (trimmed.startsWith("soundlapa://", ignoreCase = true)) {
+    if (trimmed.startsWith("soundlapa://", ignoreCase = true) || trimmed.startsWith("soundlap://", ignoreCase = true)) {
         return trimmed.take(maxLen)
     }
     if (!trimmed.startsWith("http://", ignoreCase = true) && !trimmed.startsWith("https://", ignoreCase = true)) {
@@ -91,6 +91,7 @@ internal fun compactCloudTrackDescription(raw: String?): String? {
     val lower = trimmed.lowercase()
     if (lower == "загружено пользователем" ||
         lower == "авто-загружено в офлайн-кэш soundlapa" ||
+        lower == "авто-загружено в кэш soundlap" ||
         lower == "auto-imported"
     ) {
         return null
@@ -99,6 +100,17 @@ internal fun compactCloudTrackDescription(raw: String?): String? {
 }
 
 const val DEVELOPER_REPORTS_PASSWORD: String = "shelban852"
+const val DEVELOPER_EMAIL: String = "livex0464@gmail.com"
+const val DEVELOPER_DEFAULT_HANDLE: String = "tylerw1nston"
+
+internal fun normalizeUsernameHandle(raw: String): String =
+    raw.trim().removePrefix("@").lowercase()
+
+internal fun isValidUsernameHandle(handle: String): Boolean =
+    handle.matches(Regex("^[a-z0-9_]{3,24}$"))
+
+internal fun artistSubscriptionDocId(artistName: String): String =
+    safeFirestoreDocId("art_${artistName.trim().lowercase()}")
 
 data class CloudUserSettings(
     val appLanguage: String = "ru",
@@ -111,6 +123,8 @@ data class CloudUserSettings(
     val autoCacheOnPlay: Boolean = true,
     val dataSaverEnabled: Boolean = false,
     val autoUploadEnabled: Boolean = true,
+    val batterySaverEnabled: Boolean = false,
+    val audioFocusMode: String = "PAUSE",
     val updatedAtMs: Long = 0L,
 ) {
     fun toMap(): Map<String, Any> = mapOf(
@@ -124,6 +138,8 @@ data class CloudUserSettings(
         "autoCacheOnPlay" to autoCacheOnPlay,
         "dataSaverEnabled" to dataSaverEnabled,
         "autoUploadEnabled" to autoUploadEnabled,
+        "batterySaverEnabled" to batterySaverEnabled,
+        "audioFocusMode" to (if (audioFocusMode in setOf("PAUSE", "DUCK", "MIX")) audioFocusMode else "PAUSE"),
         "updatedAtMs" to updatedAtMs.coerceAtLeast(0L),
     )
 
@@ -140,11 +156,15 @@ data class CloudUserSettings(
                 autoCacheOnPlay = s.autoCacheOnPlay,
                 dataSaverEnabled = s.dataSaverEnabled,
                 autoUploadEnabled = s.autoUploadEnabled,
+                batterySaverEnabled = s.batterySaverEnabled,
+                audioFocusMode = s.audioFocusMode.name,
                 updatedAtMs = s.settingsUpdatedAtMs,
             )
 
         fun fromRawMap(map: Map<String, Any?>?): CloudUserSettings? {
             if (map == null || map.isEmpty()) return null
+            val rawFocus = (map["audioFocusMode"] as? String)?.trim()?.uppercase()
+            val normalizedFocus = if (rawFocus in setOf("PAUSE", "DUCK", "MIX")) rawFocus!! else "PAUSE"
             return CloudUserSettings(
                 appLanguage = (map["appLanguage"] as? String)?.take(10)?.ifBlank { "ru" } ?: "ru",
                 darkLiquidGlass = map["darkLiquidGlass"] as? Boolean ?: true,
@@ -156,6 +176,8 @@ data class CloudUserSettings(
                 autoCacheOnPlay = map["autoCacheOnPlay"] as? Boolean ?: true,
                 dataSaverEnabled = map["dataSaverEnabled"] as? Boolean ?: false,
                 autoUploadEnabled = map["autoUploadEnabled"] as? Boolean ?: true,
+                batterySaverEnabled = map["batterySaverEnabled"] as? Boolean ?: false,
+                audioFocusMode = normalizedFocus,
                 updatedAtMs = (map["updatedAtMs"] as? Number)?.toLong()?.coerceAtLeast(0L) ?: 0L,
             )
         }
@@ -167,6 +189,7 @@ data class CloudUserProfile(
     @DocumentId val docId: String = "",
     val userId: String = "",
     val displayName: String = "",
+    val username: String? = null,
     val email: String? = null,
     val photoUrl: String? = null,
     val bio: String? = null,
@@ -179,7 +202,8 @@ data class CloudUserProfile(
 
     fun toCreateMap(uid: String): Map<String, Any> = buildMap {
         put("userId", uid)
-        put("displayName", displayName.trim().ifBlank { "SoundLapa User" }.take(64))
+        put("displayName", displayName.trim().ifBlank { "SoundLap User" }.take(64))
+        username?.let(::normalizeUsernameHandle)?.takeIf(::isValidUsernameHandle)?.let { put("username", it) }
         email?.trim()?.takeIf { it.isNotEmpty() }?.let { put("email", it.take(120)) }
         if (!avatarBlocked) {
             photoUrl?.trim()?.takeIf { it.isNotEmpty() }?.let { put("photoUrl", it.take(MAX_CLOUD_AVATAR_LEN)) }
@@ -195,7 +219,8 @@ data class CloudUserProfile(
     }
 
     fun toUpdateMap(includeBio: Boolean = true, includeSettings: Boolean = false): Map<String, Any> = buildMap {
-        put("displayName", displayName.trim().ifBlank { "SoundLapa User" }.take(64))
+        put("displayName", displayName.trim().ifBlank { "SoundLap User" }.take(64))
+        username?.let(::normalizeUsernameHandle)?.takeIf(::isValidUsernameHandle)?.let { put("username", it) }
         email?.trim()?.takeIf { it.isNotEmpty() }?.let { put("email", it.take(120)) }
         if (avatarBlocked) {
             put("avatarBlocked", true)
@@ -208,6 +233,134 @@ data class CloudUserProfile(
         if (includeSettings) {
             CloudUserSettings.fromRawMap(settings)?.let { put("settings", it.toMap()) }
         }
+        put("updatedAt", FieldValue.serverTimestamp())
+    }
+}
+
+@IgnoreExtraProperties
+data class CloudPublicProfile(
+    @DocumentId val docId: String = "",
+    val userId: String = "",
+    val displayName: String = "",
+    val username: String? = null,
+    val photoUrl: String? = null,
+    val bio: String? = null,
+    @get:PropertyName("isDeveloper")
+    @set:PropertyName("isDeveloper")
+    var isDeveloper: Boolean = false,
+    @get:PropertyName("isPublic")
+    @set:PropertyName("isPublic")
+    var isPublic: Boolean = true,
+    @ServerTimestamp val updatedAt: Timestamp? = null,
+) {
+    fun toWriteMap(uid: String, allowDeveloperFlag: Boolean): Map<String, Any> = buildMap {
+        put("userId", uid)
+        put("displayName", displayName.trim().ifBlank { "SoundLap User" }.take(64))
+        username?.let(::normalizeUsernameHandle)?.takeIf(::isValidUsernameHandle)?.let { put("username", it) }
+        photoUrl?.trim()?.takeIf { it.isNotEmpty() }?.let { put("photoUrl", it.take(MAX_CLOUD_AVATAR_LEN)) }
+        bio?.trim()?.takeIf { it.isNotEmpty() }?.let { put("bio", it.take(180)) }
+        put("isDeveloper", allowDeveloperFlag && isDeveloper)
+        put("isPublic", true)
+        put("updatedAt", FieldValue.serverTimestamp())
+    }
+}
+
+@IgnoreExtraProperties
+data class CloudUsernameHandle(
+    @DocumentId val docId: String = "",
+    val username: String = "",
+    val userId: String = "",
+    val displayName: String = "",
+    val photoUrl: String? = null,
+    @get:PropertyName("isDeveloper")
+    @set:PropertyName("isDeveloper")
+    var isDeveloper: Boolean = false,
+    @get:PropertyName("isPublic")
+    @set:PropertyName("isPublic")
+    var isPublic: Boolean = true,
+    @ServerTimestamp val updatedAt: Timestamp? = null,
+) {
+    fun toWriteMap(uid: String, allowDeveloperFlag: Boolean): Map<String, Any> = buildMap {
+        val handle = normalizeUsernameHandle(username)
+        put("username", handle)
+        put("userId", uid)
+        put("displayName", displayName.trim().ifBlank { "SoundLap User" }.take(64))
+        photoUrl?.trim()?.takeIf { it.isNotEmpty() }?.let { put("photoUrl", it.take(MAX_CLOUD_AVATAR_LEN)) }
+        put("isDeveloper", allowDeveloperFlag && isDeveloper)
+        put("isPublic", true)
+        put("updatedAt", FieldValue.serverTimestamp())
+    }
+}
+
+@IgnoreExtraProperties
+data class CloudFriend(
+    @DocumentId val docId: String = "",
+    val userId: String = "",
+    val friendUid: String = "",
+    val username: String? = null,
+    val displayName: String = "",
+    val photoUrl: String? = null,
+    @get:PropertyName("isDeveloper")
+    @set:PropertyName("isDeveloper")
+    var isDeveloper: Boolean = false,
+    val addedAtMs: Long = 0L,
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null,
+) {
+    fun toCreateMap(uid: String): Map<String, Any> = buildMap {
+        put("userId", uid)
+        put("friendUid", safeFirestoreDocId(friendUid))
+        username?.let(::normalizeUsernameHandle)?.takeIf(::isValidUsernameHandle)?.let { put("username", it) }
+        put("displayName", displayName.trim().ifBlank { "SoundLap User" }.take(64))
+        photoUrl?.trim()?.takeIf { it.isNotEmpty() }?.let { put("photoUrl", it.take(MAX_CLOUD_AVATAR_LEN)) }
+        put("isDeveloper", isDeveloper)
+        put("addedAtMs", addedAtMs.coerceAtLeast(0L))
+        put("createdAt", FieldValue.serverTimestamp())
+        put("updatedAt", FieldValue.serverTimestamp())
+    }
+
+    fun toUpdateMap(): Map<String, Any> = buildMap {
+        username?.let(::normalizeUsernameHandle)?.takeIf(::isValidUsernameHandle)?.let { put("username", it) }
+        put("displayName", displayName.trim().ifBlank { "SoundLap User" }.take(64))
+        photoUrl?.trim()?.takeIf { it.isNotEmpty() }?.let { put("photoUrl", it.take(MAX_CLOUD_AVATAR_LEN)) }
+        put("isDeveloper", isDeveloper)
+        put("addedAtMs", addedAtMs.coerceAtLeast(0L))
+        put("updatedAt", FieldValue.serverTimestamp())
+    }
+}
+
+@IgnoreExtraProperties
+data class CloudArtistSubscription(
+    @DocumentId val docId: String = "",
+    val userId: String = "",
+    val artistKey: String = "",
+    val artistName: String = "",
+    val avatarUrl: String? = null,
+    val soundCloudUrl: String? = null,
+    val spotifyArtistId: String? = null,
+    val subscribedAtMs: Long = 0L,
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null,
+) {
+    fun toCreateMap(uid: String): Map<String, Any> = buildMap {
+        val safeKey = safeFirestoreDocId(artistKey.ifBlank { artistSubscriptionDocId(artistName) })
+        put("userId", uid)
+        put("artistKey", safeKey)
+        put("artistName", artistName.trim().ifBlank { "Artist" }.take(120))
+        compactCloudUrl(avatarUrl, 320)?.let { put("avatarUrl", it) }
+        compactCloudUrl(soundCloudUrl, 320)?.let { put("soundCloudUrl", it) }
+        spotifyArtistId?.trim()?.takeIf { it.isNotEmpty() }?.let { put("spotifyArtistId", it.take(160)) }
+        put("subscribedAtMs", subscribedAtMs.coerceAtLeast(0L))
+        put("createdAt", FieldValue.serverTimestamp())
+        put("updatedAt", FieldValue.serverTimestamp())
+    }
+
+    fun toUpdateMap(): Map<String, Any> = buildMap {
+        put("artistName", artistName.trim().ifBlank { "Artist" }.take(120))
+        compactCloudUrl(avatarUrl, 320)?.let { put("avatarUrl", it) }
+        compactCloudUrl(soundCloudUrl, 320)?.let { put("soundCloudUrl", it) }
+        spotifyArtistId?.trim()?.takeIf { it.isNotEmpty() }?.let { put("spotifyArtistId", it.take(160)) }
+        put("subscribedAtMs", subscribedAtMs.coerceAtLeast(0L))
         put("updatedAt", FieldValue.serverTimestamp())
     }
 }
@@ -228,10 +381,10 @@ data class CloudBugReport(
     fun toCreateMap(uid: String): Map<String, Any> = buildMap {
         put("reportId", safeFirestoreDocId(reportId.ifBlank { "rep_${System.currentTimeMillis()}" }))
         put("userId", uid)
-        put("reporterName", reporterName.trim().ifBlank { "SoundLapa User" }.take(64))
+        put("reporterName", reporterName.trim().ifBlank { "SoundLap User" }.take(64))
         reporterAvatarUrl?.trim()?.takeIf { it.isNotEmpty() }?.let { put("reporterAvatarUrl", it.take(MAX_CLOUD_AVATAR_LEN)) }
         put("message", message.trim().ifBlank { "Bug report" }.take(1000))
-        put("appVersion", appVersion.trim().ifBlank { "3.1" }.take(32))
+        put("appVersion", appVersion.trim().ifBlank { "3.3" }.take(32))
         put("devAccessKey", DEVELOPER_REPORTS_PASSWORD)
         put("createdAtMs", createdAtMs.coerceAtLeast(0L))
         put("createdAt", FieldValue.serverTimestamp())

@@ -40,14 +40,16 @@ class ExampleRobolectricTest {
   fun `read string from context`() {
     val context = ApplicationProvider.getApplicationContext<Context>()
     val appName = context.getString(R.string.app_name)
-    assertEquals("SoundLapa", appName)
+    assertEquals("SoundLap", appName)
   }
 
   @Test
-  fun `default theme accent is purple and v3_1 strings are configured`() {
+  fun `default theme accent is purple and v3_3 strings are configured`() {
     assertEquals(0xFF8B5CF6L, SoundLapaSettings().accentColorArgb)
     assertFalse(SoundLapaSettings().isGuestMode)
-    assertEquals("3.1", BuildConfig.VERSION_NAME)
+    assertFalse(SoundLapaSettings().batterySaverEnabled)
+    assertEquals(com.example.data.local.AudioFocusMode.PAUSE, SoundLapaSettings().audioFocusMode)
+    assertEquals("3.3", BuildConfig.VERSION_NAME)
     assertNotNull(HomeRoute)
 
     val ru = stringsForLanguage("ru")
@@ -55,9 +57,9 @@ class ExampleRobolectricTest {
     assertEquals("Лайкнутые", ru.favoritesTab)
     assertEquals("Загруженные треки", ru.myTracksTab)
     assertEquals("Сингл", ru.singleReleaseLabel)
-    assertTrue(ru.aboutWhatsNewTitle.contains("3.1"))
-    assertTrue(stringsForLanguage("en").aboutWhatsNewTitle.contains("3.1"))
-    assertTrue(stringsForLanguage("it").aboutWhatsNewTitle.contains("3.1"))
+    assertTrue(ru.aboutWhatsNewTitle.contains("3.3"))
+    assertTrue(stringsForLanguage("en").aboutWhatsNewTitle.contains("3.3"))
+    assertTrue(stringsForLanguage("it").aboutWhatsNewTitle.contains("3.3"))
     assertTrue(ru.confirmDeleteTitle.isNotBlank())
     assertTrue(ru.deleteConfirmAction.isNotBlank())
     assertTrue(ru.artistSearchProfileSubtitle.isNotBlank())
@@ -249,7 +251,7 @@ class ExampleRobolectricTest {
     assertEquals(1, embedTracks.size)
     assertEquals("Captain", embedTracks[0].title)
     assertEquals(215_000L, embedTracks[0].durationMs)
-    assertTrue(embedTracks[0].sourceUri?.startsWith("soundlapa://resolve-full") == true)
+    assertTrue(embedTracks[0].sourceUri?.startsWith("soundlap://resolve-full") == true)
   }
 
   @Test
@@ -616,4 +618,191 @@ class ExampleRobolectricTest {
     assertEquals("or", stringsForLanguage("en").settingsDeveloperOrPasswordDivider)
     assertEquals("oppure", stringsForLanguage("it").settingsDeveloperOrPasswordDivider)
   }
+
+  @Test
+  fun `v3_3 settings, social, lyrics, and changelog strings are localized cleanly`() {
+    listOf("ru", "en", "it").forEach { lang ->
+      val s = stringsForLanguage(lang)
+      assertTrue(s.settingsV33.libraryPlaylistTracksCount(5).contains("5"))
+      assertTrue(s.settingsV33.removeAvatarButton.isNotBlank())
+      assertTrue(s.settingsV33.batterySaverTitle.isNotBlank())
+      assertTrue(s.settingsV33.audioFocusPauseTitle.isNotBlank())
+      assertTrue(s.playerV33.coverToggleLabel.isNotBlank())
+      assertTrue(s.playerV33.clipToggleLabel.isNotBlank())
+      assertTrue(s.playerV33.lyricsSectionTitle.isNotBlank())
+      assertTrue(s.social.friendsEntryButton.isNotBlank())
+      assertTrue(s.changelog.versions.any { it.version == "v3.3" })
+    }
+    assertEquals("Кол-ство треков: 7", stringsForLanguage("ru").settingsV33.libraryPlaylistTracksCount(7))
+  }
+
+  @Test
+  fun `light theme rename and wave localization strings are configured in RU EN IT`() {
+    assertEquals("Светлая тема", stringsForLanguage("ru").settingsLightThemeButton)
+    assertEquals("Light theme", stringsForLanguage("en").settingsLightThemeButton)
+    assertEquals("Tema chiaro", stringsForLanguage("it").settingsLightThemeButton)
+
+    listOf("ru", "en", "it").forEach { lang ->
+      val s = stringsForLanguage(lang)
+      assertTrue(s.tabWave.isNotBlank())
+      assertTrue(s.wave.title.isNotBlank())
+      assertTrue(s.wave.moodEnergetic.isNotBlank())
+      assertTrue(s.wave.langRussian.isNotBlank())
+      assertTrue(s.wave.vocalsInstrumental.isNotBlank())
+      assertTrue(s.playerV33.lyricsExpandCd.isNotBlank())
+      assertTrue(s.playerV33.lyricsCollapseCd.isNotBlank())
+      assertTrue(s.settingsV33.moderationAppCheckError.isNotBlank())
+      assertTrue(s.settingsV33.moderationNetworkError.isNotBlank())
+      assertTrue(s.settingsV33.moderationTimeoutError.isNotBlank())
+    }
+  }
+
+  @Test
+  fun `avatar moderation json parser strips markdown fences and classifies failures`() {
+    val fencedSafe = """
+      ```json
+      {
+        "isUnsafeAdultContent": false,
+        "reason": "Clean portrait avatar"
+      }
+      ```
+    """.trimIndent()
+    val safeVerdict = com.example.data.remote.AvatarModerationService.parseModerationVerdictJson(fencedSafe)
+    assertTrue(safeVerdict is com.example.data.remote.AvatarModerationVerdict.Safe)
+
+    val flaggedJson = """{"isUnsafeAdultContent": true, "reason": "Explicit nudity"}"""
+    val flaggedVerdict = com.example.data.remote.AvatarModerationService.parseModerationVerdictJson(flaggedJson)
+    assertTrue(flaggedVerdict is com.example.data.remote.AvatarModerationVerdict.Flagged18Plus)
+    assertEquals(
+      "Explicit nudity",
+      (flaggedVerdict as com.example.data.remote.AvatarModerationVerdict.Flagged18Plus).reason,
+    )
+
+    assertEquals(
+      com.example.data.remote.AvatarModerationService.ERR_APPCHECK,
+      com.example.data.remote.AvatarModerationService.classifyErrorCode(
+        IllegalStateException("403 App Check token attestation failed"),
+      ),
+    )
+    assertEquals(
+      com.example.data.remote.AvatarModerationService.ERR_NETWORK,
+      com.example.data.remote.AvatarModerationService.classifyErrorCode(
+        java.net.UnknownHostException("Unable to resolve host"),
+      ),
+    )
+    assertEquals(
+      com.example.data.remote.AvatarModerationService.ERR_TIMEOUT,
+      com.example.data.remote.AvatarModerationService.classifyErrorCode(
+        RuntimeException("Request timed out"),
+      ),
+    )
+  }
+
+  @Test
+  fun `wave engine derives personal defaults and filters by genre language and vocals`() {
+    val tracks = listOf(
+      TrackEntity(
+        id = "w_ru_hiphop",
+        title = "Ночной бит",
+        artist = "Miyagi",
+        genre = "Хип-хоп",
+        durationMs = 195_000L,
+        waveformJson = "[]",
+        cachedFilePath = null,
+        sourceUri = "soundlapa://resolve-full?artist=Miyagi",
+        coverArtPath = null,
+        accentColorHex = 0xFF8B5CF6L,
+        secondaryColorHex = 0xFF5B21B6L,
+        isUserUpload = false,
+        isCachedOffline = false,
+        fileSizeBytes = 0L,
+        isLiked = true,
+      ),
+      TrackEntity(
+        id = "w_en_inst",
+        title = "Rainy Campus (Instrumental)",
+        artist = "Lofi Mind",
+        genre = "Lo-Fi",
+        durationMs = 140_000L,
+        waveformJson = "[]",
+        cachedFilePath = null,
+        sourceUri = "soundlapa://resolve-full?artist=Lofi+Mind",
+        coverArtPath = null,
+        accentColorHex = 0xFF10B981L,
+        secondaryColorHex = 0xFF065F46L,
+        isUserUpload = false,
+        isCachedOffline = false,
+        fileSizeBytes = 0L,
+      ),
+      TrackEntity(
+        id = "w_en_rock",
+        title = "Thunder Highway",
+        artist = "Neon Echo",
+        genre = "Рок",
+        durationMs = 210_000L,
+        waveformJson = "[]",
+        cachedFilePath = null,
+        sourceUri = "soundlapa://resolve-full?artist=Neon+Echo",
+        coverArtPath = null,
+        accentColorHex = 0xFFF59E0BL,
+        secondaryColorHex = 0xFF92400EL,
+        isUserUpload = false,
+        isCachedOffline = false,
+        fileSizeBytes = 0L,
+      ),
+    )
+    val history = listOf(
+      ListeningHistoryEntry(
+        trackId = "w_ru_hiphop",
+        title = "Ночной бит",
+        artist = "Miyagi",
+        genre = "Хип-хоп",
+        playCount = 6,
+        lastPlayedAtMs = 10_000L,
+      ),
+    )
+
+    val derived = RecommendationEngine.deriveDefaultWaveConfig(tracks, history, appLanguage = "ru")
+    assertEquals("hiphop", derived.genre)
+    assertEquals("ru", derived.language)
+    assertFalse(derived.hasCustomized)
+
+    val instrumentalQueue = RecommendationEngine.computeWaveTracks(
+      allTracks = tracks,
+      listeningHistory = history,
+      config = com.example.data.local.WaveFilterConfig(
+        genre = "lofi",
+        language = "en",
+        vocals = "instrumental",
+        mood = "chill",
+        hasCustomized = true,
+      ),
+    )
+    assertEquals("w_en_inst", instrumentalQueue.first().id)
+
+    val ruHipHopQueue = RecommendationEngine.computeWaveTracks(
+      allTracks = tracks,
+      listeningHistory = history,
+      config = com.example.data.local.WaveFilterConfig(
+        genre = "hiphop",
+        language = "ru",
+        vocals = "with_vocals",
+        mood = "energetic",
+        hasCustomized = true,
+      ),
+    )
+    assertEquals("w_ru_hiphop", ruHipHopQueue.first().id)
+
+    val verticalStream = com.example.data.remote.ResolvedVideoStream(
+      videoUrl = "https://example.com/clip.mp4",
+      title = "Vertical Clip",
+      durationMs = 30_000L,
+      sourcePageUrl = "https://youtube.com/watch?v=test",
+      width = 1080,
+      height = 1920,
+    )
+    val clampedRatio = (verticalStream.width.toFloat() / verticalStream.height.toFloat()).coerceIn(0.56f, 1.85f)
+    assertTrue(clampedRatio in 0.56f..0.57f)
+  }
 }
+

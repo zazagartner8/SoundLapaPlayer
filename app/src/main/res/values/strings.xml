@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">SoundLapa</string>
+    <string name="app_name">SoundLap</string>
     <string name="tab_home">Главная</string>
     <string name="tab_library">Медиатека</string>
     <string name="upload_own_tracks">Загрузить свои треки</string>
