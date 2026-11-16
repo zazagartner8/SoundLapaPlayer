@@ -1,5 +1,8 @@
 name: Build Android APK
-on: [workflow_dispatch]
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
 
 jobs:
   build:
@@ -10,13 +13,13 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '21'
-     - name: Create missing files and generate keystore
-     run: |
-       touch .env.example
-       touch .env
-       sed -i '/^[[:space:]]*@[[:alpha:]]*Volatile/d' app/src/main/java/com/example/data/remote/AudiusRepository.kt || true
-       keytool -genkeypair -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
-       keytool -list -v -keystore debug.keystore -storepass android -alias androiddebugkey
+      - name: Create missing files and generate keystore
+        run: |
+          touch .env.example
+          touch .env
+          sed -i '/^[[:space:]]*@[[:alpha:]]*Volatile/d' app/src/main/java/com/example/data/remote/AudiusRepository.kt || true
+          keytool -genkeypair -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          keytool -list -v -keystore debug.keystore -storepass android -alias androiddebugkey
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
@@ -26,8 +29,10 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-       - name: Upload Keystore
-     uses: actions/upload-artifact@v4
-     with:
-       name: debug-keystore
-       path: debug.keystore
+          name: SoundLapa-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
+      - name: Upload Keystore
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-keystore
+          path: debug.keystore
