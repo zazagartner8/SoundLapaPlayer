@@ -249,6 +249,7 @@ fun GoogleAuthScreen(
                     Surface(
                         shape = RoundedCornerShape(24.dp),
                         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                        contentColor = MaterialTheme.colorScheme.onSurface,
                         modifier = Modifier
                             .fillMaxWidth()
                             .border(
@@ -283,6 +284,7 @@ fun GoogleAuthScreen(
                     Surface(
                         shape = RoundedCornerShape(20.dp),
                         color = accent.copy(alpha = 0.12f),
+                        contentColor = MaterialTheme.colorScheme.onSurface,
                         modifier = Modifier
                             .fillMaxWidth()
                             .border(
@@ -395,6 +397,9 @@ fun GoogleAuthScreen(
     if (showGuestWarningDialog) {
         AlertDialog(
             onDismissRequest = { showGuestWarningDialog = false },
+            containerColor = MaterialTheme.colorScheme.surface,
+            titleContentColor = MaterialTheme.colorScheme.onSurface,
+            textContentColor = MaterialTheme.colorScheme.onSurface,
             icon = {
                 Icon(
                     imageVector = Icons.Rounded.WarningAmber,

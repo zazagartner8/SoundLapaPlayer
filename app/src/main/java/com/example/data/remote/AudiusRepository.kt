@@ -2,6 +2,7 @@ package com.example.data.remote
 
 import android.content.Context
 import androidx.compose.runtime.Immutable
+import com.example.data.local.ExplicitContentDetector
 import com.example.data.local.PlaylistEntity
 import com.example.data.local.PlaylistTrackCrossRef
 import com.example.data.local.SoundLapaDao
@@ -54,6 +55,7 @@ data class AudiusTrackDto(
     val description: String? = null,
     @SerialName("play_count") val playCount: Int = 0,
     @SerialName("favorite_count") val favoriteCount: Int = 0,
+    @SerialName("is_explicit") val isExplicit: Boolean? = null,
     val artwork: AudiusArtworkDto? = null,
     val user: AudiusUserDto? = null,
 )
@@ -1264,9 +1266,13 @@ class AudiusRepository(
         val artworkUrl = dto.artwork?.large ?: dto.artwork?.medium ?: dto.artwork?.small
         val streamUrl = "https://api.audius.co/v1/tracks/${dto.id}/stream?app_name=$appName"
         val mappedGenre = mapGenreLabel(dto.genre)
+        val trackIdStr = "audius_${dto.id}"
+        if (dto.isExplicit == true) {
+            ExplicitContentDetector.markPreDetectedExplicit(trackIdStr)
+        }
 
         return TrackEntity(
-            id = "audius_${dto.id}",
+            id = trackIdStr,
             title = dto.title,
             artist = dto.user?.name?.takeIf { it.isNotBlank() } ?: dto.user?.handle ?: "Audius Artist",
             genre = mappedGenre,

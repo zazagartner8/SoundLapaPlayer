@@ -13,10 +13,15 @@ import com.example.audio.ImportPreviewMetadata
 import com.example.audio.RecommendationEngine
 import com.example.data.local.ArtistSubscriptionEntity
 import com.example.data.local.AudioFocusMode
+import com.example.data.local.ExplicitContentDetector
+import com.example.data.local.ListeningPlayEvent
+import com.example.data.local.ListeningStatsBackupManager
 import com.example.data.local.LocalBugReport
 import com.example.data.local.PlaylistEntity
+import com.example.data.local.PlaylistMetadataHelper
 import com.example.data.local.PlaylistTrackCrossRef
 import com.example.data.local.PlaylistWithTracks
+import com.example.data.local.SoundLapUidFormatter
 import com.example.data.local.SoundLapaSettings
 import com.example.data.local.TrackEntity
 import com.example.data.local.WaveFilterConfig
@@ -40,6 +45,7 @@ import com.example.data.remote.LyricsRepository
 import com.example.data.remote.NetworkConnectivityObserver
 import com.example.data.remote.ResolvedVideoStream
 import com.example.data.remote.SearchArtistProfile
+import com.example.data.remote.SpotifyCatalogClient
 import com.example.data.remote.artistSubscriptionDocId
 import com.example.data.remote.estimateBugReportBytes
 import com.example.data.remote.estimateUserCloudStorageBytes
@@ -56,6 +62,8 @@ import com.example.ui.components.bitmapToWebpDataUrl
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -72,10 +80,31 @@ import java.util.UUID
 
 enum class SoundLapaTab {
     HOME,
-    WAVE,
     SEARCH,
     LIBRARY,
 }
+
+enum class PlaylistSortMode(val raw: String) {
+    CUSTOM("CUSTOM"),
+    TITLE_ASC("TITLE_ASC"),
+    ADDED_DESC("ADDED_DESC"),
+    DURATION_DESC("DURATION_DESC"),
+    ARTIST_ASC("ARTIST_ASC"),
+    ALBUM_ASC("ALBUM_ASC");
+
+    companion object {
+        fun fromRaw(raw: String?): PlaylistSortMode =
+            entries.find { it.raw.equals(raw?.trim(), ignoreCase = true) } ?: CUSTOM
+    }
+}
+
+@Immutable
+data class StatsBackupUiState(
+    val lastSavedAtMs: Long = 0L,
+    val locationLabel: String = "Downloads/SoundLap/soundlap_stats_backup.json",
+    val isRestoring: Boolean = false,
+    val restoreStatusMessage: String? = null,
+)
 
 @Immutable
 data class WaveUiState(
@@ -139,6 +168,7 @@ data class HomeUiState(
 @Immutable
 data class CloudSyncUiState(
     val userId: String? = null,
+    val accountUid: String? = null,
     val displayName: String? = null,
     val username: String? = null,
     val email: String? = null,
@@ -171,6 +201,7 @@ data class MusicVideoUiState(
     val trackId: String? = null,
     val isVideoModeEnabled: Boolean = false,
     val isLoading: Boolean = false,
+    val isCheckingAvailability: Boolean = false,
     val stream: ResolvedVideoStream? = null,
     val unavailable: Boolean = false,
 )
@@ -245,6 +276,7 @@ data class MainUiState(
     val offlineTracksCount: Int = 0,
     val showOfflineDialog: Boolean = false,
     val offlineDialogTrackTitle: String? = null,
+    val explicitTrackIds: Set<String> = emptySet(),
 )
 
 @Immutable
@@ -289,6 +321,7 @@ class SoundLapaViewModel(
     private val _audiusState = MutableStateFlow(AudiusUiState())
     private val initialCloudState = CloudSyncUiState(
         userId = cloudUserId,
+        accountUid = if (isGuestMode || cloudUserId.isNullOrBlank()) null else SoundLapUidFormatter.format(cloudUserId),
         displayName = if (isGuestMode) {
             null
         } else {
@@ -371,13 +404,26 @@ class SoundLapaViewModel(
     private var reconnectedBannerJob: Job? = null
     private var settingsSyncJob: Job? = null
     private var metricsSyncJob: Job? = null
+    private var activitySyncJob: Job? = null
     private var lyricsJob: Job? = null
     private var musicVideoJob: Job? = null
+    private var musicVideoProbeJob: Job? = null
     private var waveLoadJob: Job? = null
     private var waveRefillJob: Job? = null
 
     private val _waveIsLoading = MutableStateFlow(false)
     private val _waveSessionActive = MutableStateFlow(false)
+    private var statsBackupJob: Job? = null
+    private var explicitPrewarmJob: Job? = null
+    private val checkedUpfrontExplicitIds = java.util.Collections.newSetFromMap(
+        java.util.concurrent.ConcurrentHashMap<String, Boolean>(),
+    )
+    private val _statsBackupState = MutableStateFlow(
+        StatsBackupUiState(
+            lastSavedAtMs = ListeningStatsBackupManager.getLastBackupTimestampMs(app),
+        ),
+    )
+    val statsBackupState: StateFlow<StatsBackupUiState> = _statsBackupState.asStateFlow()
 
     val availableFilters = listOf(
         "Все",
@@ -479,16 +525,10 @@ class SoundLapaViewModel(
     private val recommendationsFlow = combine(
         dao.observeAllTracks(),
         preferences.settings
-            .map { it.listeningHistory to it.searchHistory }
+            .map { Triple(it.listeningHistory, it.listeningEvents, it.searchHistory) }
             .distinctUntilChanged(),
-    ) { tracks, (listeningHistory, searchHistory) ->
+    ) { tracks, (listeningHistory, listeningEvents, searchHistory) ->
         val persistedById = tracks.associateBy { it.id }
-        val recResult = RecommendationEngine.computeRecommendations(
-            allTracks = tracks,
-            listeningHistory = listeningHistory,
-            searchHistory = searchHistory,
-            limit = tracks.size.coerceAtLeast(12),
-        )
         val recentTracks = listeningHistory
             .sortedByDescending { it.lastPlayedAtMs }
             .mapNotNull { entry -> persistedById[entry.trackId] }
@@ -500,12 +540,31 @@ class SoundLapaViewModel(
             searchHistory = searchHistory,
             limit = 6,
         )
+        val quickAndTrendIds = (recentTracks.map { it.id } + trendingCarousel.map { it.id }).toHashSet()
+        val recResult = RecommendationEngine.computeRecommendations(
+            allTracks = tracks,
+            listeningHistory = listeningHistory,
+            searchHistory = searchHistory,
+            limit = 12,
+            listeningEvents = listeningEvents,
+            excludeIds = quickAndTrendIds,
+        )
+        val recommendedTop = recResult.tracks.take(12)
+        val recAndShownIds = quickAndTrendIds + recommendedTop.map { it.id }
+        val forYouTracks = RecommendationEngine.computeForYouTracks(
+            allTracks = tracks,
+            listeningHistory = listeningHistory,
+            listeningEvents = listeningEvents,
+            searchHistory = searchHistory,
+            excludeIds = recAndShownIds,
+            limit = tracks.size.coerceAtLeast(24),
+        )
         RecommendationSnapshot(
             quickPickRows = recentTracks.chunked(2),
             trendingCarousel = trendingCarousel,
-            recommendedTracks = recResult.tracks.take(12),
+            recommendedTracks = recommendedTop,
             recommendationSeedArtists = recResult.topSeedArtists,
-            homeRecTracks = recResult.tracks,
+            homeRecTracks = forYouTracks,
         )
     }.flowOn(Dispatchers.Default)
 
@@ -635,9 +694,38 @@ class SoundLapaViewModel(
         val tracksById = allTracks.associateBy { it.id }
         val refsByPlaylist = refs.groupBy { it.playlistId }
         playlists.map { playlist ->
-            val playlistTracks = refsByPlaylist[playlist.id].orEmpty()
-                .sortedWith(compareBy<PlaylistTrackCrossRef> { it.position }.thenBy { it.addedAt })
-                .mapNotNull { ref -> tracksById[ref.trackId] }
+            val rawRefs = refsByPlaylist[playlist.id].orEmpty()
+            val sortedRefs = when (PlaylistSortMode.fromRaw(playlist.sortMode)) {
+                PlaylistSortMode.CUSTOM ->
+                    rawRefs.sortedWith(compareBy<PlaylistTrackCrossRef> { it.position }.thenBy { it.addedAt })
+                PlaylistSortMode.TITLE_ASC ->
+                    rawRefs.sortedWith(
+                        compareBy<PlaylistTrackCrossRef> {
+                            tracksById[it.trackId]?.title?.lowercase().orEmpty()
+                        }.thenBy { it.position },
+                    )
+                PlaylistSortMode.ADDED_DESC ->
+                    rawRefs.sortedWith(compareByDescending<PlaylistTrackCrossRef> { it.addedAt }.thenBy { it.position })
+                PlaylistSortMode.DURATION_DESC ->
+                    rawRefs.sortedWith(
+                        compareByDescending<PlaylistTrackCrossRef> {
+                            tracksById[it.trackId]?.durationMs ?: 0L
+                        }.thenBy { it.position },
+                    )
+                PlaylistSortMode.ARTIST_ASC ->
+                    rawRefs.sortedWith(
+                        compareBy<PlaylistTrackCrossRef> {
+                            tracksById[it.trackId]?.artist?.lowercase().orEmpty()
+                        }.thenBy { it.position },
+                    )
+                PlaylistSortMode.ALBUM_ASC ->
+                    rawRefs.sortedWith(
+                        compareBy<PlaylistTrackCrossRef> {
+                            (tracksById[it.trackId]?.albumTitle ?: "\uFFFF").lowercase()
+                        }.thenBy { it.position },
+                    )
+            }
+            val playlistTracks = sortedRefs.mapNotNull { ref -> tracksById[ref.trackId] }
             PlaylistWithTracks(playlist = playlist, tracks = playlistTracks)
         }
     }.flowOn(Dispatchers.Default)
@@ -710,6 +798,7 @@ class SoundLapaViewModel(
             offlineTracksCount = offlineCount,
             showOfflineDialog = utility.showOfflineDialog,
             offlineDialogTrackTitle = utility.offlineDialogTrackTitle,
+            explicitTrackIds = settings.explicitTrackIds,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -826,6 +915,15 @@ class SoundLapaViewModel(
                 .distinctUntilChanged()
                 .collect { tracks ->
                     playbackController.updateAvailableTracks(tracks)
+                    val detectedExplicit = kotlinx.coroutines.withContext(Dispatchers.Default) {
+                        tracks.filter { ExplicitContentDetector.isExplicit(it, emptySet()) }.map { it.id }
+                    }
+                    if (detectedExplicit.isNotEmpty()) {
+                        preferences.markTracksExplicit(detectedExplicit)
+                    }
+                    if (!preferences.currentSettings().dataSaverEnabled && networkObserver.refresh()) {
+                        prewarmExplicitBadges(tracks.take(18))
+                    }
                     if (!initialPrefetchDone && tracks.isNotEmpty() && !preferences.currentSettings().dataSaverEnabled) {
                         initialPrefetchDone = true
                         if (networkObserver.refresh()) {
@@ -837,6 +935,73 @@ class SoundLapaViewModel(
                             FullStreamResolver.prefetchTracks(priorityTracks, dao)
                         }
                     }
+                }
+        }
+        // Auto-save listening stats to Downloads/SoundLap/soundlap_stats_backup.json so stats survive uninstall
+        viewModelScope.launch {
+            var initializedStatsBackup = false
+            preferences.settings
+                .map { s ->
+                    Triple(
+                        s.listeningEvents.size,
+                        s.listeningEvents.sumOf { it.listenedMs },
+                        s.listeningHistory.size,
+                    )
+                }
+                .distinctUntilChanged()
+                .collect {
+                    if (initializedStatsBackup || preferences.currentSettings().listeningEvents.isNotEmpty()) {
+                        scheduleStatsAutoBackup()
+                    }
+                    initializedStatsBackup = true
+                }
+        }
+        // Automatically sync search history & listening activity deltas to cloud
+        if (!isGuestMode && cloudRepository != null && !cloudUserId.isNullOrBlank()) {
+            viewModelScope.launch {
+                var initializedActivity = false
+                preferences.settings
+                    .map { it.searchHistory to it.listeningEvents.size }
+                    .distinctUntilChanged()
+                    .collect {
+                        if (initializedActivity) {
+                            scheduleCloudActivitySync()
+                        }
+                        initializedActivity = true
+                    }
+            }
+        }
+        // Keep Settings "Synced: X tracks • Y playlists" in sync live with local library changes
+        viewModelScope.launch {
+            var initializedCounts = false
+            combine(
+                dao.observeAllTracks(),
+                dao.observeAllPlaylists(),
+                dao.observeOrderedPlaylistRefs(),
+            ) { allTracks, playlists, refs ->
+                val referencedIds = refs.mapTo(HashSet()) { it.trackId }
+                val personalCount = allTracks.count { it.isLiked || it.isUserUpload || it.id in referencedIds }
+                personalCount to playlists.size
+            }
+                .flowOn(Dispatchers.Default)
+                .distinctUntilChanged()
+                .collect { (personalCount, playlistsCount) ->
+                    _cloudSyncState.update { state ->
+                        if (state.syncedTracksCount == personalCount &&
+                            state.syncedPlaylistsCount == playlistsCount
+                        ) {
+                            state
+                        } else {
+                            state.copy(
+                                syncedTracksCount = personalCount,
+                                syncedPlaylistsCount = playlistsCount,
+                            )
+                        }
+                    }
+                    if (initializedCounts && !isGuestMode && cloudRepository != null && !cloudUserId.isNullOrBlank()) {
+                        scheduleCloudMetricsSync()
+                    }
+                    initializedCounts = true
                 }
         }
         // Automatically enrich online recommendations when user plays new artists (unless Data Saver is on)
@@ -1193,10 +1358,13 @@ class SoundLapaViewModel(
             preferences.setCustomUsername(resolvedUsername)
         }
         val resolvedEmail = profile.email ?: _cloudSyncState.value.email
+        val resolvedAccountUid = profile.accountUid?.takeIf { it.isNotBlank() }
+            ?: (cloudUserId ?: profile.userId).takeIf { it.isNotBlank() }?.let(SoundLapUidFormatter::format)
         val isVerifiedDev = cloudRepository?.isCurrentUserVerifiedDeveloper() == true ||
             isAllowedDeveloperEmail(resolvedEmail)
         _cloudSyncState.update {
             it.copy(
+                accountUid = resolvedAccountUid ?: it.accountUid,
                 displayName = resolvedName,
                 username = resolvedUsername,
                 photoUrl = resolvedPhoto,
@@ -1206,6 +1374,10 @@ class SoundLapaViewModel(
                 isVerifiedDeveloper = isVerifiedDev,
             )
         }
+        preferences.mergeCloudSearchAndListening(
+            cloudSearchHistory = profile.searchHistory.orEmpty(),
+            cloudEvents = profile.parsedListeningEvents(),
+        )
         val uid = cloudUserId ?: profile.userId
         if (!isGuestMode && uid.isNotBlank()) {
             _socialState.update { current ->
@@ -1385,7 +1557,7 @@ class SoundLapaViewModel(
             if (croppedAvatarBitmap != null) {
                 _cloudSyncState.update { it.copy(isSavingProfile = true, profileStatusMessage = "moderating") }
                 val moderationBitmap = kotlinx.coroutines.withContext(Dispatchers.Default) {
-                    bitmapToModerationBitmap(croppedAvatarBitmap, maxDimPx = 384)
+                    bitmapToModerationBitmap(croppedAvatarBitmap, maxDimPx = 256)
                 }
                 val verdict = try {
                     AvatarModerationService.checkAvatarSafety(moderationBitmap)
@@ -1676,6 +1848,9 @@ class SoundLapaViewModel(
             photoUrl = if (cs.avatarBlocked) null else cs.photoUrl,
             bio = cs.bio,
             avatarBlocked = cs.avatarBlocked,
+            accountUid = cs.accountUid ?: SoundLapUidFormatter.format(uid),
+            searchHistory = s.searchHistory.take(25),
+            listeningStatsJson = CloudUserProfile.encodeListeningEventsForCloud(s.listeningEvents),
             settings = com.example.data.remote.CloudUserSettings.fromSoundLapaSettings(s).toMap(),
         )
     }
@@ -1832,6 +2007,34 @@ class SoundLapaViewModel(
         }
     }
 
+    private fun scheduleCloudActivitySync() {
+        val repo = cloudRepository ?: return
+        val uid = cloudUserId?.takeIf { it.isNotBlank() } ?: return
+        if (isGuestMode) return
+        activitySyncJob?.cancel()
+        activitySyncJob = app.appScope.launch(NonCancellable) {
+            delay(2000L)
+            val s = preferences.currentSettings()
+            repo.syncSearchHistoryAndListeningStats(
+                searchHistory = s.searchHistory,
+                listeningEvents = s.listeningEvents,
+            )
+        }
+    }
+
+    fun syncListeningStatsNow() {
+        val repo = cloudRepository ?: return
+        val uid = cloudUserId?.takeIf { it.isNotBlank() } ?: return
+        if (isGuestMode) return
+        viewModelScope.launch {
+            val s = preferences.currentSettings()
+            repo.syncSearchHistoryAndListeningStats(
+                searchHistory = s.searchHistory,
+                listeningEvents = s.listeningEvents,
+            )
+        }
+    }
+
     fun refreshRecommendations(forceOnline: Boolean = true) {
         if (_isRefreshingRecommendations.value) return
         if (!networkObserver.refresh()) return
@@ -1917,7 +2120,8 @@ class SoundLapaViewModel(
     fun requestOpenDownloadedTracksSection() {
         _showOfflineDialog.value = false
         _offlineDialogTrackTitle.value = null
-        _requestedLibrarySection.value = 2
+        // Tabs: 0=Playlists, 1=Liked, 2=Subscriptions, 3=Downloads, 4=Stats
+        _requestedLibrarySection.value = 3
     }
 
     fun consumeRequestedLibrarySection() {
@@ -1926,7 +2130,11 @@ class SoundLapaViewModel(
 
     fun refreshConnectivity(): Boolean = networkObserver.refresh()
 
-    fun playOrToggleTrack(track: TrackEntity, customQueue: List<TrackEntity>? = null) {
+    fun playOrToggleTrack(
+        track: TrackEntity,
+        customQueue: List<TrackEntity>? = null,
+        contextTitle: String? = null,
+    ) {
         _waveSessionActive.value = false
         val online = networkObserver.refresh()
         if (!online && !isTrackPlayableOffline(track)) {
@@ -1948,7 +2156,7 @@ class SoundLapaViewModel(
                 rawQueue.filter { isTrackPlayableOffline(it) }.ifEmpty { listOf(track) }
             }
             // Dispatch playback immediately without awaiting Room IO so 1 tap starts resolving audio instantly
-            playbackController.playTrack(track, queue)
+            playbackController.playTrack(track, queue, contextTitle = contextTitle)
 
             viewModelScope.launch {
                 audiusRepository.ensureTrackPersisted(track)
@@ -2096,22 +2304,27 @@ class SoundLapaViewModel(
     }
 
     fun playArtistTracks(shuffled: Boolean = false) {
-        val tracks = _artistProfileState.value.tracks
+        val state = _artistProfileState.value
+        val tracks = state.tracks
         if (tracks.isEmpty()) return
         val queue = if (shuffled) tracks.shuffled() else tracks
-        playOrToggleTrack(queue.first(), queue)
+        playOrToggleTrack(queue.first(), queue, contextTitle = state.artistName)
     }
 
-    fun playAlbumTracks(tracks: List<TrackEntity>, startTrack: TrackEntity? = null) {
+    fun playAlbumTracks(
+        tracks: List<TrackEntity>,
+        startTrack: TrackEntity? = null,
+        albumTitle: String? = null,
+    ) {
         if (tracks.isEmpty()) return
         val target = startTrack ?: tracks.first()
-        playOrToggleTrack(target, tracks)
+        playOrToggleTrack(target, tracks, contextTitle = albumTitle ?: target.albumTitle)
     }
 
     fun playPlaylist(playlist: PlaylistWithTracks, shuffled: Boolean = false) {
         if (playlist.tracks.isEmpty()) return
         val queue = if (shuffled) playlist.tracks.shuffled() else playlist.tracks
-        playOrToggleTrack(queue.first(), queue)
+        playOrToggleTrack(queue.first(), queue, contextTitle = playlist.playlist.name)
     }
 
     fun toggleLike(track: TrackEntity) {
@@ -2214,7 +2427,7 @@ class SoundLapaViewModel(
                 else -> playlist.coverArtPath
             }
             val cleanName = newName.trim().ifBlank { playlist.name }
-            val cleanDesc = newDescription.trim()
+            val cleanDesc = PlaylistMetadataHelper.mergeUserEdit(playlist.description, newDescription)
             dao.updatePlaylistMetadata(
                 id = playlist.id,
                 name = cleanName,
@@ -2230,15 +2443,26 @@ class SoundLapaViewModel(
         }
     }
 
-    fun createPlaylist(name: String, description: String = "", initialTrack: TrackEntity? = null) {
+    fun createPlaylist(
+        name: String,
+        description: String = "",
+        coverUri: Uri? = null,
+        initialTrack: TrackEntity? = null,
+    ) {
         val trimmed = name.trim()
         if (trimmed.isEmpty()) return
         viewModelScope.launch {
             val id = "pl_${UUID.randomUUID()}"
+            val savedCoverPath = if (coverUri != null) {
+                cacheManager.saveCustomCover(id, coverUri)
+            } else {
+                null
+            }
             val playlist = PlaylistEntity(
                 id = id,
                 name = trimmed,
                 description = description.trim(),
+                coverArtPath = savedCoverPath,
             )
             dao.upsertPlaylist(playlist)
             if (initialTrack != null) {
@@ -2248,6 +2472,47 @@ class SoundLapaViewModel(
                 cloudRepository?.upsertPlaylistItem(playlist, initialTrack, position = 0, addedAtMs = now)
             } else {
                 cloudRepository?.upsertPlaylist(playlist)
+            }
+        }
+    }
+
+    fun togglePlaylistPinned(playlist: PlaylistEntity) {
+        viewModelScope.launch {
+            val nextPinned = !playlist.isPinned
+            val nextPinnedAt = if (nextPinned) System.currentTimeMillis() else 0L
+            dao.updatePlaylistPin(playlist.id, nextPinned, nextPinnedAt)
+            cloudRepository?.upsertPlaylist(
+                playlist.copy(isPinned = nextPinned, pinnedAtMs = nextPinnedAt),
+            )
+        }
+    }
+
+    fun updatePlaylistSortMode(playlistId: String, sortMode: PlaylistSortMode) {
+        viewModelScope.launch {
+            dao.updatePlaylistSortMode(playlistId, sortMode.raw)
+            dao.getAllPlaylistsOnce().find { it.id == playlistId }?.let { updated ->
+                cloudRepository?.upsertPlaylist(updated)
+            }
+        }
+    }
+
+    fun movePlaylistTrack(playlistId: String, trackId: String, moveUp: Boolean) {
+        viewModelScope.launch {
+            val refs = dao.getPlaylistRefsForPlaylistOnce(playlistId)
+                .sortedWith(compareBy<PlaylistTrackCrossRef> { it.position }.thenBy { it.addedAt })
+                .toMutableList()
+            val idx = refs.indexOfFirst { it.trackId == trackId }
+            if (idx < 0) return@launch
+            val targetIdx = if (moveUp) idx - 1 else idx + 1
+            if (targetIdx !in refs.indices) return@launch
+            val item = refs.removeAt(idx)
+            refs.add(targetIdx, item)
+            dao.replacePlaylistTrackOrder(playlistId, refs)
+            val playlist = dao.getAllPlaylistsOnce().find { it.id == playlistId } ?: return@launch
+            val tracksById = dao.getAllTracksOnce().associateBy { it.id }
+            refs.forEachIndexed { pos, ref ->
+                val tr = tracksById[ref.trackId] ?: return@forEachIndexed
+                cloudRepository?.upsertPlaylistItem(playlist, tr, position = pos, addedAtMs = ref.addedAt)
             }
         }
     }
@@ -2625,8 +2890,13 @@ class SoundLapaViewModel(
                     artist = track.artist,
                     title = track.title,
                     durationMs = track.durationMs,
+                    trackId = track.id,
+                    sourceUri = track.sourceUri,
                 )
             }.getOrNull()
+            if (result != null && result.isExplicit) {
+                preferences.markTracksExplicit(listOf(track.id))
+            }
             if (_lyricsState.value.trackId == track.id) {
                 _lyricsState.value = if (result != null) {
                     LyricsUiState(
@@ -2652,10 +2922,45 @@ class SoundLapaViewModel(
     fun clearMusicVideoForTrackChange(trackId: String?) {
         if (_musicVideoState.value.trackId != trackId) {
             musicVideoJob?.cancel()
+            musicVideoProbeJob?.cancel()
             _musicVideoState.value = MusicVideoUiState(
                 trackId = trackId,
                 isVideoModeEnabled = false,
             )
+        }
+    }
+
+    fun probeMusicVideoAvailability(track: TrackEntity) {
+        val current = _musicVideoState.value
+        if (current.trackId == track.id &&
+            (current.stream != null || current.unavailable || current.isCheckingAvailability || current.isLoading)
+        ) {
+            return
+        }
+        if (preferences.currentSettings().batterySaverEnabled || !networkObserver.refresh()) {
+            return
+        }
+        musicVideoProbeJob?.cancel()
+        val keepVideoMode = current.trackId == track.id && current.isVideoModeEnabled
+        _musicVideoState.value = MusicVideoUiState(
+            trackId = track.id,
+            isVideoModeEnabled = keepVideoMode,
+            isCheckingAvailability = true,
+        )
+        musicVideoProbeJob = viewModelScope.launch {
+            val foundStream = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                runCatching {
+                    FullStreamResolver.findOfficialMusicVideoStream(track.artist, track.title, track.durationMs)
+                }.getOrNull()
+            }
+            val latest = _musicVideoState.value
+            if (latest.trackId == track.id && !latest.isLoading) {
+                _musicVideoState.value = latest.copy(
+                    isCheckingAvailability = false,
+                    stream = foundStream ?: latest.stream,
+                    unavailable = foundStream == null && latest.stream == null,
+                )
+            }
         }
     }
 
@@ -2677,21 +2982,24 @@ class SoundLapaViewModel(
                 it.copy(
                     isVideoModeEnabled = true,
                     isLoading = false,
+                    isCheckingAvailability = false,
                     unavailable = false,
                 )
             }
             return
         }
+        musicVideoProbeJob?.cancel()
         musicVideoJob?.cancel()
         _musicVideoState.value = MusicVideoUiState(
             trackId = track.id,
             isVideoModeEnabled = true,
             isLoading = true,
+            isCheckingAvailability = false,
         )
         musicVideoJob = viewModelScope.launch {
             val stream = kotlinx.coroutines.withContext(Dispatchers.IO) {
                 runCatching {
-                    FullStreamResolver.findOfficialMusicVideoStream(track.artist, track.title)
+                    FullStreamResolver.findOfficialMusicVideoStream(track.artist, track.title, track.durationMs)
                 }.getOrNull()
             }
             if (_musicVideoState.value.trackId == track.id && _musicVideoState.value.isVideoModeEnabled) {
@@ -2700,6 +3008,7 @@ class SoundLapaViewModel(
                         trackId = track.id,
                         isVideoModeEnabled = true,
                         isLoading = false,
+                        isCheckingAvailability = false,
                         stream = stream,
                         unavailable = false,
                     )
@@ -2708,6 +3017,7 @@ class SoundLapaViewModel(
                         trackId = track.id,
                         isVideoModeEnabled = true,
                         isLoading = false,
+                        isCheckingAvailability = false,
                         stream = null,
                         unavailable = true,
                     )
@@ -2800,9 +3110,10 @@ class SoundLapaViewModel(
             limit = 24,
         )
 
+        val waveContextTitle = com.example.ui.i18n.stringsForLanguage(settings.appLanguage).wave.title
         if (startPlayback && localPicked.isNotEmpty()) {
             _waveSessionActive.value = true
-            playbackController.playTrack(localPicked.first(), localPicked)
+            playbackController.playTrack(localPicked.first(), localPicked, contextTitle = waveContextTitle)
         }
 
         if (online && !settings.dataSaverEnabled) {
@@ -2827,7 +3138,7 @@ class SoundLapaViewModel(
                     if (startPlayback) {
                         if (!_waveSessionActive.value && refreshed.isNotEmpty()) {
                             _waveSessionActive.value = true
-                            playbackController.playTrack(refreshed.first(), refreshed)
+                            playbackController.playTrack(refreshed.first(), refreshed, contextTitle = waveContextTitle)
                         } else if (refreshed.isNotEmpty()) {
                             playbackController.appendTracksToQueue(refreshed)
                         }
@@ -3122,6 +3433,92 @@ class SoundLapaViewModel(
 
     fun clearUploadMessage() {
         _uploadState.update { it.copy(statusMessage = null) }
+    }
+
+    private fun scheduleStatsAutoBackup() {
+        statsBackupJob?.cancel()
+        statsBackupJob = app.appScope.launch(NonCancellable) {
+            delay(3500L)
+            val s = preferences.currentSettings()
+            val res = ListeningStatsBackupManager.saveAutoBackup(
+                context = app,
+                events = s.listeningEvents,
+                history = s.listeningHistory,
+            )
+            if (res.success) {
+                _statsBackupState.update {
+                    it.copy(
+                        lastSavedAtMs = res.savedAtMs,
+                        locationLabel = res.locationLabel,
+                    )
+                }
+            }
+        }
+    }
+
+    fun restoreListeningStatsFromUri(uri: Uri) {
+        if (_statsBackupState.value.isRestoring) return
+        viewModelScope.launch {
+            _statsBackupState.update { it.copy(isRestoring = true, restoreStatusMessage = null) }
+            val parsed = ListeningStatsBackupManager.readBackupFromUri(app, uri)
+            if (parsed == null) {
+                _statsBackupState.update {
+                    it.copy(isRestoring = false, restoreStatusMessage = "invalid")
+                }
+                return@launch
+            }
+            val importedCount = preferences.mergeImportedStatsBackup(parsed)
+            val s = preferences.currentSettings()
+            ListeningStatsBackupManager.saveAutoBackup(app, s.listeningEvents, s.listeningHistory)
+            if (!isGuestMode && cloudRepository != null && !cloudUserId.isNullOrBlank()) {
+                cloudRepository.syncSearchHistoryAndListeningStats(
+                    searchHistory = s.searchHistory,
+                    listeningEvents = s.listeningEvents,
+                )
+            }
+            _statsBackupState.update {
+                it.copy(
+                    isRestoring = false,
+                    restoreStatusMessage = "ok:$importedCount",
+                )
+            }
+        }
+    }
+
+    fun clearStatsRestoreStatus() {
+        _statsBackupState.update { it.copy(restoreStatusMessage = null) }
+    }
+
+    fun prewarmExplicitBadges(tracks: List<TrackEntity>) {
+        if (preferences.currentSettings().dataSaverEnabled) return
+        val existingExplicit = preferences.currentSettings().explicitTrackIds
+        val candidates = tracks
+            .filter { track ->
+                track.id !in existingExplicit &&
+                    !ExplicitContentDetector.isExplicit(track, existingExplicit) &&
+                    checkedUpfrontExplicitIds.add(track.id)
+            }
+            .take(8)
+        if (candidates.isEmpty()) return
+        explicitPrewarmJob?.cancel()
+        explicitPrewarmJob = app.appScope.launch(Dispatchers.IO) {
+            val foundIds = candidates.map { track ->
+                async {
+                    val isExp = runCatching {
+                        SpotifyCatalogClient.checkUpfrontExplicitFlag(track.artist, track.title)
+                    }.getOrDefault(false)
+                    if (isExp) {
+                        ExplicitContentDetector.markPreDetectedExplicit(track.id)
+                        track.id
+                    } else {
+                        null
+                    }
+                }
+            }.awaitAll().filterNotNull()
+            if (foundIds.isNotEmpty()) {
+                preferences.markTracksExplicit(foundIds)
+            }
+        }
     }
 
     override fun onCleared() {

@@ -1,9 +1,11 @@
 package com.example.data.remote
 
+import com.example.data.local.ExplicitContentDetector
 import com.example.data.local.TrackEntity
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -59,6 +61,10 @@ object SpotifyCatalogClient {
     private const val TRENDING_CACHE_TTL_MS = 15 * 60 * 1000L
     private val trendingTracksCache = ConcurrentHashMap<String, Pair<Long, List<TrackEntity>>>()
     private val trackArtworkCache = ConcurrentHashMap<String, String>()
+    private val spotifyTrackIdCache = ConcurrentHashMap<String, String>()
+    private val spotifyTrackIdMissCache = ConcurrentHashMap<String, Long>()
+    private val spotify22Regex = Regex("^[A-Za-z0-9]{22}$")
+    private val spotifyTrackUrlRegex = Regex("open\\.spotify\\.com/(?:intl-[a-z]{2}/)?track/([A-Za-z0-9]{22})")
 
     fun findCachedTrackArtwork(artist: String, title: String): String? {
         val titleKey = normalizeToken(title)
@@ -68,6 +74,141 @@ object SpotifyCatalogClient {
             trackArtworkCache["$artistKey|$titleKey"]?.let { return it }
         }
         return trackArtworkCache["*|$titleKey"]
+    }
+
+    fun findSpotifyTrackId(
+        artist: String,
+        title: String,
+        durationMs: Long = 0L,
+        sourceUri: String? = null,
+    ): String? {
+        extractSpotifyIdFromUri(sourceUri)?.takeIf { spotify22Regex.matches(it) }?.let { direct ->
+            if (sourceUri?.contains("track", ignoreCase = true) == true) return direct
+        }
+        val cleanTitle = title.trim()
+        val cleanArtist = artist.split(Regex("\\s*(?:,|&|feat\\.|ft\\.|featuring)\\s*", RegexOption.IGNORE_CASE))
+            .firstOrNull().orEmpty().trim()
+        if (cleanTitle.isBlank()) return null
+
+        val key = "${normalizeToken(cleanArtist)}|${normalizeToken(cleanTitle)}"
+        spotifyTrackIdCache[key]?.let { return it }
+        spotifyTrackIdMissCache[key]?.let { missUntil ->
+            if (System.currentTimeMillis() < missUntil) return null
+            spotifyTrackIdMissCache.remove(key)
+        }
+
+        // 1. If we already have a YouTube/SoundCloud/Apple URL, try Odesli Songlink direct lookup
+        if (!sourceUri.isNullOrBlank() && sourceUri.startsWith("http", ignoreCase = true)) {
+            resolveSpotifyIdViaOdesli(sourceUri)?.let { spId ->
+                spotifyTrackIdCache[key] = spId
+                return spId
+            }
+        }
+
+        // 2. Search iTunes Search API for verified trackViewUrl -> resolve Spotify ID via Odesli
+        val appleUrl = findVerifiedItunesTrackUrl(cleanArtist, cleanTitle, durationMs)
+        if (!appleUrl.isNullOrBlank()) {
+            resolveSpotifyIdViaOdesli(appleUrl)?.let { spId ->
+                spotifyTrackIdCache[key] = spId
+                return spId
+            }
+        }
+
+        spotifyTrackIdMissCache[key] = System.currentTimeMillis() + 10 * 60_000L
+        return null
+    }
+
+    private fun resolveSpotifyIdViaOdesli(platformUrl: String): String? {
+        val enc = runCatching { URLEncoder.encode(platformUrl, "UTF-8") }.getOrNull() ?: return null
+        val body = httpGet(
+            url = "https://api.song.link/v1-alpha.1/links?url=$enc",
+            userAgent = "SoundLap/3.3",
+        ) ?: return null
+        return runCatching {
+            val root = jsonParser.parseToJsonElement(body).jsonObject
+            val links = root["linksByPlatform"]?.jsonObject ?: return@runCatching null
+            val spotifyObj = links["spotify"]?.jsonObject ?: return@runCatching null
+            val spUrl = spotifyObj["url"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            spotifyTrackUrlRegex.find(spUrl)?.groupValues?.get(1)
+                ?: spotifyObj["entityUniqueId"]?.jsonPrimitive?.contentOrNull
+                    ?.substringAfterLast("::")
+                    ?.takeIf { spotify22Regex.matches(it) }
+        }.getOrNull()
+    }
+
+    private fun findVerifiedItunesTrackUrl(
+        artist: String,
+        title: String,
+        durationMs: Long,
+    ): String? {
+        val q = listOf(artist, title).filter { it.isNotBlank() }.joinToString(" ").trim()
+        if (q.isBlank()) return null
+        val enc = runCatching { URLEncoder.encode(q, "UTF-8") }.getOrNull() ?: return null
+        val body = httpGet(
+            url = "https://itunes.apple.com/search?term=$enc&entity=song&limit=6",
+            userAgent = "SoundLap/3.3",
+        ) ?: return null
+        val targetTitle = normalizeToken(title)
+        val targetArtist = normalizeToken(artist)
+        return runCatching {
+            val results = jsonParser.parseToJsonElement(body).jsonObject["results"] as? JsonArray ?: return@runCatching null
+            results.mapNotNull { it as? JsonObject }
+                .mapNotNull { item ->
+                    val trackName = item["trackName"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    val artistName = item["artistName"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                    val viewUrl = item["trackViewUrl"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    val itemDur = item["trackTimeMillis"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 0L
+                    val nTitle = normalizeToken(trackName)
+                    val nArtist = normalizeToken(artistName)
+                    val titleOk = nTitle == targetTitle ||
+                        (targetTitle.length >= 3 && (nTitle.contains(targetTitle) || targetTitle.contains(nTitle)))
+                    if (!titleOk) return@mapNotNull null
+                    val artistOk = targetArtist.isBlank() ||
+                        nArtist == targetArtist ||
+                        nArtist.contains(targetArtist) ||
+                        targetArtist.contains(nArtist)
+                    if (!artistOk) return@mapNotNull null
+                    if (durationMs >= 20_000L && itemDur >= 20_000L && abs(durationMs - itemDur) > 40_000L) {
+                        return@mapNotNull null
+                    }
+                    var s = 0
+                    if (nTitle == targetTitle) s += 100
+                    if (targetArtist.isNotBlank() && nArtist == targetArtist) s += 80
+                    if (durationMs >= 20_000L && itemDur >= 20_000L) {
+                        s -= (abs(durationMs - itemDur) / 1000L).toInt()
+                    }
+                    viewUrl to s
+                }
+                .maxByOrNull { it.second }
+                ?.first
+        }.getOrNull()
+    }
+
+    fun checkUpfrontExplicitFlag(artist: String, title: String): Boolean {
+        val q = listOf(artist.split(",").firstOrNull().orEmpty().trim(), title.trim())
+            .filter { it.isNotBlank() }
+            .joinToString(" ")
+            .trim()
+        if (q.length < 3) return false
+        val enc = runCatching { URLEncoder.encode(q, "UTF-8") }.getOrNull() ?: return false
+        val body = httpGet(
+            url = "https://itunes.apple.com/search?term=$enc&entity=song&limit=4",
+            userAgent = "SoundLap/3.4",
+        ) ?: return false
+        val targetTitle = normalizeToken(title)
+        val targetArtist = normalizeToken(artist.split(",").firstOrNull().orEmpty())
+        return runCatching {
+            val results = jsonParser.parseToJsonElement(body).jsonObject["results"] as? JsonArray
+                ?: return@runCatching false
+            results.mapNotNull { it as? JsonObject }.any { item ->
+                val tName = normalizeToken(item["trackName"]?.jsonPrimitive?.contentOrNull.orEmpty())
+                val aName = normalizeToken(item["artistName"]?.jsonPrimitive?.contentOrNull.orEmpty())
+                val titleMatch = tName == targetTitle || (targetTitle.length >= 4 && (tName.contains(targetTitle) || targetTitle.contains(tName)))
+                val artistMatch = targetArtist.isBlank() || aName == targetArtist || aName.contains(targetArtist) || targetArtist.contains(aName)
+                val isExp = item["trackExplicitness"]?.jsonPrimitive?.contentOrNull.equals("explicit", ignoreCase = true)
+                titleMatch && artistMatch && isExp
+            }
+        }.getOrDefault(false)
     }
 
     private fun cacheTrackArtwork(artist: String, title: String, coverUrl: String?) {
@@ -339,8 +480,16 @@ object SpotifyCatalogClient {
                         ?.get("totalMilliseconds")?.jsonPrimitive?.contentOrNull?.toLongOrNull()
                         ?: 185_000L).coerceAtLeast(30_000L)
 
+                    val isExplicitFlag = ((trackObj["contentRating"] as? JsonObject)
+                        ?.get("label")?.jsonPrimitive?.contentOrNull
+                        ?.equals("EXPLICIT", ignoreCase = true) == true) ||
+                        (trackObj["explicit"]?.jsonPrimitive?.booleanOrNull == true)
+                    val trackIdStr = "sp_$tid"
+                    if (isExplicitFlag) {
+                        ExplicitContentDetector.markPreDetectedExplicit(trackIdStr)
+                    }
                     val draft = TrackEntity(
-                        id = "sp_$tid",
+                        id = trackIdStr,
                         title = title,
                         artist = artistNames.joinToString(", ").ifBlank { artistName },
                         genre = "Поп",
@@ -494,8 +643,14 @@ object SpotifyCatalogClient {
                 val durMs = (obj["duration"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 180_000L)
                     .coerceAtLeast(30_000L)
 
+                val isExplicitFlag = (obj["isExplicit"]?.jsonPrimitive?.booleanOrNull == true) ||
+                    (obj["explicit"]?.jsonPrimitive?.booleanOrNull == true)
+                val trackIdStr = "sp_$tid"
+                if (isExplicitFlag) {
+                    ExplicitContentDetector.markPreDetectedExplicit(trackIdStr)
+                }
                 val draft = TrackEntity(
-                    id = "sp_$tid",
+                    id = trackIdStr,
                     title = title,
                     artist = rawSubtitle,
                     genre = "Поп",

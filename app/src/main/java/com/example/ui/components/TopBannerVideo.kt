@@ -88,20 +88,16 @@ fun TopBannerVideo(
         }
     }
 
-    val scrimColors = remember(isDark, accent, bg) {
-        if (isDark) {
-            listOf(
-                Color(0x2E09080D),
-                Color(0x14110D1B),
-                Color(0x6609080D),
-            )
-        } else {
-            listOf(
-                Color(0x301E1928),
-                Color(0x161A1524),
-                bg.copy(alpha = 0.58f),
-            )
-        }
+    val scrimBrush = remember(isDark, accent, bg) {
+        val topTint = if (isDark) Color(0x2609080D) else Color(0x1C18151D)
+        val midTint = if (isDark) Color(0x0A09080D) else Color(0x0818151D)
+        Brush.verticalGradient(
+            0.0f to topTint,
+            0.42f to midTint,
+            0.70f to bg.copy(alpha = 0.42f),
+            0.88f to bg.copy(alpha = 0.84f),
+            1.0f to bg,
+        )
     }
 
     Box(modifier = modifier) {
@@ -133,9 +129,9 @@ fun TopBannerVideo(
                     .background(
                         Brush.horizontalGradient(
                             listOf(
-                                Color(0xFF151024),
-                                accent.copy(alpha = 0.28f),
-                                Color(0xFF120F1C),
+                                bg,
+                                accent.copy(alpha = if (isDark) 0.28f else 0.18f),
+                                bg,
                             ),
                         ),
                     ),
@@ -145,7 +141,7 @@ fun TopBannerVideo(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Brush.verticalGradient(scrimColors)),
+                .background(scrimBrush),
         )
     }
 }

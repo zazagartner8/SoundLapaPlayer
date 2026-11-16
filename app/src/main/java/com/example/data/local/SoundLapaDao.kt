@@ -84,20 +84,23 @@ interface SoundLapaDao {
 
     // Playlists
     @Transaction
-    @Query("SELECT * FROM playlists ORDER BY createdAt DESC")
+    @Query("SELECT * FROM playlists ORDER BY isPinned DESC, pinnedAtMs DESC, createdAt DESC")
     fun observePlaylistsWithTracks(): Flow<List<PlaylistWithTracks>>
 
-    @Query("SELECT * FROM playlists ORDER BY createdAt DESC")
+    @Query("SELECT * FROM playlists ORDER BY isPinned DESC, pinnedAtMs DESC, createdAt DESC")
     fun observeAllPlaylists(): Flow<List<PlaylistEntity>>
 
     @Query("SELECT * FROM playlist_tracks ORDER BY playlistId ASC, position ASC, addedAt ASC")
     fun observeOrderedPlaylistRefs(): Flow<List<PlaylistTrackCrossRef>>
 
-    @Query("SELECT * FROM playlists ORDER BY createdAt DESC")
+    @Query("SELECT * FROM playlists ORDER BY isPinned DESC, pinnedAtMs DESC, createdAt DESC")
     suspend fun getAllPlaylistsOnce(): List<PlaylistEntity>
 
     @Query("SELECT * FROM playlist_tracks ORDER BY playlistId ASC, position ASC, addedAt ASC")
     suspend fun getAllPlaylistRefsOnce(): List<PlaylistTrackCrossRef>
+
+    @Query("SELECT * FROM playlist_tracks WHERE playlistId = :playlistId ORDER BY position ASC, addedAt ASC")
+    suspend fun getPlaylistRefsForPlaylistOnce(playlistId: String): List<PlaylistTrackCrossRef>
 
     @Query("SELECT COALESCE(MAX(position), -1) FROM playlist_tracks WHERE playlistId = :playlistId")
     suspend fun getMaxPlaylistTrackPosition(playlistId: String): Int
@@ -107,6 +110,12 @@ interface SoundLapaDao {
 
     @Query("UPDATE playlists SET name = :name, description = :description, coverArtPath = :coverArtPath WHERE id = :id")
     suspend fun updatePlaylistMetadata(id: String, name: String, description: String, coverArtPath: String?)
+
+    @Query("UPDATE playlists SET isPinned = :isPinned, pinnedAtMs = :pinnedAtMs WHERE id = :id")
+    suspend fun updatePlaylistPin(id: String, isPinned: Boolean, pinnedAtMs: Long)
+
+    @Query("UPDATE playlists SET sortMode = :sortMode WHERE id = :id")
+    suspend fun updatePlaylistSortMode(id: String, sortMode: String)
 
     @Query("DELETE FROM playlists WHERE id = :playlistId")
     suspend fun deletePlaylist(playlistId: String)
@@ -119,6 +128,16 @@ interface SoundLapaDao {
 
     @Upsert
     suspend fun addTrackToPlaylist(ref: PlaylistTrackCrossRef)
+
+    @Query("UPDATE playlist_tracks SET position = :position WHERE playlistId = :playlistId AND trackId = :trackId")
+    suspend fun updatePlaylistTrackPosition(playlistId: String, trackId: String, position: Int)
+
+    @Transaction
+    suspend fun replacePlaylistTrackOrder(playlistId: String, orderedRefs: List<PlaylistTrackCrossRef>) {
+        orderedRefs.forEachIndexed { idx, ref ->
+            updatePlaylistTrackPosition(playlistId, ref.trackId, idx)
+        }
+    }
 
     @Query("DELETE FROM playlist_tracks WHERE playlistId = :playlistId AND trackId = :trackId")
     suspend fun removeTrackFromPlaylist(playlistId: String, trackId: String)

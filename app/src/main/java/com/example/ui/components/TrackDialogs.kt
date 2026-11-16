@@ -31,6 +31,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AddCircleOutline
 import androidx.compose.material.icons.rounded.Album
+import androidx.compose.material.icons.rounded.ArrowDownward
+import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.AudioFile
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.DeleteOutline
@@ -47,6 +49,7 @@ import androidx.compose.material.icons.rounded.PlaylistPlay
 import androidx.compose.material.icons.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.Sync
+import androidx.compose.material.icons.rounded.UploadFile
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -79,6 +82,7 @@ import androidx.compose.ui.unit.dp
 import androidx.documentfile.provider.DocumentFile
 import coil.compose.AsyncImage
 import com.example.data.local.PlaylistEntity
+import com.example.data.local.PlaylistMetadataHelper
 import com.example.data.local.PlaylistWithTracks
 import com.example.data.local.TrackEntity
 import com.example.ui.MainUiState
@@ -127,6 +131,9 @@ fun EditTrackDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         shape = RoundedCornerShape(28.dp),
+        containerColor = MaterialTheme.colorScheme.surface,
+        titleContentColor = MaterialTheme.colorScheme.onSurface,
+        textContentColor = MaterialTheme.colorScheme.onSurface,
         title = { Text(strings.editTrackTitle) },
         text = {
             Column(
@@ -285,7 +292,9 @@ fun EditPlaylistDialog(
     val strings = LocalAppStrings.current
     val accent = MaterialTheme.colorScheme.primary
     var name by remember(playlist.id) { mutableStateOf(playlist.name) }
-    var description by remember(playlist.id) { mutableStateOf(playlist.description) }
+    var description by remember(playlist.id, playlist.description) {
+        mutableStateOf(PlaylistMetadataHelper.parse(playlist.description).userDescription)
+    }
     var pickedCoverUri by remember(playlist.id) { mutableStateOf<Uri?>(null) }
     var clearCover by remember(playlist.id) { mutableStateOf(false) }
 
@@ -305,6 +314,9 @@ fun EditPlaylistDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         shape = RoundedCornerShape(28.dp),
+        containerColor = MaterialTheme.colorScheme.surface,
+        titleContentColor = MaterialTheme.colorScheme.onSurface,
+        textContentColor = MaterialTheme.colorScheme.onSurface,
         title = { Text(strings.playerV33.editPlaylistTitle) },
         text = {
             Column(
@@ -450,12 +462,17 @@ fun TrackOptionsBottomSheet(
     onLyricsClick: (() -> Unit)? = null,
     onWatchClipClick: (() -> Unit)? = null,
     onShareClick: (() -> Unit)? = null,
+    onMoveUpInPlaylistClick: (() -> Unit)? = null,
+    onMoveDownInPlaylistClick: (() -> Unit)? = null,
+    onRemoveFromPlaylistClick: (() -> Unit)? = null,
 ) {
     val strings = LocalAppStrings.current
     val haptics = rememberSoundLapaHaptics()
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        containerColor = MaterialTheme.colorScheme.surface,
+        contentColor = MaterialTheme.colorScheme.onSurface,
     ) {
         Column(
             modifier = Modifier
@@ -614,6 +631,46 @@ fun TrackOptionsBottomSheet(
                 )
             }
 
+            if (onMoveUpInPlaylistClick != null) {
+                SheetActionRow(
+                    icon = Icons.Rounded.ArrowUpward,
+                    label = strings.v34.moveUpInPlaylistMenu,
+                    onClick = {
+                        haptics.tick()
+                        onDismiss()
+                        onMoveUpInPlaylistClick()
+                    },
+                    testTag = "sheet_move_up_playlist",
+                )
+            }
+
+            if (onMoveDownInPlaylistClick != null) {
+                SheetActionRow(
+                    icon = Icons.Rounded.ArrowDownward,
+                    label = strings.v34.moveDownInPlaylistMenu,
+                    onClick = {
+                        haptics.tick()
+                        onDismiss()
+                        onMoveDownInPlaylistClick()
+                    },
+                    testTag = "sheet_move_down_playlist",
+                )
+            }
+
+            if (onRemoveFromPlaylistClick != null) {
+                SheetActionRow(
+                    icon = Icons.Rounded.DeleteOutline,
+                    label = strings.removeFromPlaylist,
+                    tint = LiquidRose,
+                    onClick = {
+                        haptics.tick()
+                        onDismiss()
+                        onRemoveFromPlaylistClick()
+                    },
+                    testTag = "sheet_remove_from_playlist",
+                )
+            }
+
             if (onDeleteClick != null) {
                 SheetActionRow(
                     icon = Icons.Rounded.DeleteOutline,
@@ -663,7 +720,7 @@ fun AddToPlaylistBottomSheet(
     onDismiss: () -> Unit,
     onSelectPlaylist: (playlistId: String) -> Unit,
     onRemoveFromPlaylist: (playlistId: String) -> Unit,
-    onCreateNewPlaylist: (name: String) -> Unit,
+    onCreateNewPlaylist: (name: String, description: String, coverUri: Uri?) -> Unit,
 ) {
     val strings = LocalAppStrings.current
     val haptics = rememberSoundLapaHaptics()
@@ -672,9 +729,9 @@ fun AddToPlaylistBottomSheet(
     if (showCreateDialog) {
         CreatePlaylistDialog(
             onDismiss = { showCreateDialog = false },
-            onConfirm = { name, _ ->
+            onConfirm = { name, desc, coverUri ->
                 showCreateDialog = false
-                onCreateNewPlaylist(name)
+                onCreateNewPlaylist(name, desc, coverUri)
             },
         )
     }
@@ -682,6 +739,8 @@ fun AddToPlaylistBottomSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        containerColor = MaterialTheme.colorScheme.surface,
+        contentColor = MaterialTheme.colorScheme.onSurface,
     ) {
         Column(
             modifier = Modifier
@@ -792,19 +851,88 @@ fun AddToPlaylistBottomSheet(
 @Composable
 fun CreatePlaylistDialog(
     onDismiss: () -> Unit,
-    onConfirm: (name: String, description: String) -> Unit,
+    onConfirm: (name: String, description: String, coverUri: Uri?) -> Unit,
 ) {
     BackHandler(onBack = onDismiss)
     val strings = LocalAppStrings.current
+    val accent = MaterialTheme.colorScheme.primary
     var name by remember { mutableStateOf("") }
     var description by remember { mutableStateOf("") }
+    var pickedCoverUri by remember { mutableStateOf<Uri?>(null) }
+
+    val coverPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia(),
+    ) { uri ->
+        if (uri != null) {
+            pickedCoverUri = uri
+        }
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         shape = RoundedCornerShape(28.dp),
+        containerColor = MaterialTheme.colorScheme.surface,
+        titleContentColor = MaterialTheme.colorScheme.onSurface,
+        textContentColor = MaterialTheme.colorScheme.onSurface,
         title = { Text(strings.newPlaylistDialogTitle) },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(66.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(accent.copy(alpha = 0.16f))
+                            .clickable {
+                                coverPickerLauncher.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                                )
+                            }
+                            .testTag("create_playlist_cover_preview"),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        if (pickedCoverUri != null) {
+                            AsyncImage(
+                                model = pickedCoverUri,
+                                contentDescription = strings.v34.coverSelectedLabel,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.matchParentSize(),
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Rounded.Image,
+                                contentDescription = strings.v34.pickCoverOptionalButton,
+                                tint = accent,
+                                modifier = Modifier.size(28.dp),
+                            )
+                        }
+                    }
+
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        OutlinedButton(
+                            onClick = {
+                                coverPickerLauncher.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                                )
+                            },
+                            shape = CircleShape,
+                            modifier = Modifier.testTag("create_playlist_pick_cover_button"),
+                        ) {
+                            Icon(Icons.Rounded.Image, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(strings.v34.pickCoverOptionalButton)
+                        }
+                        if (pickedCoverUri != null) {
+                            TextButton(onClick = { pickedCoverUri = null }) {
+                                Text(strings.resetCover, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                }
+
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it },
@@ -827,11 +955,11 @@ fun CreatePlaylistDialog(
         },
         confirmButton = {
             Button(
-                onClick = { onConfirm(name, description) },
+                onClick = { onConfirm(name, description, pickedCoverUri) },
                 enabled = name.isNotBlank(),
                 shape = CircleShape,
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.primary,
+                    containerColor = accent,
                     contentColor = MaterialTheme.colorScheme.onPrimary,
                 ),
                 modifier = Modifier.testTag("confirm_create_playlist_button"),
@@ -842,6 +970,140 @@ fun CreatePlaylistDialog(
         dismissButton = {
             TextButton(onClick = onDismiss) {
                 Text(strings.cancel)
+            }
+        },
+    )
+}
+
+@Composable
+fun ImportPlaylistModalDialog(
+    isImporting: Boolean,
+    statusMessage: String?,
+    onImportFromInput: (String, String?) -> Unit,
+    onImportFromFile: (Uri, String?) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    BackHandler(onBack = onDismiss)
+    val strings = LocalAppStrings.current
+    val haptics = rememberSoundLapaHaptics()
+    val accent = MaterialTheme.colorScheme.primary
+    var importTextInput by remember { mutableStateOf("") }
+    var importPlaylistName by remember { mutableStateOf("") }
+
+    val fileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) {
+            onImportFromFile(uri, importPlaylistName.takeIf { it.isNotBlank() })
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        shape = RoundedCornerShape(28.dp),
+        containerColor = MaterialTheme.colorScheme.surface,
+        titleContentColor = MaterialTheme.colorScheme.onSurface,
+        textContentColor = MaterialTheme.colorScheme.onSurface,
+        title = { Text(strings.v34.importPlaylistDialogTitle) },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(
+                    text = strings.settingsImportHint,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = importTextInput,
+                    onValueChange = { importTextInput = it },
+                    label = { Text(strings.settingsImportInputLabel) },
+                    placeholder = { Text(strings.settingsImportInputPlaceholder) },
+                    minLines = 2,
+                    maxLines = 4,
+                    shape = RoundedCornerShape(18.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("dialog_import_playlist_input"),
+                )
+                OutlinedTextField(
+                    value = importPlaylistName,
+                    onValueChange = { importPlaylistName = it },
+                    label = { Text(strings.settingsImportPlaylistNameLabel) },
+                    placeholder = { Text(strings.settingsImportPlaylistNamePlaceholder) },
+                    singleLine = true,
+                    shape = RoundedCornerShape(18.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("dialog_import_playlist_name"),
+                )
+                statusMessage?.let { msg ->
+                    Text(
+                        text = msg,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (msg.startsWith("✓")) LiquidMint else LiquidRose,
+                    )
+                }
+                OutlinedButton(
+                    onClick = {
+                        haptics.tick()
+                        fileLauncher.launch(
+                            arrayOf(
+                                "text/csv",
+                                "text/comma-separated-values",
+                                "text/tab-separated-values",
+                                "text/plain",
+                                "application/json",
+                                "application/vnd.ms-excel",
+                                "audio/x-mpegurl",
+                                "application/vnd.apple.mpegurl",
+                                "audio/mpegurl",
+                            ),
+                        )
+                    },
+                    enabled = !isImporting,
+                    shape = CircleShape,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("dialog_import_playlist_file_button"),
+                ) {
+                    Icon(Icons.Rounded.UploadFile, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(strings.settingsImportFromFileButton)
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    haptics.confirm()
+                    onImportFromInput(importTextInput, importPlaylistName.takeIf { it.isNotBlank() })
+                },
+                enabled = importTextInput.isNotBlank() && !isImporting,
+                shape = CircleShape,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = accent,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                ),
+                modifier = Modifier.testTag("dialog_import_playlist_submit"),
+            ) {
+                if (isImporting) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onPrimary,
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(strings.settingsImportingLabel)
+                } else {
+                    Text(strings.settingsImportFromLinkButton)
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(strings.close)
             }
         },
     )
@@ -897,6 +1159,8 @@ fun UploadTracksBottomSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        containerColor = MaterialTheme.colorScheme.surface,
+        contentColor = MaterialTheme.colorScheme.onSurface,
     ) {
         Column(
             modifier = Modifier
@@ -1128,6 +1392,9 @@ fun AudiusConnectDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         shape = RoundedCornerShape(28.dp),
+        containerColor = MaterialTheme.colorScheme.surface,
+        titleContentColor = MaterialTheme.colorScheme.onSurface,
+        textContentColor = MaterialTheme.colorScheme.onSurface,
         title = { Text(strings.settingsAudiusSection) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -1206,6 +1473,8 @@ fun QueueBottomSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        containerColor = MaterialTheme.colorScheme.surface,
+        contentColor = MaterialTheme.colorScheme.onSurface,
     ) {
         Column(
             modifier = Modifier

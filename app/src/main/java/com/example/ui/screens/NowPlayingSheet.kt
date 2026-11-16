@@ -4,13 +4,16 @@ import android.view.LayoutInflater
 import androidx.activity.compose.BackHandler
 import androidx.annotation.OptIn
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Canvas
@@ -23,6 +26,7 @@ import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -84,6 +88,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -94,12 +99,19 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
@@ -109,6 +121,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -117,6 +130,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
@@ -125,14 +139,19 @@ import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.example.R
+import com.example.data.local.ExplicitContentDetector
+import com.example.data.local.LocalExplicitTrackIds
 import com.example.data.local.TrackEntity
+import com.example.data.remote.FullStreamResolver
 import com.example.data.remote.LyricsLine
 import com.example.data.remote.ResolvedVideoStream
 import com.example.player.PlaybackUiState
 import com.example.ui.LyricsUiState
 import com.example.ui.MusicVideoUiState
+import com.example.ui.components.ExplicitTrackBadge
 import com.example.ui.components.rememberSoundLapaHaptics
 import com.example.ui.formatDuration
 import com.example.ui.i18n.LocalAppStrings
@@ -155,6 +174,7 @@ fun NowPlayingSheet(
     musicVideoState: MusicVideoUiState = MusicVideoUiState(),
     initialScrollToLyrics: Boolean = false,
     onLoadLyrics: () -> Unit = {},
+    onProbeMusicVideo: () -> Unit = {},
     onSeekToMs: (Long) -> Unit = {},
     onToggleMusicVideoMode: (Boolean) -> Unit = {},
     onCollapse: () -> Unit,
@@ -217,11 +237,102 @@ fun NowPlayingSheet(
 
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
+    val scrollState = rememberScrollState()
     val dragOffsetY = remember { Animatable(0f) }
+    var isBodyNestedDragging by remember { mutableStateOf(false) }
     val dismissThresholdPx = remember(density) { with(density) { 140.dp.toPx() } }
 
     LaunchedEffect(track.id) {
         onLoadLyrics()
+        onProbeMusicVideo()
+    }
+
+    LaunchedEffect(scrollState.isScrollInProgress, isBodyNestedDragging) {
+        if (!scrollState.isScrollInProgress && isBodyNestedDragging && dragOffsetY.value > 0f) {
+            isBodyNestedDragging = false
+            if (dragOffsetY.value > dismissThresholdPx) {
+                haptics.tick()
+                onDragStateChange(false)
+                onCollapse()
+            } else {
+                dragOffsetY.animateTo(
+                    targetValue = 0f,
+                    animationSpec = spring(dampingRatio = 0.82f, stiffness = 420f),
+                )
+                onDragStateChange(false)
+            }
+        }
+    }
+
+    val sheetDismissNestedScroll = remember(dismissThresholdPx) {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (dragOffsetY.value > 0f && available.y != 0f) {
+                    val prev = dragOffsetY.value
+                    val next = (prev + available.y).coerceAtLeast(0f)
+                    isBodyNestedDragging = next > 0f
+                    scope.launch {
+                        dragOffsetY.snapTo(next)
+                        onDragStateChange(next > 4f)
+                    }
+                    return Offset(0f, next - prev)
+                }
+                if (source == NestedScrollSource.UserInput &&
+                    scrollState.value == 0 &&
+                    available.y > 0f
+                ) {
+                    val next = (dragOffsetY.value + available.y).coerceAtLeast(0f)
+                    isBodyNestedDragging = true
+                    scope.launch {
+                        dragOffsetY.snapTo(next)
+                        onDragStateChange(next > 4f)
+                    }
+                    return Offset(0f, available.y)
+                }
+                return Offset.Zero
+            }
+
+            override fun onPostScroll(
+                consumed: Offset,
+                available: Offset,
+                source: NestedScrollSource,
+            ): Offset {
+                if (source == NestedScrollSource.UserInput &&
+                    scrollState.value == 0 &&
+                    available.y > 0f
+                ) {
+                    val next = (dragOffsetY.value + available.y).coerceAtLeast(0f)
+                    isBodyNestedDragging = true
+                    scope.launch {
+                        dragOffsetY.snapTo(next)
+                        onDragStateChange(next > 4f)
+                    }
+                    return Offset(0f, available.y)
+                }
+                return Offset.Zero
+            }
+
+            override suspend fun onPreFling(available: Velocity): Velocity {
+                if (dragOffsetY.value > 0f) {
+                    isBodyNestedDragging = false
+                    val shouldDismiss = dragOffsetY.value > dismissThresholdPx ||
+                        (dragOffsetY.value > 28f && available.y > 800f)
+                    if (shouldDismiss) {
+                        haptics.tick()
+                        onDragStateChange(false)
+                        onCollapse()
+                    } else {
+                        dragOffsetY.animateTo(
+                            targetValue = 0f,
+                            animationSpec = spring(dampingRatio = 0.82f, stiffness = 420f),
+                        )
+                        onDragStateChange(false)
+                    }
+                    return available
+                }
+                return Velocity.Zero
+            }
+        }
     }
 
     DisposableEffect(Unit) {
@@ -259,7 +370,7 @@ fun NowPlayingSheet(
                 modifier = Modifier
                     .fillMaxSize()
                     .widthIn(max = 600.dp)
-                    .padding(start = 22.dp, end = 22.dp, top = 4.dp, bottom = 10.dp),
+                    .padding(start = 18.dp, end = 18.dp, top = 4.dp, bottom = 0.dp),
                 verticalArrangement = Arrangement.SpaceBetween,
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
@@ -346,7 +457,9 @@ fun NowPlayingSheet(
                                 maxLines = 1,
                             )
                             Text(
-                                text = track.albumTitle?.takeIf { it.isNotBlank() } ?: strings.singleReleaseLabel,
+                                text = playback.playbackContextTitle?.takeIf { it.isNotBlank() }
+                                    ?: track.albumTitle?.takeIf { it.isNotBlank() }
+                                    ?: strings.singleReleaseLabel,
                                 style = MaterialTheme.typography.labelLarge,
                                 color = Color.White,
                                 maxLines = 1,
@@ -371,338 +484,404 @@ fun NowPlayingSheet(
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(4.dp))
-
-                    CoverClipModeSwitcher(
-                        isVideoMode = musicVideoState.isVideoModeEnabled,
-                        accent = themeAccent,
-                        onSelectVideoMode = { enable ->
-                            haptics.tick()
-                            onToggleMusicVideoMode(enable)
-                        },
-                    )
+                    val showCoverClipToggle = stream != null ||
+                        (musicVideoState.isVideoModeEnabled && !musicVideoState.unavailable)
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = showCoverClipToggle,
+                        enter = fadeIn(tween(220)) + expandVertically(tween(220)),
+                        exit = fadeOut(tween(180)) + shrinkVertically(tween(180)),
+                        modifier = Modifier
+                            .padding(top = 2.dp, bottom = 4.dp)
+                            .testTag("floating_cover_clip_switcher"),
+                    ) {
+                        CoverClipModeSwitcher(
+                            isVideoMode = musicVideoState.isVideoModeEnabled,
+                            accent = themeAccent,
+                            onSelectVideoMode = { enable ->
+                                haptics.tick()
+                                onToggleMusicVideoMode(enable)
+                            },
+                        )
+                    }
                 }
 
-                // Cover Art / Synced Muted Clip with square -> native clip aspect ratio morph
-                Box(
+                // Scrollable Spotify-style Now Playing Body:
+                // First fold ends slightly above viewport bottom so "Предпросмотр текста" visibly peeks up!
+                BoxWithConstraints(
                     modifier = Modifier
-                        .weight(1f)
                         .fillMaxWidth()
-                        .padding(vertical = 6.dp),
-                    contentAlignment = Alignment.Center,
+                        .weight(1f),
                 ) {
-                    LiquidGlassCard(
-                        modifier = Modifier
-                            .heightIn(max = 276.dp)
-                            .widthIn(max = 348.dp)
-                            .aspectRatio(
-                                ratio = animatedMediaAspect,
-                                matchHeightConstraintsFirst = animatedMediaAspect < 1f,
-                            )
-                            .scale(if (musicVideoState.isVideoModeEnabled) 1f else artworkScale),
-                        shape = RoundedCornerShape(28.dp),
-                        accentTint = accent,
-                        elevation = 18.dp,
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(4.dp)
-                                .clip(RoundedCornerShape(24.dp)),
-                        ) {
-                            TrackCoverArtwork(
-                                track = track,
-                                modifier = Modifier.fillMaxSize(),
-                                cornerRadius = 24.dp,
-                                targetSizePx = 1080,
-                                crossfade = true,
-                            )
+                    val peekReserved = 66.dp
+                    val firstFoldHeight = (maxHeight - peekReserved).coerceAtLeast(440.dp)
+                    val isVideoModeActive = musicVideoState.isVideoModeEnabled && stream != null
 
-                            if (musicVideoState.isVideoModeEnabled) {
-                                when {
-                                    stream != null -> {
-                                        MutedMusicVideoPlayer(
-                                            stream = stream,
-                                            isPlaying = playback.isPlaying,
-                                            positionFlow = positionFlow,
-                                            onAspectRatioResolved = { resolvedRatio ->
-                                                clipAspectRatio = resolvedRatio.coerceIn(0.56f, 1.85f)
-                                            },
-                                            modifier = Modifier.fillMaxSize(),
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .nestedScroll(sheetDismissNestedScroll)
+                            .verticalScroll(scrollState),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = firstFoldHeight)
+                                .padding(top = 2.dp, bottom = 10.dp),
+                            verticalArrangement = Arrangement.SpaceBetween,
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            // Larger Cover Art / Strictly Centered Video Clip between header and controls
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .weight(1f, fill = true)
+                                    .padding(vertical = 4.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                LiquidGlassCard(
+                                    modifier = Modifier
+                                        .heightIn(min = 220.dp, max = 356.dp)
+                                        .widthIn(max = 376.dp)
+                                        .aspectRatio(
+                                            ratio = animatedMediaAspect,
+                                            matchHeightConstraintsFirst = animatedMediaAspect < 1f,
                                         )
-                                    }
-                                    musicVideoState.isLoading -> {
-                                        Box(
-                                            modifier = Modifier
-                                                .fillMaxSize()
-                                                .background(Color.Black.copy(alpha = 0.56f)),
-                                            contentAlignment = Alignment.Center,
-                                        ) {
-                                            Column(
-                                                horizontalAlignment = Alignment.CenterHorizontally,
-                                                verticalArrangement = Arrangement.spacedBy(10.dp),
-                                            ) {
-                                                CircularProgressIndicator(color = Color.White)
-                                                Text(
-                                                    text = strings.playerV33.clipLoadingLabel,
-                                                    style = MaterialTheme.typography.labelLarge,
-                                                    color = Color.White,
-                                                    textAlign = TextAlign.Center,
-                                                    modifier = Modifier.padding(horizontal = 20.dp),
-                                                )
-                                            }
-                                        }
-                                    }
-                                    musicVideoState.unavailable -> {
-                                        Box(
-                                            modifier = Modifier
-                                                .fillMaxSize()
-                                                .background(Color.Black.copy(alpha = 0.56f)),
-                                            contentAlignment = Alignment.Center,
-                                        ) {
-                                            Text(
-                                                text = strings.playerV33.clipUnavailableLabel,
-                                                style = MaterialTheme.typography.bodyMedium,
-                                                color = Color.White.copy(alpha = 0.90f),
-                                                textAlign = TextAlign.Center,
-                                                modifier = Modifier.padding(horizontal = 24.dp),
+                                        .scale(if (musicVideoState.isVideoModeEnabled) 1f else artworkScale),
+                                    shape = RoundedCornerShape(28.dp),
+                                    accentTint = accent,
+                                    elevation = 20.dp,
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .padding(if (isVideoModeActive) 0.dp else 3.dp)
+                                            .clip(RoundedCornerShape(if (isVideoModeActive) 28.dp else 25.dp))
+                                            .background(if (isVideoModeActive) Color(0xFF09080D) else Color.Transparent),
+                                    ) {
+                                        if (!isVideoModeActive) {
+                                            TrackCoverArtwork(
+                                                track = track,
+                                                modifier = Modifier.fillMaxSize(),
+                                                cornerRadius = 25.dp,
+                                                targetSizePx = 1080,
+                                                crossfade = true,
                                             )
+                                        }
+
+                                        if (musicVideoState.isVideoModeEnabled) {
+                                            when {
+                                                stream != null -> {
+                                                    MutedMusicVideoPlayer(
+                                                        stream = stream,
+                                                        trackDurationMs = durationMs,
+                                                        isPlaying = playback.isPlaying,
+                                                        positionFlow = positionFlow,
+                                                        onAspectRatioResolved = { resolvedRatio ->
+                                                            clipAspectRatio = resolvedRatio.coerceIn(0.56f, 1.85f)
+                                                        },
+                                                        modifier = Modifier.fillMaxSize(),
+                                                    )
+                                                }
+                                                musicVideoState.isLoading -> {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .fillMaxSize()
+                                                            .background(Color.Black.copy(alpha = 0.56f)),
+                                                        contentAlignment = Alignment.Center,
+                                                    ) {
+                                                        Column(
+                                                            horizontalAlignment = Alignment.CenterHorizontally,
+                                                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                                                        ) {
+                                                            CircularProgressIndicator(color = Color.White)
+                                                            Text(
+                                                                text = strings.playerV33.clipLoadingLabel,
+                                                                style = MaterialTheme.typography.labelLarge,
+                                                                color = Color.White,
+                                                                textAlign = TextAlign.Center,
+                                                                modifier = Modifier.padding(horizontal = 20.dp),
+                                                            )
+                                                        }
+                                                    }
+                                                }
+                                                musicVideoState.unavailable -> {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .fillMaxSize()
+                                                            .background(Color.Black.copy(alpha = 0.56f)),
+                                                        contentAlignment = Alignment.Center,
+                                                    ) {
+                                                        Text(
+                                                            text = strings.playerV33.clipUnavailableLabel,
+                                                            style = MaterialTheme.typography.bodyMedium,
+                                                            color = Color.White.copy(alpha = 0.90f),
+                                                            textAlign = TextAlign.Center,
+                                                            modifier = Modifier.padding(horizontal = 24.dp),
+                                                        )
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
                             }
-                        }
-                    }
-                }
 
-                // Raised Track Info, Seekbar, Transport Controls, Queue Dock, and Compact Lyrics Card
-                Column(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                    ) {
-                        Column(
-                            modifier = Modifier.weight(1f),
-                            horizontalAlignment = Alignment.Start,
-                            verticalArrangement = Arrangement.spacedBy(2.dp),
-                        ) {
-                            Text(
-                                text = track.title,
-                                style = MaterialTheme.typography.headlineSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = Color.White,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            Row(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .clickable {
-                                        haptics.tick()
-                                        onOpenArtistProfile()
+                            // Spotify-height Track Info, Seekbar, Transport Controls, Queue + Share Dock
+                            Column(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                                val explicitIds = LocalExplicitTrackIds.current
+                                val isExplicitTrack = remember(track.id, track.title, track.albumTitle, track.description, explicitIds) {
+                                    ExplicitContentDetector.isExplicit(track, explicitIds)
+                                }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                ) {
+                                    Column(
+                                        modifier = Modifier.weight(1f),
+                                        horizontalAlignment = Alignment.Start,
+                                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(7.dp),
+                                        ) {
+                                            if (isExplicitTrack) {
+                                                ExplicitTrackBadge(onDarkSurface = true)
+                                            }
+                                            Text(
+                                                text = track.title,
+                                                style = MaterialTheme.typography.headlineSmall,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color.White,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f, fill = false),
+                                            )
+                                        }
+                                        Row(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(10.dp))
+                                                .clickable {
+                                                    haptics.tick()
+                                                    onOpenArtistProfile()
+                                                }
+                                                .padding(top = 2.dp, bottom = 2.dp, end = 4.dp)
+                                                .testTag("player_artist_profile_button"),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(2.dp),
+                                        ) {
+                                            Text(
+                                                text = track.artist,
+                                                style = MaterialTheme.typography.titleMedium,
+                                                color = Color.White.copy(alpha = 0.88f),
+                                                maxLines = 2,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f, fill = false),
+                                            )
+                                            Icon(
+                                                imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                                                contentDescription = strings.artistProfileMenu,
+                                                tint = Color.White.copy(alpha = 0.68f),
+                                                modifier = Modifier.size(18.dp),
+                                            )
+                                        }
                                     }
-                                    .padding(top = 2.dp, bottom = 2.dp, end = 4.dp)
-                                    .testTag("player_artist_profile_button"),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(2.dp),
-                            ) {
-                                Text(
-                                    text = track.artist,
-                                    style = MaterialTheme.typography.titleMedium,
-                                    color = Color.White.copy(alpha = 0.86f),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.weight(1f, fill = false),
+
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                    ) {
+                                        IconButton(
+                                            onClick = {
+                                                haptics.tick()
+                                                onAddToPlaylist()
+                                            },
+                                            modifier = Modifier
+                                                .minimumInteractiveComponentSize()
+                                                .testTag("player_spotify_add_button"),
+                                        ) {
+                                            Icon(
+                                                imageVector = if (isInPlaylist) Icons.Rounded.CheckCircle else Icons.Rounded.AddCircleOutline,
+                                                contentDescription = strings.addToPlaylistMenu,
+                                                tint = if (isInPlaylist) themeAccent else Color.White.copy(alpha = 0.90f),
+                                                modifier = Modifier.size(26.dp),
+                                            )
+                                        }
+
+                                        IconButton(
+                                            onClick = {
+                                                haptics.confirm()
+                                                onToggleLike()
+                                            },
+                                            modifier = Modifier.minimumInteractiveComponentSize(),
+                                        ) {
+                                            Icon(
+                                                imageVector = if (track.isLiked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+                                                contentDescription = stringResource(R.string.cd_like_track),
+                                                tint = if (track.isLiked) themeAccent else Color.White,
+                                                modifier = Modifier.size(26.dp),
+                                            )
+                                        }
+                                    }
+                                }
+
+                                SmoothPlaybackSeekBar(
+                                    trackId = track.id,
+                                    durationMs = durationMs,
+                                    isPlaying = playback.isPlaying,
+                                    positionFlow = positionFlow,
+                                    onSeekFraction = onSeekFraction,
+                                    onTickHaptic = haptics::tick,
                                 )
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
-                                    contentDescription = strings.artistProfileMenu,
-                                    tint = Color.White.copy(alpha = 0.68f),
-                                    modifier = Modifier.size(18.dp),
+
+                                // Compact Spotify-style Transport Controls with custom Spotify Shuffle & Repeat icons
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                ) {
+                                    SpotifyToggleControl(
+                                        active = playback.shuffleEnabled,
+                                        accentColor = themeAccent,
+                                        testTag = "full_player_shuffle",
+                                        onClick = {
+                                            haptics.tick()
+                                            onToggleShuffle()
+                                        },
+                                    ) {
+                                        SpotifyShuffleIcon(
+                                            tint = if (playback.shuffleEnabled) themeAccent else Color.White.copy(alpha = 0.84f),
+                                            contentDescription = stringResource(R.string.cd_shuffle),
+                                            modifier = Modifier.size(22.dp),
+                                        )
+                                    }
+
+                                    IconButton(
+                                        onClick = {
+                                            haptics.tap()
+                                            onPrevious()
+                                        },
+                                        modifier = Modifier
+                                            .size(50.dp)
+                                            .testTag("full_player_previous"),
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.SkipPrevious,
+                                            contentDescription = stringResource(R.string.cd_previous_track),
+                                            tint = Color.White,
+                                            modifier = Modifier.size(36.dp),
+                                        )
+                                    }
+
+                                    Box(
+                                        modifier = Modifier
+                                            .size(66.dp)
+                                            .clip(CircleShape)
+                                            .background(Color.White)
+                                            .border(1.dp, Color.White.copy(alpha = 0.45f), CircleShape)
+                                            .testTag("full_player_play_pause"),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        if (playback.isBuffering) {
+                                            CircularProgressIndicator(
+                                                modifier = Modifier.size(62.dp),
+                                                strokeWidth = 2.5.dp,
+                                                color = themeAccent,
+                                            )
+                                        }
+                                        IconButton(
+                                            onClick = {
+                                                haptics.tap()
+                                                onTogglePlayPause()
+                                            },
+                                            modifier = Modifier.fillMaxSize(),
+                                        ) {
+                                            Icon(
+                                                imageVector = if (playback.isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                                                contentDescription = stringResource(R.string.cd_play_pause),
+                                                tint = Color(0xFF0E0D12),
+                                                modifier = Modifier.size(34.dp),
+                                            )
+                                        }
+                                    }
+
+                                    IconButton(
+                                        onClick = {
+                                            haptics.tap()
+                                            onNext()
+                                        },
+                                        modifier = Modifier
+                                            .size(50.dp)
+                                            .testTag("full_player_next"),
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.SkipNext,
+                                            contentDescription = stringResource(R.string.cd_next_track),
+                                            tint = Color.White,
+                                            modifier = Modifier.size(36.dp),
+                                        )
+                                    }
+
+                                    val repeatActive = playback.repeatMode != Player.REPEAT_MODE_OFF
+                                    SpotifyToggleControl(
+                                        active = repeatActive,
+                                        accentColor = themeAccent,
+                                        testTag = "full_player_repeat",
+                                        onClick = {
+                                            haptics.tick()
+                                            onCycleRepeat()
+                                        },
+                                    ) {
+                                        SpotifyRepeatIcon(
+                                            repeatMode = playback.repeatMode,
+                                            tint = if (repeatActive) themeAccent else Color.White.copy(alpha = 0.84f),
+                                            contentDescription = stringResource(R.string.cd_repeat),
+                                            modifier = Modifier.size(22.dp),
+                                        )
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(10.dp))
+
+                                NowPlayingBottomDock(
+                                    nextTrack = nextTrack,
+                                    queueCount = queueCount,
+                                    onOpenQueue = {
+                                        haptics.tick()
+                                        onOpenQueue()
+                                    },
+                                    onShareTrack = {
+                                        haptics.tick()
+                                        onShareTrack()
+                                    },
                                 )
                             }
                         }
 
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            IconButton(
-                                onClick = {
-                                    haptics.tick()
-                                    onAddToPlaylist()
-                                },
-                                modifier = Modifier
-                                    .minimumInteractiveComponentSize()
-                                    .testTag("player_spotify_add_button"),
-                            ) {
-                                Icon(
-                                    imageVector = if (isInPlaylist) Icons.Rounded.CheckCircle else Icons.Rounded.AddCircleOutline,
-                                    contentDescription = strings.addToPlaylistMenu,
-                                    tint = if (isInPlaylist) themeAccent else Color.White.copy(alpha = 0.90f),
-                                    modifier = Modifier.size(26.dp),
-                                )
-                            }
+                        // Spotify-style Lyrics Preview Card peeking naturally at bottom edge of first fold
+                        Spacer(modifier = Modifier.height(8.dp))
 
-                            IconButton(
-                                onClick = {
-                                    haptics.confirm()
-                                    onToggleLike()
-                                },
-                                modifier = Modifier.minimumInteractiveComponentSize(),
-                            ) {
-                                Icon(
-                                    imageVector = if (track.isLiked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
-                                    contentDescription = stringResource(R.string.cd_like_track),
-                                    tint = if (track.isLiked) themeAccent else Color.White,
-                                    modifier = Modifier.size(26.dp),
-                                )
-                            }
-                        }
-                    }
-
-                    SmoothPlaybackSeekBar(
-                        trackId = track.id,
-                        durationMs = durationMs,
-                        isPlaying = playback.isPlaying,
-                        positionFlow = positionFlow,
-                        onSeekFraction = onSeekFraction,
-                        onTickHaptic = haptics::tick,
-                    )
-
-                    // Spotify-style Transport Controls with custom Spotify Shuffle & Repeat icons
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                    ) {
-                        SpotifyToggleControl(
-                            active = playback.shuffleEnabled,
-                            accentColor = themeAccent,
-                            testTag = "full_player_shuffle",
-                            onClick = {
+                        LyricsPreviewCard(
+                            lyricsState = lyricsState,
+                            positionFlow = positionFlow,
+                            accent = themeAccent,
+                            trackAccent = accent,
+                            onExpand = {
                                 haptics.tick()
-                                onToggleShuffle()
+                                isLyricsExpanded = true
                             },
-                        ) {
-                            SpotifyShuffleIcon(
-                                tint = if (playback.shuffleEnabled) themeAccent else Color.White.copy(alpha = 0.84f),
-                                contentDescription = stringResource(R.string.cd_shuffle),
-                                modifier = Modifier.size(22.dp),
-                            )
-                        }
+                            modifier = Modifier.fillMaxWidth(),
+                        )
 
-                        IconButton(
-                            onClick = {
-                                haptics.tap()
-                                onPrevious()
-                            },
-                            modifier = Modifier
-                                .size(52.dp)
-                                .testTag("full_player_previous"),
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.SkipPrevious,
-                                contentDescription = stringResource(R.string.cd_previous_track),
-                                tint = Color.White,
-                                modifier = Modifier.size(38.dp),
-                            )
-                        }
-
-                        Box(
-                            modifier = Modifier
-                                .size(68.dp)
-                                .clip(CircleShape)
-                                .background(Color.White)
-                                .border(1.dp, Color.White.copy(alpha = 0.4f), CircleShape)
-                                .testTag("full_player_play_pause"),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            if (playback.isBuffering) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(64.dp),
-                                    strokeWidth = 2.5.dp,
-                                    color = themeAccent,
-                                )
-                            }
-                            IconButton(
-                                onClick = {
-                                    haptics.tap()
-                                    onTogglePlayPause()
-                                },
-                                modifier = Modifier.fillMaxSize(),
-                            ) {
-                                Icon(
-                                    imageVector = if (playback.isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                                    contentDescription = stringResource(R.string.cd_play_pause),
-                                    tint = Color(0xFF0E0D12),
-                                    modifier = Modifier.size(36.dp),
-                                )
-                            }
-                        }
-
-                        IconButton(
-                            onClick = {
-                                haptics.tap()
-                                onNext()
-                            },
-                            modifier = Modifier
-                                .size(52.dp)
-                                .testTag("full_player_next"),
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.SkipNext,
-                                contentDescription = stringResource(R.string.cd_next_track),
-                                tint = Color.White,
-                                modifier = Modifier.size(38.dp),
-                            )
-                        }
-
-                        val repeatActive = playback.repeatMode != Player.REPEAT_MODE_OFF
-                        SpotifyToggleControl(
-                            active = repeatActive,
-                            accentColor = themeAccent,
-                            testTag = "full_player_repeat",
-                            onClick = {
-                                haptics.tick()
-                                onCycleRepeat()
-                            },
-                        ) {
-                            SpotifyRepeatIcon(
-                                repeatMode = playback.repeatMode,
-                                tint = if (repeatActive) themeAccent else Color.White.copy(alpha = 0.84f),
-                                contentDescription = stringResource(R.string.cd_repeat),
-                                modifier = Modifier.size(22.dp),
-                            )
-                        }
+                        Spacer(modifier = Modifier.height(26.dp))
                     }
-
-                    NowPlayingBottomDock(
-                        nextTrack = nextTrack,
-                        queueCount = queueCount,
-                        onOpenQueue = {
-                            haptics.tick()
-                            onOpenQueue()
-                        },
-                        onShareTrack = {
-                            haptics.tick()
-                            onShareTrack()
-                        },
-                    )
-
-                    // Compact Spotify-style bottom Lyrics Preview Card with fullscreen expansion
-                    LyricsPreviewCard(
-                        lyricsState = lyricsState,
-                        positionFlow = positionFlow,
-                        accent = themeAccent,
-                        trackAccent = accent,
-                        onExpand = {
-                            haptics.tick()
-                            isLyricsExpanded = true
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
                 }
             }
         }
@@ -902,12 +1081,14 @@ private fun LyricsPreviewCard(
     lyricsState: LyricsUiState,
     positionFlow: StateFlow<Long>,
     accent: Color,
-    trackAccent: Color,
+    @Suppress("UNUSED_PARAMETER") trackAccent: Color,
     onExpand: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val strings = LocalAppStrings.current
     val positionMs by positionFlow.collectAsStateWithLifecycle()
+    val isLightAccent = accent.luminance() > 0.62f
+    val fgColor = if (isLightAccent) Color(0xFF111018) else Color.White
 
     val activeLineIndex = remember(lyricsState.syncedLines, positionMs) {
         val lines = lyricsState.syncedLines
@@ -933,14 +1114,20 @@ private fun LyricsPreviewCard(
 
     Column(
         modifier = modifier
-            .clip(RoundedCornerShape(22.dp))
-            .background(trackAccent.copy(alpha = 0.24f))
-            .background(Color.Black.copy(alpha = 0.34f))
-            .border(1.dp, Color.White.copy(alpha = 0.16f), RoundedCornerShape(22.dp))
+            .clip(RoundedCornerShape(24.dp))
+            .background(
+                Brush.verticalGradient(
+                    colors = listOf(
+                        accent.copy(alpha = 0.78f),
+                        accent.copy(alpha = 0.46f),
+                    ),
+                ),
+            )
+            .background(Color.Black.copy(alpha = if (isLightAccent) 0.08f else 0.24f))
             .clickable(onClick = onExpand)
-            .padding(start = 14.dp, end = 6.dp, top = 8.dp, bottom = 10.dp)
+            .padding(horizontal = 16.dp, vertical = 14.dp)
             .testTag("player_lyrics_preview_card"),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -950,33 +1137,47 @@ private fun LyricsPreviewCard(
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.weight(1f),
             ) {
                 Icon(
                     imageVector = Icons.Rounded.Lyrics,
                     contentDescription = null,
-                    tint = accent,
+                    tint = fgColor,
                     modifier = Modifier.size(18.dp),
                 )
                 Text(
                     text = strings.playerV33.lyricsSectionTitle,
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold,
-                    color = Color.White,
+                    color = fgColor,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
 
-            IconButton(
-                onClick = onExpand,
+            Row(
                 modifier = Modifier
-                    .minimumInteractiveComponentSize()
-                    .size(48.dp)
+                    .clip(CircleShape)
+                    .background(fgColor.copy(alpha = 0.16f))
+                    .clickable(onClick = onExpand)
+                    .padding(horizontal = 12.dp, vertical = 7.dp)
                     .testTag("lyrics_expand_button"),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
             ) {
+                Text(
+                    text = strings.playerV33.showLyricsButton,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = fgColor,
+                    maxLines = 1,
+                    softWrap = false,
+                )
                 Icon(
                     imageVector = Icons.Rounded.OpenInFull,
                     contentDescription = strings.playerV33.lyricsExpandCd,
-                    tint = Color.White.copy(alpha = 0.90f),
-                    modifier = Modifier.size(18.dp),
+                    tint = fgColor.copy(alpha = 0.92f),
+                    modifier = Modifier.size(14.dp),
                 )
             }
         }
@@ -987,14 +1188,14 @@ private fun LyricsPreviewCard(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 CircularProgressIndicator(
-                    color = accent,
+                    color = fgColor,
                     strokeWidth = 2.dp,
                     modifier = Modifier.size(16.dp),
                 )
                 Text(
                     text = previewText,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = Color.White.copy(alpha = 0.85f),
+                    style = MaterialTheme.typography.titleMedium,
+                    color = fgColor.copy(alpha = 0.88f),
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -1002,16 +1203,16 @@ private fun LyricsPreviewCard(
         } else {
             Text(
                 text = previewText,
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.SemiBold,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                lineHeight = 24.sp,
                 color = if (lyricsState.syncedLines.isNotEmpty() || !lyricsState.plainText.isNullOrBlank()) {
-                    Color.White.copy(alpha = 0.94f)
+                    fgColor
                 } else {
-                    Color.White.copy(alpha = 0.65f)
+                    fgColor.copy(alpha = 0.72f)
                 },
-                maxLines = 2,
+                maxLines = 3,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(end = 8.dp),
             )
         }
     }
@@ -1025,7 +1226,7 @@ private fun ExpandedLyricsOverlay(
     lyricsState: LyricsUiState,
     positionFlow: StateFlow<Long>,
     accent: Color,
-    trackAccent: Color,
+    @Suppress("UNUSED_PARAMETER") trackAccent: Color,
     onSeekToMs: (Long) -> Unit,
     onSeekFraction: (Float) -> Unit,
     onTogglePlayPause: () -> Unit,
@@ -1046,15 +1247,28 @@ private fun ExpandedLyricsOverlay(
 
     LaunchedEffect(activeLineIndex) {
         if (activeLineIndex >= 0 && lyricsState.syncedLines.isNotEmpty()) {
-            listState.animateScrollToItem((activeLineIndex - 2).coerceAtLeast(0))
+            val viewportH = listState.layoutInfo.viewportSize.height
+            val focusOffset = if (viewportH > 0) -(viewportH / 3) else -200
+            listState.animateScrollToItem(
+                index = activeLineIndex,
+                scrollOffset = focusOffset,
+            )
         }
     }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xF50B0A10))
-            .background(trackAccent.copy(alpha = 0.22f))
+            .background(Color(0xF60A090F))
+            .background(
+                Brush.verticalGradient(
+                    colors = listOf(
+                        accent.copy(alpha = 0.36f),
+                        accent.copy(alpha = 0.16f),
+                        Color(0x00000000),
+                    ),
+                ),
+            )
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
@@ -1089,8 +1303,8 @@ private fun ExpandedLyricsOverlay(
                     Text(
                         text = track.artist,
                         style = MaterialTheme.typography.bodySmall,
-                        color = Color.White.copy(alpha = 0.72f),
-                        maxLines = 1,
+                        color = Color.White.copy(alpha = 0.78f),
+                        maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
@@ -1147,17 +1361,51 @@ private fun ExpandedLyricsOverlay(
                         LazyColumn(
                             state = listState,
                             modifier = Modifier.fillMaxSize(),
-                            contentPadding = PaddingValues(vertical = 24.dp),
+                            contentPadding = PaddingValues(top = 56.dp, bottom = 84.dp),
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
                             itemsIndexed(lyricsState.syncedLines) { index, line: LyricsLine ->
                                 val isActive = index == activeLineIndex
+                                val distance = abs(index - activeLineIndex)
+                                val targetScale = when {
+                                    isActive -> 1.05f
+                                    distance == 1 -> 0.96f
+                                    else -> 0.92f
+                                }
+                                val animatedScale by animateFloatAsState(
+                                    targetValue = targetScale,
+                                    animationSpec = spring(dampingRatio = 0.72f, stiffness = 340f),
+                                    label = "lyricLineScale_$index",
+                                )
+                                val glowStrength by animateFloatAsState(
+                                    targetValue = if (isActive) 1f else 0f,
+                                    animationSpec = tween(durationMillis = 260),
+                                    label = "lyricGlow_$index",
+                                )
+                                val targetTextColor = when {
+                                    isActive -> Color.White
+                                    index < activeLineIndex -> Color.White.copy(alpha = 0.34f)
+                                    distance == 1 -> Color.White.copy(alpha = 0.64f)
+                                    else -> Color.White.copy(alpha = 0.46f)
+                                }
+                                val animatedTextColor by animateColorAsState(
+                                    targetValue = targetTextColor,
+                                    animationSpec = tween(durationMillis = 240),
+                                    label = "lyricTextColor_$index",
+                                )
+
                                 Box(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .clip(RoundedCornerShape(16.dp))
+                                        .clip(RoundedCornerShape(18.dp))
                                         .background(
-                                            if (isActive) accent.copy(alpha = 0.24f) else Color.Transparent,
+                                            Brush.horizontalGradient(
+                                                colors = listOf(
+                                                    accent.copy(alpha = 0.28f * glowStrength),
+                                                    Color.White.copy(alpha = 0.10f * glowStrength),
+                                                    Color.Transparent,
+                                                ),
+                                            ),
                                         )
                                         .clickable { onSeekToMs(line.timeMs) }
                                         .padding(horizontal = 14.dp, vertical = 12.dp)
@@ -1165,14 +1413,24 @@ private fun ExpandedLyricsOverlay(
                                 ) {
                                     Text(
                                         text = line.text.ifBlank { "♪" },
-                                        style = if (isActive) {
-                                            MaterialTheme.typography.titleLarge
-                                        } else {
-                                            MaterialTheme.typography.titleMedium
+                                        style = MaterialTheme.typography.titleLarge.copy(
+                                            shadow = if (glowStrength > 0.05f) {
+                                                Shadow(
+                                                    color = accent.copy(alpha = 0.68f * glowStrength),
+                                                    blurRadius = 16f * glowStrength,
+                                                )
+                                            } else {
+                                                null
+                                            },
+                                        ),
+                                        lineHeight = 30.sp,
+                                        fontWeight = if (isActive) FontWeight.ExtraBold else FontWeight.SemiBold,
+                                        color = animatedTextColor,
+                                        modifier = Modifier.graphicsLayer {
+                                            transformOrigin = TransformOrigin(0f, 0.5f)
+                                            scaleX = animatedScale
+                                            scaleY = animatedScale
                                         },
-                                        lineHeight = if (isActive) 30.sp else 26.sp,
-                                        fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium,
-                                        color = if (isActive) Color.White else Color.White.copy(alpha = 0.56f),
                                     )
                                 }
                             }
@@ -1427,7 +1685,6 @@ private fun SmoothPlaybackSeekBar(
     }
 }
 
-@kotlin.OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ContinuousPlaybackSlider(
     value: Float,
@@ -1435,51 +1692,16 @@ private fun ContinuousPlaybackSlider(
     onValueChangeFinished: () -> Unit,
 ) {
     val safeValue = if (value.isFinite()) value.coerceIn(0f, 1f) else 0f
+    val primary = MaterialTheme.colorScheme.primary
     Slider(
         value = safeValue,
         onValueChange = onValueChange,
         onValueChangeFinished = onValueChangeFinished,
         colors = SliderDefaults.colors(
-            thumbColor = Color.White,
-            activeTrackColor = Color.White,
+            thumbColor = primary,
+            activeTrackColor = primary,
             inactiveTrackColor = Color.White.copy(alpha = 0.28f),
         ),
-        thumb = {
-            Box(
-                modifier = Modifier
-                    .size(16.dp)
-                    .clip(CircleShape)
-                    .background(Color.White),
-            )
-        },
-        track = { sliderState ->
-            val range = (sliderState.valueRange.endInclusive - sliderState.valueRange.start).coerceAtLeast(0.0001f)
-            val fraction = ((sliderState.value - sliderState.valueRange.start) / range).coerceIn(0f, 1f)
-            Canvas(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(6.dp),
-            ) {
-                val trackHeight = 4.dp.toPx()
-                val top = (size.height - trackHeight) / 2f
-                val corner = CornerRadius(trackHeight / 2f, trackHeight / 2f)
-                drawRoundRect(
-                    color = Color.White.copy(alpha = 0.28f),
-                    topLeft = Offset(0f, top),
-                    size = Size(size.width, trackHeight),
-                    cornerRadius = corner,
-                )
-                val activeWidth = (size.width * fraction).coerceIn(0f, size.width)
-                if (activeWidth > 0f) {
-                    drawRoundRect(
-                        color = Color.White,
-                        topLeft = Offset(0f, top),
-                        size = Size(activeWidth, trackHeight),
-                        cornerRadius = corner,
-                    )
-                }
-            }
-        },
         modifier = Modifier
             .fillMaxWidth()
             .testTag("player_material_slider"),
@@ -1496,8 +1718,8 @@ private fun CoverClipModeSwitcher(
     Row(
         modifier = Modifier
             .clip(CircleShape)
-            .background(Color.White.copy(alpha = 0.12f))
-            .border(1.dp, Color.White.copy(alpha = 0.18f), CircleShape)
+            .background(Color.Black.copy(alpha = 0.52f))
+            .border(1.dp, Color.White.copy(alpha = 0.24f), CircleShape)
             .padding(3.dp),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -1562,6 +1784,7 @@ private fun ModeSegmentPill(
 @Composable
 private fun MutedMusicVideoPlayer(
     stream: ResolvedVideoStream,
+    trackDurationMs: Long,
     isPlaying: Boolean,
     positionFlow: StateFlow<Long>,
     onAspectRatioResolved: (Float) -> Unit,
@@ -1570,17 +1793,20 @@ private fun MutedMusicVideoPlayer(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val audioPositionMs by positionFlow.collectAsStateWithLifecycle()
+    val latestIsPlaying by rememberUpdatedState(isPlaying)
+    val latestTrackDurationMs by rememberUpdatedState(trackDurationMs)
     var firstFrameRendered by remember(stream.videoUrl) { mutableStateOf(false) }
     var lastVideoSeekAtMs by remember(stream.videoUrl) { mutableLongStateOf(0L) }
+    var lastAppliedSpeed by remember(stream.videoUrl) { mutableFloatStateOf(1f) }
     val videoAlpha by animateFloatAsState(
         targetValue = if (firstFrameRendered) 1f else 0f,
-        animationSpec = tween(durationMillis = 220),
+        animationSpec = tween(durationMillis = 200),
         label = "videoFadeIn",
     )
 
     val exoPlayer = remember(stream.videoUrl) {
         val loadControl = DefaultLoadControl.Builder()
-            .setBufferDurationsMs(4_000, 15_000, 150, 400)
+            .setBufferDurationsMs(4_000, 16_000, 120, 320)
             .setPrioritizeTimeOverSizeThresholds(true)
             .build()
         val httpFactory = DefaultHttpDataSource.Factory()
@@ -1601,26 +1827,56 @@ private fun MutedMusicVideoPlayer(
                 setMediaItem(MediaItem.fromUri(stream.videoUrl))
                 repeatMode = Player.REPEAT_MODE_ONE
                 volume = 0f
-                playWhenReady = isPlaying
+                playWhenReady = latestIsPlaying
                 prepare()
             }
     }
 
-    LaunchedEffect(isPlaying, exoPlayer) {
-        exoPlayer.playWhenReady = isPlaying
-        if (isPlaying) exoPlayer.play() else exoPlayer.pause()
-    }
+    fun syncPlayerPositionAndRate(
+        audioPosMs: Long,
+        forceImmediateThresholdMs: Long = 450L,
+    ) {
+        if (exoPlayer.playbackState != Player.STATE_READY) return
+        val clipDurationMs = exoPlayer.duration.takeIf { it > 0L } ?: stream.durationMs
+        if (clipDurationMs <= 0L) return
 
-    LaunchedEffect(audioPositionMs, exoPlayer) {
-        if (exoPlayer.playbackState != Player.STATE_READY) return@LaunchedEffect
-        val duration = exoPlayer.duration
-        if (duration <= 0L) return@LaunchedEffect
-        val target = audioPositionMs.coerceIn(0L, duration)
+        val desiredSpeed = FullStreamResolver.computeSynchronizedVideoPlaybackSpeed(
+            audioDurationMs = latestTrackDurationMs,
+            clipDurationMs = clipDurationMs,
+        )
+        if (abs(desiredSpeed - lastAppliedSpeed) > 0.008f) {
+            lastAppliedSpeed = desiredSpeed
+            exoPlayer.playbackParameters = PlaybackParameters(desiredSpeed)
+        }
+
+        val target = FullStreamResolver.computeSynchronizedVideoPositionMs(
+            audioPositionMs = audioPosMs,
+            audioDurationMs = latestTrackDurationMs,
+            clipDurationMs = clipDurationMs,
+        )
+        val drift = abs(exoPlayer.currentPosition - target)
         val now = System.currentTimeMillis()
-        if (abs(exoPlayer.currentPosition - target) > 1800L && (now - lastVideoSeekAtMs) > 1500L) {
+        val largeJump = drift > 900L
+        if (largeJump || (drift > forceImmediateThresholdMs && (now - lastVideoSeekAtMs) > 400L)) {
             lastVideoSeekAtMs = now
             exoPlayer.seekTo(target)
         }
+    }
+
+    // Strict pause / resume lockstep + instant resync on play state toggle
+    LaunchedEffect(isPlaying, exoPlayer) {
+        exoPlayer.playWhenReady = isPlaying
+        if (isPlaying) {
+            exoPlayer.play()
+        } else {
+            exoPlayer.pause()
+        }
+        syncPlayerPositionAndRate(positionFlow.value, forceImmediateThresholdMs = 180L)
+    }
+
+    LaunchedEffect(audioPositionMs, trackDurationMs, isPlaying, exoPlayer) {
+        if (!isPlaying) return@LaunchedEffect
+        syncPlayerPositionAndRate(audioPositionMs, forceImmediateThresholdMs = 450L)
     }
 
     DisposableEffect(lifecycleOwner, exoPlayer) {
@@ -1632,6 +1888,22 @@ private fun MutedMusicVideoPlayer(
                 }
             }
 
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState == Player.STATE_READY) {
+                    exoPlayer.playWhenReady = latestIsPlaying
+                    if (latestIsPlaying) exoPlayer.play() else exoPlayer.pause()
+                    syncPlayerPositionAndRate(positionFlow.value, forceImmediateThresholdMs = 220L)
+                }
+            }
+
+            override fun onPositionDiscontinuity(
+                oldPosition: Player.PositionInfo,
+                newPosition: Player.PositionInfo,
+                reason: Int,
+            ) {
+                syncPlayerPositionAndRate(positionFlow.value, forceImmediateThresholdMs = 300L)
+            }
+
             override fun onRenderedFirstFrame() {
                 firstFrameRendered = true
             }
@@ -1641,12 +1913,18 @@ private fun MutedMusicVideoPlayer(
         val lifecycleObserver = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_START -> {
-                    if (isPlaying) {
-                        exoPlayer.playWhenReady = true
+                    exoPlayer.playWhenReady = latestIsPlaying
+                    if (latestIsPlaying) {
                         exoPlayer.play()
+                    } else {
+                        exoPlayer.pause()
                     }
+                    syncPlayerPositionAndRate(positionFlow.value, forceImmediateThresholdMs = 200L)
                 }
-                Lifecycle.Event.ON_STOP -> exoPlayer.pause()
+                Lifecycle.Event.ON_STOP -> {
+                    exoPlayer.playWhenReady = false
+                    exoPlayer.pause()
+                }
                 else -> Unit
             }
         }
@@ -1662,10 +1940,14 @@ private fun MutedMusicVideoPlayer(
     AndroidView(
         factory = { ctx ->
             (LayoutInflater.from(ctx).inflate(R.layout.video_player_texture, null, false) as PlayerView).apply {
+                resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
                 player = exoPlayer
             }
         },
         update = { view ->
+            if (view.resizeMode != AspectRatioFrameLayout.RESIZE_MODE_ZOOM) {
+                view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+            }
             if (view.player !== exoPlayer) {
                 view.player = exoPlayer
             }

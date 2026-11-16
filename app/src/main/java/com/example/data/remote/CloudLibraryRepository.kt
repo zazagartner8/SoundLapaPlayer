@@ -109,6 +109,22 @@ class CloudLibraryRepository(
                         CloudUserSettings.fromSoundLapaSettings(localSettings).toMap()
                     else -> cloudSettings.toMap()
                 }
+                val resolvedAccountUid = existing?.accountUid?.takeIf { it.length in 3..32 }
+                    ?: com.example.data.local.SoundLapUidFormatter.format(uid)
+                val mergedSearchHistory = localSettings?.let { ls ->
+                    val combined = ls.searchHistory + existing?.searchHistory.orEmpty()
+                    val seen = HashSet<String>()
+                    combined.map { it.trim() }.filter { it.length >= 2 && seen.add(it.lowercase()) }.take(25)
+                } ?: existing?.searchHistory
+                val mergedEvents = localSettings?.let { ls ->
+                    com.example.data.local.ListeningStatsAggregator.mergeEvents(
+                        local = ls.listeningEvents,
+                        remote = existing?.parsedListeningEvents().orEmpty(),
+                    )
+                }
+                val encodedStatsJson = mergedEvents?.let { CloudUserProfile.encodeListeningEventsForCloud(it) }
+                    ?: existing?.listeningStatsJson
+
                 val merged = CloudUserProfile(
                     docId = snapshot.id,
                     userId = uid,
@@ -118,17 +134,26 @@ class CloudLibraryRepository(
                     photoUrl = resolvedPhoto,
                     bio = resolvedBio,
                     avatarBlocked = isBlocked,
+                    accountUid = resolvedAccountUid,
+                    searchHistory = mergedSearchHistory,
+                    listeningStatsJson = encodedStatsJson,
                     settings = mergedSettingsMap,
                 )
                 val needsCloudWrite = existing?.displayName.isNullOrBlank() ||
+                    existing?.accountUid.isNullOrBlank() ||
                     (existing?.username.isNullOrBlank() && !resolvedUsername.isNullOrBlank()) ||
                     (existing?.email.isNullOrBlank() && !resolvedEmail.isNullOrBlank()) ||
                     (!isBlocked && existing?.photoUrl.isNullOrBlank() && !resolvedPhoto.isNullOrBlank()) ||
                     (isBlocked && (existing?.avatarBlocked != true || !existing?.photoUrl.isNullOrBlank())) ||
-                    (localSettings != null && (cloudSettings == null || localSettings.settingsUpdatedAtMs > cloudSettings.updatedAtMs))
+                    (localSettings != null && (cloudSettings == null || localSettings.settingsUpdatedAtMs > cloudSettings.updatedAtMs)) ||
+                    (mergedSearchHistory != null && mergedSearchHistory != existing?.searchHistory) ||
+                    (encodedStatsJson != null && encodedStatsJson != existing?.listeningStatsJson)
                 if (needsCloudWrite) {
                     val updateMap = merged.toUpdateMap(includeBio = false, includeSettings = mergedSettingsMap != null)
                         .toMutableMap()
+                    updateMap["accountUid"] = resolvedAccountUid
+                    mergedSearchHistory?.let { updateMap["searchHistory"] = it }
+                    encodedStatsJson?.let { updateMap["listeningStatsJson"] = it }
                     if (isBlocked) {
                         updateMap["avatarBlocked"] = true
                         updateMap["photoUrl"] = com.google.firebase.firestore.FieldValue.delete()
@@ -160,6 +185,10 @@ class CloudLibraryRepository(
                     photoUrl = if (isBlocked) null else photoUrl,
                     bio = null,
                     avatarBlocked = isBlocked,
+                    accountUid = com.example.data.local.SoundLapUidFormatter.format(uid),
+                    searchHistory = localSettings?.searchHistory?.take(25),
+                    listeningStatsJson = localSettings?.listeningEvents
+                        ?.let { CloudUserProfile.encodeListeningEventsForCloud(it) },
                     settings = settingsMap,
                 )
                 docRef.set(profile.toCreateMap(uid)).await()
@@ -374,6 +403,49 @@ class CloudLibraryRepository(
                 Result.failure(e)
             }
         }
+
+    suspend fun syncSearchHistoryAndListeningStats(
+        searchHistory: List<String>,
+        listeningEvents: List<com.example.data.local.ListeningPlayEvent>,
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        val uid = try {
+            requireUserId()
+        } catch (e: Exception) {
+            return@withContext Result.failure(e)
+        }
+        val docRef = userDocRef(uid)
+        val cleanHistory = searchHistory.map { it.trim() }.filter { it.length >= 2 }.take(25)
+        val encodedStats = CloudUserProfile.encodeListeningEventsForCloud(listeningEvents)
+        try {
+            val snap = docRef.get().await()
+            if (snap.exists()) {
+                val updateMap = buildMap<String, Any> {
+                    put("accountUid", com.example.data.local.SoundLapUidFormatter.format(uid))
+                    put("searchHistory", cleanHistory)
+                    encodedStats?.let { put("listeningStatsJson", it) }
+                    put("updatedAt", com.google.firebase.firestore.FieldValue.serverTimestamp())
+                }
+                docRef.update(updateMap).await()
+            } else {
+                val profile = CloudUserProfile(
+                    docId = uid,
+                    userId = uid,
+                    displayName = auth.currentUser?.displayName ?: "SoundLap User",
+                    email = auth.currentUser?.email,
+                    accountUid = com.example.data.local.SoundLapUidFormatter.format(uid),
+                    searchHistory = cleanHistory,
+                    listeningStatsJson = encodedStats,
+                )
+                docRef.set(profile.toCreateMap(uid)).await()
+            }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, docRef.path)
+            Result.failure(e)
+        }
+    }
 
     suspend fun submitBugReport(report: CloudBugReport): Result<String> = withContext(Dispatchers.IO) {
         val uid = try {
@@ -1029,11 +1101,14 @@ class CloudLibraryRepository(
             }
 
             var restoredPlaylistsCount = 0
+            val cloudPlaylistsById = cloudPlaylists.associateBy { it.playlistId }
             for (cpl in cloudPlaylists) {
                 val existingPl = localPlaylistsById[cpl.playlistId]
                 if (existingPl == null) {
                     dao.upsertPlaylist(cpl.toLocalPlaylistEntity(null))
                     restoredPlaylistsCount++
+                } else if (cpl.isPinned && !existingPl.isPinned) {
+                    dao.updatePlaylistPin(existingPl.id, true, cpl.pinnedAtMs)
                 }
             }
 
@@ -1081,7 +1156,15 @@ class CloudLibraryRepository(
             val cloudPlaylistIds = cloudPlaylists.mapTo(HashSet()) { it.playlistId }
             var uploadedPlaylistsCount = 0
             for (pl in refreshedPlaylists) {
-                if (pl.id !in cloudPlaylistIds) {
+                val cloudPl = cloudPlaylistsById[pl.id]
+                val needsUpload = pl.id !in cloudPlaylistIds ||
+                    (cloudPl != null && (
+                        cloudPl.isPinned != pl.isPinned ||
+                            cloudPl.sortMode != pl.sortMode ||
+                            cloudPl.name != pl.name ||
+                            cloudPl.description != pl.description
+                        ))
+                if (needsUpload) {
                     if (upsertPlaylist(pl).isSuccess) {
                         uploadedPlaylistsCount++
                     }

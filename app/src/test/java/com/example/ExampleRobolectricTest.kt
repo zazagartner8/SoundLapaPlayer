@@ -44,12 +44,12 @@ class ExampleRobolectricTest {
   }
 
   @Test
-  fun `default theme accent is purple and v3_3 strings are configured`() {
+  fun `default theme accent is purple and v3_4 strings are configured`() {
     assertEquals(0xFF8B5CF6L, SoundLapaSettings().accentColorArgb)
     assertFalse(SoundLapaSettings().isGuestMode)
     assertFalse(SoundLapaSettings().batterySaverEnabled)
     assertEquals(com.example.data.local.AudioFocusMode.PAUSE, SoundLapaSettings().audioFocusMode)
-    assertEquals("3.3", BuildConfig.VERSION_NAME)
+    assertEquals("3.4", BuildConfig.VERSION_NAME)
     assertNotNull(HomeRoute)
 
     val ru = stringsForLanguage("ru")
@@ -57,9 +57,9 @@ class ExampleRobolectricTest {
     assertEquals("Лайкнутые", ru.favoritesTab)
     assertEquals("Загруженные треки", ru.myTracksTab)
     assertEquals("Сингл", ru.singleReleaseLabel)
-    assertTrue(ru.aboutWhatsNewTitle.contains("3.3"))
-    assertTrue(stringsForLanguage("en").aboutWhatsNewTitle.contains("3.3"))
-    assertTrue(stringsForLanguage("it").aboutWhatsNewTitle.contains("3.3"))
+    assertTrue(ru.aboutWhatsNewTitle.contains("3.4"))
+    assertTrue(stringsForLanguage("en").aboutWhatsNewTitle.contains("3.4"))
+    assertTrue(stringsForLanguage("it").aboutWhatsNewTitle.contains("3.4"))
     assertTrue(ru.confirmDeleteTitle.isNotBlank())
     assertTrue(ru.deleteConfirmAction.isNotBlank())
     assertTrue(ru.artistSearchProfileSubtitle.isNotBlank())
@@ -620,7 +620,7 @@ class ExampleRobolectricTest {
   }
 
   @Test
-  fun `v3_3 settings, social, lyrics, and changelog strings are localized cleanly`() {
+  fun `v3_3 and v3_4 settings, social, lyrics, and changelog strings are localized cleanly`() {
     listOf("ru", "en", "it").forEach { lang ->
       val s = stringsForLanguage(lang)
       assertTrue(s.settingsV33.libraryPlaylistTracksCount(5).contains("5"))
@@ -632,8 +632,15 @@ class ExampleRobolectricTest {
       assertTrue(s.playerV33.lyricsSectionTitle.isNotBlank())
       assertTrue(s.social.friendsEntryButton.isNotBlank())
       assertTrue(s.changelog.versions.any { it.version == "v3.3" })
+      assertTrue(s.changelog.versions.any { it.version == "v3.4" })
+      assertTrue(s.v34.subscriptionsTab.isNotBlank())
+      assertTrue(s.v34.pinPlaylistAction.isNotBlank())
+      assertTrue(s.v34.unpinPlaylistAction.isNotBlank())
+      assertTrue(s.v34.statsRestoreButton.isNotBlank())
+      assertTrue(s.v34.customHexLabel.isNotBlank())
+      assertTrue(s.v34.sortLabel.isNotBlank())
     }
-    assertEquals("Кол-ство треков: 7", stringsForLanguage("ru").settingsV33.libraryPlaylistTracksCount(7))
+    assertEquals("Треков: 7", stringsForLanguage("ru").settingsV33.libraryPlaylistTracksCount(7))
   }
 
   @Test
@@ -642,6 +649,16 @@ class ExampleRobolectricTest {
     assertEquals("Light theme", stringsForLanguage("en").settingsLightThemeButton)
     assertEquals("Tema chiaro", stringsForLanguage("it").settingsLightThemeButton)
 
+    assertEquals("Ссылка плейлиста", stringsForLanguage("ru").settingsImportInputLabel)
+    assertEquals("Playlist link", stringsForLanguage("en").settingsImportInputLabel)
+    assertEquals("Link playlist", stringsForLanguage("it").settingsImportInputLabel)
+
+    assertEquals("Предпросмотр текста", stringsForLanguage("ru").playerV33.lyricsSectionTitle)
+    assertEquals("Показать текст", stringsForLanguage("ru").playerV33.showLyricsButton)
+    assertEquals("Lyrics preview", stringsForLanguage("en").playerV33.lyricsSectionTitle)
+    assertEquals("Show lyrics", stringsForLanguage("en").playerV33.showLyricsButton)
+    assertEquals(3, com.example.ui.SoundLapaTab.entries.size)
+
     listOf("ru", "en", "it").forEach { lang ->
       val s = stringsForLanguage(lang)
       assertTrue(s.tabWave.isNotBlank())
@@ -649,11 +666,15 @@ class ExampleRobolectricTest {
       assertTrue(s.wave.moodEnergetic.isNotBlank())
       assertTrue(s.wave.langRussian.isNotBlank())
       assertTrue(s.wave.vocalsInstrumental.isNotBlank())
+      assertTrue(s.playerV33.lyricsSectionTitle.isNotBlank())
+      assertTrue(s.playerV33.showLyricsButton.isNotBlank())
       assertTrue(s.playerV33.lyricsExpandCd.isNotBlank())
       assertTrue(s.playerV33.lyricsCollapseCd.isNotBlank())
       assertTrue(s.settingsV33.moderationAppCheckError.isNotBlank())
       assertTrue(s.settingsV33.moderationNetworkError.isNotBlank())
       assertTrue(s.settingsV33.moderationTimeoutError.isNotBlank())
+      assertTrue(s.settingsImportInputLabel.isNotBlank())
+      assertTrue(s.settingsV33.importTitleFineHint.isNotBlank())
     }
   }
 
@@ -803,6 +824,127 @@ class ExampleRobolectricTest {
     )
     val clampedRatio = (verticalStream.width.toFloat() / verticalStream.height.toFloat()).coerceIn(0.56f, 1.85f)
     assertTrue(clampedRatio in 0.56f..0.57f)
+  }
+
+  @Test
+  fun `listening stats backup manager encodes decodes and merges history cleanly`() {
+    val nowMs = System.currentTimeMillis()
+    val day = com.example.data.local.ListeningStatsAggregator.dayEpochFor(nowMs)
+    val events = listOf(
+      com.example.data.local.ListeningPlayEvent(
+        dayEpoch = day,
+        trackId = "t_backup_1",
+        title = "Kosandra",
+        artist = "Miyagi",
+        genre = "Хип-хоп",
+        listenedMs = 240_000L,
+        playCount = 3,
+        lastPlayedAtMs = nowMs,
+      ),
+    )
+    val history = listOf(
+      ListeningHistoryEntry(
+        trackId = "t_backup_1",
+        title = "Kosandra",
+        artist = "Miyagi",
+        genre = "Хип-хоп",
+        playCount = 3,
+        lastPlayedAtMs = nowMs,
+      ),
+    )
+
+    val jsonStr = com.example.data.local.ListeningStatsBackupManager.encodeBackup(events, history, nowMs)
+    val decoded = com.example.data.local.ListeningStatsBackupManager.decodeBackup(jsonStr)
+    assertNotNull(decoded)
+    assertEquals(1, decoded!!.listeningEvents.size)
+    assertEquals("t_backup_1", decoded.listeningEvents.first().trackId)
+    assertEquals(240_000L, decoded.listeningEvents.first().listenedMs)
+    assertEquals(1, decoded.listeningHistory.size)
+
+    val mergedHistory = com.example.data.local.ListeningStatsBackupManager.mergeHistory(
+      local = history,
+      imported = listOf(
+        history.first().copy(playCount = 7, lastPlayedAtMs = nowMs + 5000L),
+        ListeningHistoryEntry(
+          trackId = "t_backup_2",
+          title = "Minor",
+          artist = "Miyagi",
+          genre = "Хип-хоп",
+          playCount = 2,
+          lastPlayedAtMs = nowMs - 1000L,
+        ),
+      ),
+    )
+    assertEquals(2, mergedHistory.size)
+    assertEquals(7, mergedHistory.first { it.trackId == "t_backup_1" }.playCount)
+  }
+
+  @Test
+  fun `explicit detector pre-marks tracks before lyrics load`() {
+    val uniqueId = "pre_explicit_test_track_991"
+    val cleanTrack = TrackEntity(
+      id = uniqueId,
+      title = "Calm Midnight Walk",
+      artist = "Acoustic Ensemble",
+      genre = "Indie",
+      durationMs = 180_000L,
+      waveformJson = "[]",
+      cachedFilePath = null,
+      sourceUri = null,
+      coverArtPath = null,
+      accentColorHex = 0xFF8B5CF6L,
+      secondaryColorHex = 0xFF5B21B6L,
+      isUserUpload = false,
+      isCachedOffline = false,
+      fileSizeBytes = 0L,
+    )
+    assertFalse(com.example.data.local.ExplicitContentDetector.isPreDetectedExplicit(uniqueId))
+    assertFalse(com.example.data.local.ExplicitContentDetector.isExplicit(cleanTrack))
+
+    com.example.data.local.ExplicitContentDetector.markPreDetectedExplicit(uniqueId)
+    assertTrue(com.example.data.local.ExplicitContentDetector.isPreDetectedExplicit(uniqueId))
+    assertTrue(com.example.data.local.ExplicitContentDetector.isExplicit(cleanTrack))
+  }
+
+  @Test
+  fun `dao persists playlist pin ordering sortMode and custom track reordering`() = runBlocking {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val db = Room.inMemoryDatabaseBuilder(context, SoundLapaDatabase::class.java)
+      .allowMainThreadQueries()
+      .build()
+    try {
+      val dao = db.soundLapaDao()
+      val t1 = TrackEntity(
+        id = "ro_1", title = "A", artist = "X", genre = "Pop", durationMs = 120_000L,
+        waveformJson = "[]", cachedFilePath = null, sourceUri = null, coverArtPath = null,
+        accentColorHex = 0xFF8B5CF6L, secondaryColorHex = 0xFF5B21B6L,
+        isUserUpload = false, isCachedOffline = false, fileSizeBytes = 0L,
+      )
+      val t2 = t1.copy(id = "ro_2", title = "B")
+      dao.upsertTracks(listOf(t1, t2))
+
+      dao.upsertPlaylist(PlaylistEntity(id = "pl_a", name = "Older Unpinned", description = "", createdAt = 100L))
+      dao.upsertPlaylist(PlaylistEntity(id = "pl_b", name = "Newer Pinned", description = "", createdAt = 200L))
+      dao.updatePlaylistPin("pl_a", isPinned = true, pinnedAtMs = 5000L)
+      dao.updatePlaylistSortMode("pl_a", "TITLE")
+
+      val orderedPlaylists = dao.observeAllPlaylists().first()
+      assertEquals(listOf("pl_a", "pl_b"), orderedPlaylists.map { it.id })
+      assertTrue(orderedPlaylists.first().isPinned)
+      assertEquals("TITLE", orderedPlaylists.first().sortMode)
+
+      val ref1 = PlaylistTrackCrossRef(playlistId = "pl_a", trackId = "ro_1", position = 0, addedAt = 100L)
+      val ref2 = PlaylistTrackCrossRef(playlistId = "pl_a", trackId = "ro_2", position = 1, addedAt = 101L)
+      dao.addTrackToPlaylist(ref1)
+      dao.addTrackToPlaylist(ref2)
+
+      dao.replacePlaylistTrackOrder("pl_a", listOf(ref2, ref1))
+      val reorderedRefs = dao.observeOrderedPlaylistRefs().first().filter { it.playlistId == "pl_a" }
+      assertEquals(listOf("ro_2", "ro_1"), reorderedRefs.map { it.trackId })
+      assertEquals(listOf(0, 1), reorderedRefs.map { it.position })
+    } finally {
+      db.close()
+    }
   }
 }
 

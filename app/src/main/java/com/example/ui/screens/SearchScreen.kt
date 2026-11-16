@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -40,6 +41,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -366,7 +368,19 @@ fun SearchScreen(
                         }
                     }
                 } else {
+                    val currentOnPlayTrack by rememberUpdatedState(onPlayTrack)
+                    val currentOnToggleLike by rememberUpdatedState(onToggleLike)
+                    val currentOnOpenTrackOptions by rememberUpdatedState(onOpenTrackOptions)
+                    val currentOnOpenArtistProfile by rememberUpdatedState(onOpenArtistProfile)
+                    val resultsListState = rememberLazyListState()
+                    val firstArtistId = state.searchArtistProfiles.firstOrNull()?.id
+                    LaunchedEffect(trimmedQuery, firstArtistId) {
+                        if (trimmedQuery.isNotBlank() && firstArtistId != null) {
+                            resultsListState.scrollToItem(0)
+                        }
+                    }
                     LazyColumn(
+                        state = resultsListState,
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(bottom = bottomContentPadding),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -376,14 +390,17 @@ fun SearchScreen(
                             key = { "artist_${it.id}" },
                             contentType = { "artist_profile" },
                         ) { profile ->
+                            val onArtistClick = remember(profile) {
+                                {
+                                    haptics.tick()
+                                    focusManager.clearFocus()
+                                    currentOnOpenArtistProfile(profile)
+                                }
+                            }
                             ArtistSearchResultCard(
                                 profile = profile,
                                 subtitle = "${strings.artistSearchProfileSubtitle} • ${profile.sourceLabel}",
-                                onClick = {
-                                    haptics.tick()
-                                    focusManager.clearFocus()
-                                    onOpenArtistProfile(profile)
-                                },
+                                onClick = onArtistClick,
                             )
                         }
 
@@ -393,23 +410,32 @@ fun SearchScreen(
                             contentType = { "track_row" },
                         ) { track ->
                             val isCurrent = state.playback.currentTrackId == track.id
+                            val onPlay = remember(track, state.searchScreenResults) {
+                                {
+                                    haptics.tap()
+                                    focusManager.clearFocus()
+                                    currentOnPlayTrack(track, state.searchScreenResults)
+                                }
+                            }
+                            val onLike = remember(track) {
+                                {
+                                    haptics.confirm()
+                                    currentOnToggleLike(track)
+                                }
+                            }
+                            val onMore = remember(track) {
+                                {
+                                    haptics.tick()
+                                    currentOnOpenTrackOptions(track)
+                                }
+                            }
                             TrackRowItem(
                                 track = track,
                                 isCurrentTrack = isCurrent,
                                 isPlaying = isCurrent && state.playback.isPlaying,
-                                onPlayClick = {
-                                    haptics.tap()
-                                    focusManager.clearFocus()
-                                    onPlayTrack(track, state.searchScreenResults)
-                                },
-                                onLikeClick = {
-                                    haptics.confirm()
-                                    onToggleLike(track)
-                                },
-                                onMoreClick = {
-                                    haptics.tick()
-                                    onOpenTrackOptions(track)
-                                },
+                                onPlayClick = onPlay,
+                                onLikeClick = onLike,
+                                onMoreClick = onMore,
                             )
                         }
                     }

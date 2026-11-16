@@ -69,6 +69,9 @@ service cloud.firestore {
         (!('bio' in data) || (data.bio is string && data.bio.size() <= 300)) &&
         (!('avatarBlocked' in data) || data.avatarBlocked is bool) &&
         (!('avatarBlocked' in data) || !data.avatarBlocked || !('photoUrl' in data)) &&
+        (!('accountUid' in data) || (data.accountUid is string && data.accountUid.size() >= 3 && data.accountUid.size() <= 32)) &&
+        (!('searchHistory' in data) || (data.searchHistory is list && data.searchHistory.size() <= 30)) &&
+        (!('listeningStatsJson' in data) || (data.listeningStatsJson is string && data.listeningStatsJson.size() <= 80000)) &&
         (!('settings' in data) || isValidUserSettings(data.settings));
     }
 
@@ -176,7 +179,8 @@ service cloud.firestore {
         isValidId(userId) &&
         incoming().keys().hasAll(['userId', 'displayName', 'createdAt', 'updatedAt']) &&
         incoming().keys().hasOnly([
-          'userId', 'displayName', 'username', 'email', 'photoUrl', 'bio', 'avatarBlocked', 'settings', 'createdAt', 'updatedAt'
+          'userId', 'displayName', 'username', 'email', 'photoUrl', 'bio', 'avatarBlocked',
+          'accountUid', 'searchHistory', 'listeningStatsJson', 'settings', 'createdAt', 'updatedAt'
         ]) &&
         incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
@@ -190,7 +194,8 @@ service cloud.firestore {
         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
         (!('avatarBlocked' in existing()) || !existing().avatarBlocked || (incoming().avatarBlocked == true && !('photoUrl' in incoming()))) &&
         incoming().diff(existing()).affectedKeys().hasOnly([
-          'displayName', 'username', 'email', 'photoUrl', 'bio', 'avatarBlocked', 'settings', 'updatedAt'
+          'displayName', 'username', 'email', 'photoUrl', 'bio', 'avatarBlocked',
+          'accountUid', 'searchHistory', 'listeningStatsJson', 'settings', 'updatedAt'
         ]);
 
       allow delete: if isOwner(userId) && isValidId(userId);

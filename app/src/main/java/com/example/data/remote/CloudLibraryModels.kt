@@ -1,7 +1,10 @@
 package com.example.data.remote
 
 import android.net.Uri
+import com.example.data.local.ListeningPlayEvent
+import com.example.data.local.ListeningStatsAggregator
 import com.example.data.local.PlaylistEntity
+import com.example.data.local.SoundLapUidFormatter
 import com.example.data.local.TrackEntity
 import com.google.firebase.Timestamp
 import com.google.firebase.firestore.DocumentId
@@ -9,6 +12,8 @@ import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.IgnoreExtraProperties
 import com.google.firebase.firestore.PropertyName
 import com.google.firebase.firestore.ServerTimestamp
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import java.security.MessageDigest
 
 internal fun safeFirestoreDocId(rawId: String): String {
@@ -194,11 +199,22 @@ data class CloudUserProfile(
     val photoUrl: String? = null,
     val bio: String? = null,
     val avatarBlocked: Boolean = false,
+    val accountUid: String? = null,
+    val searchHistory: List<String>? = null,
+    val listeningStatsJson: String? = null,
     val settings: Map<String, Any?>? = null,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null,
 ) {
     fun parsedSettings(): CloudUserSettings? = CloudUserSettings.fromRawMap(settings)
+
+    fun parsedListeningEvents(): List<ListeningPlayEvent> {
+        val raw = listeningStatsJson?.trim().orEmpty()
+        if (raw.isEmpty()) return emptyList()
+        return runCatching {
+            ListeningStatsAggregator.pruneOldEvents(Json.decodeFromString<List<ListeningPlayEvent>>(raw))
+        }.getOrDefault(emptyList())
+    }
 
     fun toCreateMap(uid: String): Map<String, Any> = buildMap {
         put("userId", uid)
@@ -211,6 +227,14 @@ data class CloudUserProfile(
             put("avatarBlocked", true)
         }
         bio?.trim()?.takeIf { it.isNotEmpty() }?.let { put("bio", it.take(180)) }
+        put("accountUid", accountUid?.takeIf { it.length in 3..32 } ?: SoundLapUidFormatter.format(uid))
+        searchHistory?.let { list ->
+            val clean = list.map { it.trim() }.filter { it.length >= 2 }.take(25)
+            put("searchHistory", clean)
+        }
+        listeningStatsJson?.trim()?.takeIf { it.isNotEmpty() && it.length <= 75_000 }?.let {
+            put("listeningStatsJson", it)
+        }
         settings?.let { raw ->
             CloudUserSettings.fromRawMap(raw)?.let { put("settings", it.toMap()) }
         }
@@ -230,10 +254,35 @@ data class CloudUserProfile(
         if (includeBio) {
             put("bio", bio?.trim()?.take(180) ?: "")
         }
+        accountUid?.trim()?.takeIf { it.length in 3..32 }?.let { put("accountUid", it) }
         if (includeSettings) {
             CloudUserSettings.fromRawMap(settings)?.let { put("settings", it.toMap()) }
         }
         put("updatedAt", FieldValue.serverTimestamp())
+    }
+
+    companion object {
+        fun encodeListeningEventsForCloud(events: List<ListeningPlayEvent>): String? {
+            if (events.isEmpty()) return null
+            val pruned = ListeningStatsAggregator.pruneOldEvents(events)
+            if (pruned.isEmpty()) return null
+            // Keep under 75KB so Firestore user doc stays compact alongside settings
+            var count = minOf(pruned.size, 260)
+            while (count > 0) {
+                val slice = pruned.take(count).map { ev ->
+                    ev.copy(
+                        title = ev.title.take(80),
+                        artist = ev.artist.take(80),
+                        genre = ev.genre.take(32),
+                        coverArtPath = null, // Keep cloud JSON super compact
+                    )
+                }
+                val encoded = Json.encodeToString(slice)
+                if (encoded.length <= 75_000) return encoded
+                count = (count * 2) / 3
+            }
+            return null
+        }
     }
 }
 
@@ -384,7 +433,7 @@ data class CloudBugReport(
         put("reporterName", reporterName.trim().ifBlank { "SoundLap User" }.take(64))
         reporterAvatarUrl?.trim()?.takeIf { it.isNotEmpty() }?.let { put("reporterAvatarUrl", it.take(MAX_CLOUD_AVATAR_LEN)) }
         put("message", message.trim().ifBlank { "Bug report" }.take(1000))
-        put("appVersion", appVersion.trim().ifBlank { "3.3" }.take(32))
+        put("appVersion", appVersion.trim().ifBlank { "3.4" }.take(32))
         put("devAccessKey", DEVELOPER_REPORTS_PASSWORD)
         put("createdAtMs", createdAtMs.coerceAtLeast(0L))
         put("createdAt", FieldValue.serverTimestamp())
@@ -522,6 +571,11 @@ data class CloudUserPlaylist(
     val name: String = "",
     val description: String? = null,
     val coverArtPath: String? = null,
+    @get:PropertyName("isPinned")
+    @set:PropertyName("isPinned")
+    var isPinned: Boolean = false,
+    val pinnedAtMs: Long = 0L,
+    val sortMode: String = "CUSTOM",
     val playlistCreatedAtMs: Long = 0L,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null,
@@ -532,6 +586,9 @@ data class CloudUserPlaylist(
         put("name", name.trim().ifBlank { "Playlist" }.take(100))
         description?.trim()?.takeIf { it.isNotEmpty() }?.let { put("description", it.take(160)) }
         compactCloudUrl(coverArtPath, 320)?.let { put("coverArtPath", it) }
+        put("isPinned", isPinned)
+        put("pinnedAtMs", pinnedAtMs.coerceAtLeast(0L))
+        put("sortMode", sortMode.trim().ifBlank { "CUSTOM" }.take(24))
         put("playlistCreatedAtMs", playlistCreatedAtMs.coerceAtLeast(0L))
         put("createdAt", FieldValue.serverTimestamp())
         put("updatedAt", FieldValue.serverTimestamp())
@@ -541,6 +598,9 @@ data class CloudUserPlaylist(
         put("name", name.trim().ifBlank { "Playlist" }.take(100))
         description?.trim()?.takeIf { it.isNotEmpty() }?.let { put("description", it.take(160)) }
         compactCloudUrl(coverArtPath, 320)?.let { put("coverArtPath", it) }
+        put("isPinned", isPinned)
+        put("pinnedAtMs", pinnedAtMs.coerceAtLeast(0L))
+        put("sortMode", sortMode.trim().ifBlank { "CUSTOM" }.take(24))
         put("playlistCreatedAtMs", playlistCreatedAtMs.coerceAtLeast(0L))
         put("updatedAt", FieldValue.serverTimestamp())
     }
@@ -555,6 +615,9 @@ data class CloudUserPlaylist(
             description = description ?: existing?.description ?: "",
             createdAt = if (playlistCreatedAtMs > 0L) playlistCreatedAtMs else (existing?.createdAt ?: System.currentTimeMillis()),
             coverArtPath = localCover ?: coverArtPath ?: existing?.coverArtPath,
+            isPinned = isPinned || (existing?.isPinned == true),
+            pinnedAtMs = maxOf(pinnedAtMs, existing?.pinnedAtMs ?: 0L),
+            sortMode = sortMode.ifBlank { existing?.sortMode ?: "CUSTOM" },
         )
     }
 
@@ -565,6 +628,9 @@ data class CloudUserPlaylist(
             name = playlist.name.trim().ifBlank { "Playlist" }.take(100),
             description = playlist.description.trim().takeIf { it.isNotEmpty() }?.take(160),
             coverArtPath = sanitizeCloudCoverArt(playlist.coverArtPath),
+            isPinned = playlist.isPinned,
+            pinnedAtMs = playlist.pinnedAtMs,
+            sortMode = playlist.sortMode,
             playlistCreatedAtMs = playlist.createdAt.coerceAtLeast(0L),
         )
     }

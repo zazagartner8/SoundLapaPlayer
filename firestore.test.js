@@ -201,6 +201,9 @@ test("User profile supports custom bio, compressed avatar data URI, and synced s
       displayName: "SoundLap Pro",
       bio: "Basshead & producer",
       photoUrl: "data:image/jpeg;base64,/9j/4AAQSkZJRg==",
+      accountUid: "SL-ABCD-1234",
+      searchHistory: ["miyagi", "kurokov"],
+      listeningStatsJson: "[{\"dayEpoch\":20000,\"trackId\":\"t1\",\"title\":\"Test\",\"artist\":\"Artist\",\"listenedMs\":120000,\"playCount\":2,\"lastPlayedAtMs\":1700000000000}]",
       settings: {
         appLanguage: "ru",
         darkLiquidGlass: true,
@@ -216,6 +219,14 @@ test("User profile supports custom bio, compressed avatar data URI, and synced s
         audioFocusMode: "MIX",
         updatedAtMs: 1700000000000,
       },
+    })
+  );
+
+  // Rejects oversized searchHistory (>30 items)
+  await assertFails(
+    aliceDoc.update({
+      searchHistory: Array.from({ length: 31 }, (_, i) => `q${i}`),
+      updatedAt: ts(),
     })
   );
 

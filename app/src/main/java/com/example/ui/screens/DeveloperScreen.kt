@@ -715,6 +715,7 @@ fun DeveloperScreen(
                             Surface(
                                 shape = RoundedCornerShape(20.dp),
                                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                                contentColor = MaterialTheme.colorScheme.onSurface,
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .border(
@@ -802,6 +803,9 @@ fun DeveloperScreen(
     pendingDeleteReport?.let { targetReport ->
         AlertDialog(
             onDismissRequest = { pendingDeleteReport = null },
+            containerColor = MaterialTheme.colorScheme.surface,
+            titleContentColor = MaterialTheme.colorScheme.onSurface,
+            textContentColor = MaterialTheme.colorScheme.onSurface,
             title = { Text(strings.developerDeleteReportConfirmTitle) },
             text = { Text(strings.developerDeleteReportConfirmMessage) },
             confirmButton = {

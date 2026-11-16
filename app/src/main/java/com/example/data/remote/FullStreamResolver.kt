@@ -2,6 +2,7 @@ package com.example.data.remote
 
 import android.net.Uri
 import androidx.compose.runtime.Immutable
+import com.example.data.local.ExplicitContentDetector
 import com.example.data.local.SoundLapaDao
 import com.example.data.local.TrackEntity
 import kotlinx.coroutines.CoroutineScope
@@ -205,6 +206,7 @@ object FullStreamResolver {
 
     private val streamCache = ConcurrentHashMap<String, CachedStreamEntry>()
     private val musicVideoCache = ConcurrentHashMap<String, CachedVideoEntry>()
+    private val musicVideoMissCache = ConcurrentHashMap<String, Long>()
     private val forceProbeKeys = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
     private val inFlightResolutions = ConcurrentHashMap<String, CompletableFuture<ResolvedAudioStream?>>()
     private val scArtworkCache = ConcurrentHashMap<String, String>()
@@ -238,6 +240,7 @@ object FullStreamResolver {
     fun clearStreamCache() {
         streamCache.clear()
         musicVideoCache.clear()
+        musicVideoMissCache.clear()
         forceProbeKeys.clear()
     }
 
@@ -915,6 +918,12 @@ object FullStreamResolver {
             val genre = obj["genre"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotBlank() }
                 ?: inferGenre(title, uploader)
             val stableId = "sc_${abs(permalink.hashCode())}"
+            val isExplicitMeta = ((obj["publisher_metadata"] as? JsonObject)
+                ?.get("explicit")?.jsonPrimitive?.booleanOrNull == true) ||
+                (obj["tag_list"]?.jsonPrimitive?.contentOrNull?.contains("explicit", ignoreCase = true) == true)
+            if (isExplicitMeta) {
+                ExplicitContentDetector.markPreDetectedExplicit(stableId)
+            }
             val (accent, secondary) = paletteForSeed(stableId)
 
             TrackEntity(
@@ -1283,6 +1292,52 @@ object FullStreamResolver {
         }
     }
 
+    fun transliterateToLatin(input: String): String {
+        val sb = StringBuilder(input.length * 2)
+        for (ch in input.lowercase()) {
+            when (ch) {
+                'а' -> sb.append("a")
+                'б' -> sb.append("b")
+                'в' -> sb.append("v")
+                'г' -> sb.append("g")
+                'д' -> sb.append("d")
+                'е', 'ё', 'э' -> sb.append("e")
+                'ж' -> sb.append("zh")
+                'з' -> sb.append("z")
+                'и', 'й', 'ы' -> sb.append("i")
+                'к' -> sb.append("k")
+                'л' -> sb.append("l")
+                'м' -> sb.append("m")
+                'н' -> sb.append("n")
+                'о' -> sb.append("o")
+                'п' -> sb.append("p")
+                'р' -> sb.append("r")
+                'с' -> sb.append("s")
+                'т' -> sb.append("t")
+                'у' -> sb.append("u")
+                'ф' -> sb.append("f")
+                'х' -> sb.append("h")
+                'ц' -> sb.append("ts")
+                'ч' -> sb.append("ch")
+                'ш' -> sb.append("sh")
+                'щ' -> sb.append("sch")
+                'ъ', 'ь' -> Unit
+                'ю' -> sb.append("yu")
+                'я' -> sb.append("ya")
+                else -> sb.append(ch)
+            }
+        }
+        return sb.toString()
+    }
+
+    internal fun extractArtistTitleFromQuery(rawQuery: String): Pair<String, String>? {
+        val parts = rawQuery.trim().split(Regex("\\s+[-—–]\\s+"), limit = 2)
+        if (parts.size == 2 && parts[0].isNotBlank() && parts[1].isNotBlank()) {
+            return parts[0].trim() to parts[1].trim()
+        }
+        return null
+    }
+
     private fun resolveByQuery(
         query: String,
         excludePageUrl: String? = null,
@@ -1292,21 +1347,107 @@ object FullStreamResolver {
         expectedDurationMs: Long = 0L,
     ): ResolvedAudioStream? {
         ensureInitialized()
-        val rawYt = searchYouTubeMusic(query, limit = 8)
-            .filter { it.sourceUri != null && it.sourceUri != excludePageUrl }
-        val rankedYt = rankTrackMatchCandidates(rawYt, targetArtist, targetTitle.ifBlank { query }, expectedDurationMs)
-        for (candidate in rankedYt) {
-            val pageUrl = candidate.sourceUri ?: continue
-            resolveFromPageUrl(pageUrl, fallbackQuery = null, verifyWithProbe = verifyWithProbe)?.let { return it }
+        val parsedPair = if (targetArtist.isBlank()) extractArtistTitleFromQuery(targetTitle.ifBlank { query }) else null
+        val effArtist = targetArtist.trim().ifBlank { parsedPair?.first.orEmpty() }
+        val effTitle = targetTitle.trim().ifBlank { parsedPair?.second ?: query.trim() }
+
+        fun searchYouTubeVideosRaw(q: String): List<TrackEntity> {
+            return runCatching {
+                val extractor = ServiceList.YouTube.getSearchExtractor(q, listOf("videos"), "")
+                extractor.fetchPage()
+                extractor.initialPage.items
+                    .filterIsInstance<StreamInfoItem>()
+                    .filter { isValidFullTrackItem(it) && it.duration in MIN_FULL_TRACK_SECONDS..900L }
+                    .take(6)
+                    .mapNotNull { mapStreamItemToTrack(it, isYouTube = true) }
+            }.getOrDefault(emptyList())
         }
-        val rawSc = searchSoundCloud(query, limit = 8)
-            .filter { it.sourceUri != null && it.sourceUri != excludePageUrl }
-        val rankedSc = rankTrackMatchCandidates(rawSc, targetArtist, targetTitle.ifBlank { query }, expectedDurationMs)
-        for (candidate in rankedSc) {
-            val pageUrl = candidate.sourceUri ?: continue
-            resolveFromPageUrl(pageUrl, fallbackQuery = null, verifyWithProbe = verifyWithProbe)?.let { return it }
+
+        // Fetch concurrently across YTM music_songs, YouTube videos, and SoundCloud so indie/RU/rap tracks resolve accurately
+        val ytmFut = CompletableFuture.supplyAsync { searchYouTubeMusic(query, limit = 8) }
+        val ytVidFut = CompletableFuture.supplyAsync { searchYouTubeVideosRaw(query) }
+        val scFut = CompletableFuture.supplyAsync { searchSoundCloud(query, limit = 8) }
+
+        val pool = LinkedHashMap<String, TrackEntity>()
+        listOf(ytmFut, ytVidFut, scFut).forEach { fut ->
+            runCatching { fut.get(8, TimeUnit.SECONDS) }.getOrDefault(emptyList()).forEach { item ->
+                val uri = item.sourceUri
+                if (!uri.isNullOrBlank() && uri != excludePageUrl) {
+                    pool.putIfAbsent(uri, item)
+                }
+            }
+        }
+
+        fun tryResolveCandidates(candidates: List<TrackEntity>): ResolvedAudioStream? {
+            if (candidates.isEmpty()) return null
+            val scoredList = candidates.map { cand ->
+                cand to bestTrackMatchScoreConsideringSwap(cand, effArtist, effTitle, expectedDurationMs, parsedPair != null)
+            }.sortedByDescending { it.second }
+
+            val minRequiredScore = if (effArtist.isNotBlank() && effTitle.isNotBlank()) 240 else 60
+            val qualified = scoredList.filter { it.second >= minRequiredScore }
+            val orderedToTry = if (qualified.isNotEmpty()) {
+                qualified
+            } else {
+                // Only fall back to clearly positive candidates; never play an unrelated track
+                scoredList.filter { it.second >= 60 }.take(2)
+            }
+            for ((candidate, _) in orderedToTry.take(4)) {
+                val pageUrl = candidate.sourceUri ?: continue
+                resolveFromPageUrl(pageUrl, fallbackQuery = null, verifyWithProbe = verifyWithProbe)?.let { return it }
+            }
+            return null
+        }
+
+        tryResolveCandidates(pool.values.toList())?.let { return it }
+
+        // Targeted exact-artist + title retry if initial broad search missed or scored poorly
+        if (effArtist.isNotBlank() && effTitle.isNotBlank()) {
+            val strictQuery = "\"$effArtist\" \"$effTitle\""
+            val retryYtm = CompletableFuture.supplyAsync { searchYouTubeMusic(strictQuery, limit = 6) }
+            val retrySc = CompletableFuture.supplyAsync { searchSoundCloud("$effArtist $effTitle", limit = 6) }
+            val retryPool = LinkedHashMap<String, TrackEntity>()
+            listOf(retryYtm, retrySc).forEach { fut ->
+                runCatching { fut.get(6, TimeUnit.SECONDS) }.getOrDefault(emptyList()).forEach { item ->
+                    val uri = item.sourceUri
+                    if (!uri.isNullOrBlank() && uri != excludePageUrl) {
+                        retryPool.putIfAbsent(uri, item)
+                    }
+                }
+            }
+            tryResolveCandidates(retryPool.values.toList())?.let { return it }
+        }
+
+        // Retry with swapped artist/title ordering if "Left - Right" might be "Title - Artist"
+        if (parsedPair != null) {
+            val flippedQuery = "${parsedPair.second} ${parsedPair.first}".trim()
+            val retryYtm = CompletableFuture.supplyAsync { searchYouTubeMusic(flippedQuery, limit = 6) }
+            val retrySc = CompletableFuture.supplyAsync { searchSoundCloud(flippedQuery, limit = 6) }
+            val retryPool = LinkedHashMap<String, TrackEntity>()
+            listOf(retryYtm, retrySc).forEach { fut ->
+                runCatching { fut.get(6, TimeUnit.SECONDS) }.getOrDefault(emptyList()).forEach { item ->
+                    val uri = item.sourceUri
+                    if (!uri.isNullOrBlank() && uri != excludePageUrl) {
+                        retryPool.putIfAbsent(uri, item)
+                    }
+                }
+            }
+            tryResolveCandidates(retryPool.values.toList())?.let { return it }
         }
         return null
+    }
+
+    private fun bestTrackMatchScoreConsideringSwap(
+        candidate: TrackEntity,
+        artist: String,
+        title: String,
+        expectedDurationMs: Long,
+        allowSwapped: Boolean,
+    ): Int {
+        val direct = scoreTrackMatch(candidate, artist, title, expectedDurationMs)
+        if (!allowSwapped || artist.isBlank() || title.isBlank()) return direct
+        val swapped = scoreTrackMatch(candidate, title, artist, expectedDurationMs)
+        return maxOf(direct, swapped)
     }
 
     fun isUnwantedVariantTitle(candidateTitle: String, allowedReference: String = ""): Boolean {
@@ -1353,37 +1494,84 @@ object FullStreamResolver {
             }
         }
 
-        val normTargetTitle = cleanTitle.lowercase().replace(Regex("[^\\p{L}\\p{Nd}]"), "")
+        val normTargetTitle = cleanTitle.lowercase().replace('ё', 'е').replace(Regex("[^\\p{L}\\p{Nd}]"), "")
+        val latinTargetTitle = transliterateToLatin(cleanTitle).replace(Regex("[^a-z0-9]"), "")
         val strippedCandTitle = candidate.title
             .replace(Regex("\\s*[(\\[](?:official|audio|music video|lyric|prod\\.?).*?[)\\]]", RegexOption.IGNORE_CASE), "")
             .trim()
-        val normCandTitle = strippedCandTitle.lowercase().replace(Regex("[^\\p{L}\\p{Nd}]"), "")
+        val normCandTitle = strippedCandTitle.lowercase().replace('ё', 'е').replace(Regex("[^\\p{L}\\p{Nd}]"), "")
+        val latinCandTitle = transliterateToLatin(strippedCandTitle).replace(Regex("[^a-z0-9]"), "")
+        val latinFullCand = transliterateToLatin("$candArtistLower $candTitleLower").replace(Regex("[^a-z0-9]"), "")
 
+        var titleMatched = false
         if (normTargetTitle.isNotBlank()) {
             when {
-                normCandTitle == normTargetTitle -> score += 450
-                normCandTitle.contains(normTargetTitle) || normTargetTitle.contains(normCandTitle) -> score += 260
+                normCandTitle == normTargetTitle ||
+                    (latinTargetTitle.isNotBlank() && latinCandTitle == latinTargetTitle) -> {
+                    score += 480
+                    titleMatched = true
+                }
+                normCandTitle.contains(normTargetTitle) || normTargetTitle.contains(normCandTitle) ||
+                    (latinTargetTitle.length >= 3 && (latinCandTitle.contains(latinTargetTitle) || latinFullCand.contains(latinTargetTitle))) -> {
+                    score += 300
+                    titleMatched = true
+                }
                 else -> {
-                    val targetTokens = cleanTitle.lowercase().split(Regex("[^\\p{L}\\p{Nd}]+")).filter { it.length >= 2 }
-                    val candTokens = candTitleLower.split(Regex("[^\\p{L}\\p{Nd}]+")).filter { it.length >= 2 }.toSet()
+                    val targetTokens = cleanTitle.lowercase().replace('ё', 'е')
+                        .split(Regex("[^\\p{L}\\p{Nd}]+")).filter { it.length >= 2 }
+                    val candTokens = (candTitleLower + " " + candArtistLower).replace('ё', 'е')
+                        .split(Regex("[^\\p{L}\\p{Nd}]+")).filter { it.length >= 2 }.toSet()
+                    val latinTargetTokens = targetTokens.map { transliterateToLatin(it) }.filter { it.length >= 2 }
+                    val latinCandTokens = candTokens.map { transliterateToLatin(it) }.toSet()
                     if (targetTokens.isNotEmpty()) {
-                        val overlap = targetTokens.count { it in candTokens }
-                        score += (overlap * 180) / targetTokens.size
+                        val overlap = targetTokens.indices.count { i ->
+                            targetTokens[i] in candTokens ||
+                                (i < latinTargetTokens.size && latinTargetTokens[i] in latinCandTokens)
+                        }
+                        if (overlap > 0 && overlap * 2 >= targetTokens.size) {
+                            score += (overlap * 210) / targetTokens.size
+                            titleMatched = true
+                        } else {
+                            // Never let a random song by the right artist win when the title missed
+                            score -= 650
+                        }
                     }
                 }
             }
         }
 
         if (cleanArtist.isNotBlank()) {
-            val primaryArtist = cleanArtist.split(Regex("\\s*(?:,|&|feat\\.|ft\\.)\\s*", RegexOption.IGNORE_CASE))
-                .firstOrNull().orEmpty().trim()
-            val normPrimaryArtist = primaryArtist.lowercase().replace(Regex("[^\\p{L}\\p{Nd}]"), "")
-            val normCandArtist = candArtistLower.replace(Regex("[^\\p{L}\\p{Nd}]"), "")
-            val normFullTitleAndArtist = "${candArtistLower} ${candTitleLower}".replace(Regex("[^\\p{L}\\p{Nd}]"), "")
-            when {
-                normPrimaryArtist.isNotBlank() && normCandArtist == normPrimaryArtist -> score += 320
-                normPrimaryArtist.isNotBlank() && normCandArtist.contains(normPrimaryArtist) -> score += 220
-                normPrimaryArtist.isNotBlank() && normFullTitleAndArtist.contains(normPrimaryArtist) -> score += 160
+            val requestedArtists = cleanArtist
+                .split(Regex("\\s*(?:,|&|feat\\.|ft\\.|featuring|x|×)\\s*", RegexOption.IGNORE_CASE))
+                .map { it.trim() }
+                .filter { it.length >= 2 }
+                .ifEmpty { listOf(cleanArtist) }
+
+            val normCandArtist = candArtistLower.replace('ё', 'е').replace(Regex("[^\\p{L}\\p{Nd}]"), "")
+            val latinCandArtist = transliterateToLatin(candArtistLower).replace(Regex("[^a-z0-9]"), "")
+            val normFullTitleAndArtist = "${candArtistLower} ${candTitleLower}"
+                .replace('ё', 'е').replace(Regex("[^\\p{L}\\p{Nd}]"), "")
+
+            var bestArtistBonus = Int.MIN_VALUE
+            for (reqArt in requestedArtists) {
+                val normReq = reqArt.lowercase().replace('ё', 'е').replace(Regex("[^\\p{L}\\p{Nd}]"), "")
+                val latinReq = transliterateToLatin(reqArt).replace(Regex("[^a-z0-9]"), "")
+                val bonus = when {
+                    normReq.isNotBlank() &&
+                        (normCandArtist == normReq || (latinReq.isNotBlank() && latinCandArtist == latinReq)) -> 360
+                    normReq.isNotBlank() &&
+                        (normCandArtist.contains(normReq) || (latinReq.length >= 3 && latinCandArtist.contains(latinReq))) -> 260
+                    normReq.isNotBlank() &&
+                        (normFullTitleAndArtist.contains(normReq) || (latinReq.length >= 3 && latinFullCand.contains(latinReq))) -> 190
+                    else -> Int.MIN_VALUE
+                }
+                if (bonus > bestArtistBonus) bestArtistBonus = bonus
+            }
+            if (bestArtistBonus != Int.MIN_VALUE) {
+                score += bestArtistBonus
+            } else {
+                // Strong mismatch penalty when candidate does not match any requested artist
+                score -= if (!titleMatched) 700 else 480
             }
         }
 
@@ -1393,7 +1581,7 @@ object FullStreamResolver {
                 deltaSec <= 5L -> 240
                 deltaSec <= 12L -> 150
                 deltaSec <= 25L -> 40
-                deltaSec > 65L -> -280
+                deltaSec > 65L -> -320
                 else -> 0
             }
         }
@@ -1423,9 +1611,45 @@ object FullStreamResolver {
         expectedDurationMs: Long = 0L,
     ): TrackEntity? = rankTrackMatchCandidates(candidates, targetArtist, targetTitle, expectedDurationMs).firstOrNull()
 
+    fun computeSynchronizedVideoPositionMs(
+        audioPositionMs: Long,
+        audioDurationMs: Long,
+        clipDurationMs: Long,
+    ): Long {
+        if (clipDurationMs <= 0L) return audioPositionMs.coerceAtLeast(0L)
+        if (audioDurationMs <= 0L) return audioPositionMs.coerceIn(0L, clipDurationMs)
+
+        val safeAudioPos = audioPositionMs.coerceIn(0L, audioDurationMs)
+        val diffMs = kotlin.math.abs(clipDurationMs - audioDurationMs)
+        if (diffMs <= 2_000L) {
+            return safeAudioPos.coerceIn(0L, clipDurationMs)
+        }
+
+        val ratio = clipDurationMs.toDouble() / audioDurationMs.toDouble()
+        // Smooth proportional time mapping across the entire song duration (prevents abrupt jump desync)
+        if (ratio in 0.65..1.45) {
+            val fraction = (safeAudioPos.toDouble() / audioDurationMs.toDouble()).coerceIn(0.0, 1.0)
+            return (fraction * clipDurationMs.toDouble()).toLong().coerceIn(0L, clipDurationMs)
+        }
+
+        // Short visual loop / teaser compared to track length
+        return safeAudioPos % clipDurationMs
+    }
+
+    fun computeSynchronizedVideoPlaybackSpeed(
+        audioDurationMs: Long,
+        clipDurationMs: Long,
+    ): Float {
+        if (audioDurationMs <= 2_000L || clipDurationMs <= 2_000L) return 1.0f
+        if (kotlin.math.abs(clipDurationMs - audioDurationMs) <= 2_000L) return 1.0f
+        val ratio = clipDurationMs.toFloat() / audioDurationMs.toFloat()
+        return if (ratio in 0.72f..1.38f) ratio.coerceIn(0.85f, 1.18f) else 1.0f
+    }
+
     fun findOfficialMusicVideoStream(
         artist: String,
         title: String,
+        expectedDurationMs: Long = 0L,
     ): ResolvedVideoStream? {
         ensureInitialized()
         val cleanTitle = title
@@ -1443,36 +1667,112 @@ object FullStreamResolver {
             if (cached.expiresAtMs > nowMs) return cached.resolved
             musicVideoCache.remove(cacheKey)
         }
+        musicVideoMissCache[cacheKey]?.let { missExpiry ->
+            if (missExpiry > nowMs) return null
+            musicVideoMissCache.remove(cacheKey)
+        }
 
-        val query = "$cleanArtist $cleanTitle official music video".trim()
-        val candidates = runCatching {
-            val extractor = ServiceList.YouTube.getSearchExtractor(query, listOf("videos"), "")
-            extractor.fetchPage()
-            extractor.initialPage.items
-                .filterIsInstance<StreamInfoItem>()
-                .filter {
-                    !it.url.isNullOrBlank() &&
-                        !it.name.isNullOrBlank() &&
-                        it.streamType != StreamType.LIVE_STREAM &&
-                        it.duration in 40L..900L
-                }
-                .take(8)
-        }.getOrDefault(emptyList())
+        val baseQuery = "$cleanArtist $cleanTitle".trim()
+        val mvQuery = "$baseQuery official music video".trim()
 
-        val normTitle = cleanTitle.lowercase().replace(Regex("[^\\p{L}\\p{Nd}]"), "")
-        val ranked = candidates.sortedByDescending { item ->
-            val nameLower = item.name.orEmpty().lowercase()
-            var s = 0
-            if (nameLower.contains("official") && (nameLower.contains("video") || nameLower.contains("mv") || nameLower.contains("клип"))) s += 300
-            else if (nameLower.contains("music video") || nameLower.contains("клип")) s += 200
-            if (normTitle.isNotBlank() && nameLower.replace(Regex("[^\\p{L}\\p{Nd}]"), "").contains(normTitle)) s += 150
-            if (nameLower.contains("reaction") || nameLower.contains("реакция") || nameLower.contains("karaoke") ||
-                nameLower.contains("cover") || nameLower.contains("slowed") || nameLower.contains("nightcore") ||
-                nameLower.contains("lyric")
-            ) {
-                s -= 400
+        // Search YouTube Music music_videos, YouTube videos, and optional Spotify-verified MV concurrently
+        val ytmVideosFut = CompletableFuture.supplyAsync {
+            runCatching {
+                val extractor = ServiceList.YouTube.getSearchExtractor(baseQuery, listOf("music_videos"), "")
+                extractor.fetchPage()
+                extractor.initialPage.items
+                    .filterIsInstance<StreamInfoItem>()
+                    .filter {
+                        !it.url.isNullOrBlank() &&
+                            !it.name.isNullOrBlank() &&
+                            it.streamType != StreamType.LIVE_STREAM &&
+                            it.duration in 30L..900L
+                    }
+                    .take(6)
+            }.getOrDefault(emptyList())
+        }
+        val ytVideosFut = CompletableFuture.supplyAsync {
+            runCatching {
+                val extractor = ServiceList.YouTube.getSearchExtractor(mvQuery, listOf("videos"), "")
+                extractor.fetchPage()
+                extractor.initialPage.items
+                    .filterIsInstance<StreamInfoItem>()
+                    .filter {
+                        !it.url.isNullOrBlank() &&
+                            !it.name.isNullOrBlank() &&
+                            it.streamType != StreamType.LIVE_STREAM &&
+                            it.duration in 30L..900L
+                    }
+                    .take(6)
+            }.getOrDefault(emptyList())
+        }
+
+        val ytmItems = runCatching { ytmVideosFut.get(5, TimeUnit.SECONDS) }.getOrDefault(emptyList())
+        val ytItems = runCatching { ytVideosFut.get(5, TimeUnit.SECONDS) }.getOrDefault(emptyList())
+        val candidates = (ytmItems + ytItems).distinctBy { it.url }
+
+        if (candidates.isEmpty()) {
+            musicVideoMissCache[cacheKey] = System.currentTimeMillis() + 10L * 60L * 1000L
+            return null
+        }
+
+        val normTitle = cleanTitle.lowercase().replace('ё', 'е').replace(Regex("[^\\p{L}\\p{Nd}]"), "")
+        val latinTitle = transliterateToLatin(cleanTitle).replace(Regex("[^a-z0-9]"), "")
+        val titleWords = cleanTitle.lowercase().replace('ё', 'е').split(Regex("[^\\p{L}\\p{Nd}]+")).filter { it.length >= 2 }
+        val normArtist = cleanArtist.lowercase().replace('ё', 'е').replace(Regex("[^\\p{L}\\p{Nd}]"), "")
+        val latinArtist = transliterateToLatin(cleanArtist).replace(Regex("[^a-z0-9]"), "")
+        val refLower = "$cleanArtist $cleanTitle".lowercase()
+        val ytmUrlSet = ytmItems.mapNotNullTo(HashSet()) { it.url }
+
+        val scoredCandidates = candidates.mapNotNull { item ->
+            val nameRaw = item.name.orEmpty()
+            val nameLower = nameRaw.lowercase().replace('ё', 'е')
+            val normName = nameLower.replace(Regex("[^\\p{L}\\p{Nd}]"), "")
+            val latinName = transliterateToLatin(nameLower).replace(Regex("[^a-z0-9]"), "")
+            val uploaderRaw = item.uploaderName.orEmpty().lowercase().replace('ё', 'е')
+            val uploaderLower = uploaderRaw.replace(Regex("[^\\p{L}\\p{Nd}]"), "")
+            val latinUploader = transliterateToLatin(uploaderRaw).replace(Regex("[^a-z0-9]"), "")
+
+            val hasTitleExact = (normTitle.isNotBlank() && normName.contains(normTitle)) ||
+                (latinTitle.length >= 3 && latinName.contains(latinTitle))
+            val nameWordSet = nameLower.split(Regex("[^\\p{L}\\p{Nd}]+")).filter { it.length >= 2 }.toSet()
+            val hasTitleTokens = titleWords.isNotEmpty() && titleWords.count { it in nameWordSet } * 2 >= titleWords.size
+            if (!hasTitleExact && !hasTitleTokens) {
+                return@mapNotNull null
             }
-            s
+
+            val hasArtist = normArtist.isBlank() ||
+                uploaderLower.contains(normArtist) ||
+                normName.contains(normArtist) ||
+                (latinArtist.length >= 3 && (latinUploader.contains(latinArtist) || latinName.contains(latinArtist)))
+            // Require strict artist match so unrelated artists' music videos are never attached
+            if (!hasArtist) {
+                return@mapNotNull null
+            }
+            if (isUnwantedVariantTitle(nameRaw, refLower) || nameLower.contains("lyric") || nameLower.contains("audio only")) {
+                return@mapNotNull null
+            }
+            if (expectedDurationMs >= 30_000L && item.duration > 0L) {
+                val clipMs = item.duration * 1000L
+                val ratio = clipMs.toDouble() / expectedDurationMs.toDouble()
+                if (ratio < 0.45 || ratio > 2.0) {
+                    return@mapNotNull null
+                }
+            }
+
+            val isFromYtmVideos = item.url in ytmUrlSet
+            var s = if (isFromYtmVideos) 160 else 0
+            if (nameLower.contains("official") && (nameLower.contains("video") || nameLower.contains("mv") || nameLower.contains("клип"))) s += 320
+            else if (nameLower.contains("music video") || nameLower.contains("клип") || nameLower.contains("official mv")) s += 240
+            if (hasTitleExact) s += 200 else if (hasTitleTokens) s += 110
+            if (hasArtist) s += 180
+            if (s < 320) null else item to s
+        }.sortedByDescending { it.second }
+
+        val ranked = scoredCandidates.map { it.first }
+        if (ranked.isEmpty()) {
+            musicVideoMissCache[cacheKey] = System.currentTimeMillis() + 10L * 60L * 1000L
+            return null
         }
 
         fun scoreVideoStreamCandidate(height: Int, codec: String?): Int {
@@ -1490,9 +1790,9 @@ object FullStreamResolver {
             return codecBonus + resScore
         }
 
-        for (cand in ranked.take(3)) {
-            val pageUrl = cand.url ?: continue
-            val info = runCatching { StreamInfo.getInfo(ServiceList.YouTube, pageUrl) }.getOrNull() ?: continue
+        fun extractCandidate(cand: StreamInfoItem): ResolvedVideoStream? {
+            val pageUrl = cand.url ?: return null
+            val info = runCatching { StreamInfo.getInfo(ServiceList.YouTube, pageUrl) }.getOrNull() ?: return null
             val muxedMp4 = info.videoStreams
                 .filter {
                     it.deliveryMethod == DeliveryMethod.PROGRESSIVE_HTTP &&
@@ -1513,9 +1813,9 @@ object FullStreamResolver {
                     val h = Regex("(\\d+)").find(stream.resolution.orEmpty())?.groupValues?.get(1)?.toIntOrNull() ?: 360
                     scoreVideoStreamCandidate(h, stream.codec) + 120
                 }
-            val chosen = videoOnlyMp4 ?: muxedMp4 ?: continue
-            val url = chosen.content ?: continue
-            val resolved = ResolvedVideoStream(
+            val chosen = videoOnlyMp4 ?: muxedMp4 ?: return null
+            val url = chosen.content ?: return null
+            return ResolvedVideoStream(
                 videoUrl = url,
                 title = info.name ?: cand.name ?: cleanTitle,
                 durationMs = (info.duration.takeIf { it > 0L } ?: 180L) * 1000L,
@@ -1524,12 +1824,23 @@ object FullStreamResolver {
                 width = chosen.width.coerceAtLeast(0),
                 height = chosen.height.coerceAtLeast(0),
             )
-            musicVideoCache[cacheKey] = CachedVideoEntry(
-                resolved = resolved,
-                expiresAtMs = System.currentTimeMillis() + 60L * 60L * 1000L,
-            )
-            return resolved
         }
+
+        val topCandidates = ranked.take(2)
+        val futures = topCandidates.map { cand ->
+            CompletableFuture.supplyAsync { extractCandidate(cand) }
+        }
+        for (future in futures) {
+            val resolved = runCatching { future.get(6, TimeUnit.SECONDS) }.getOrNull()
+            if (resolved != null) {
+                musicVideoCache[cacheKey] = CachedVideoEntry(
+                    resolved = resolved,
+                    expiresAtMs = System.currentTimeMillis() + 60L * 60L * 1000L,
+                )
+                return resolved
+            }
+        }
+        musicVideoMissCache[cacheKey] = System.currentTimeMillis() + 10L * 60L * 1000L
         return null
     }
 

@@ -186,6 +186,7 @@ fun WaveScreen(
                         },
                         shape = CircleShape,
                         color = orbPrimary.copy(alpha = 0.16f),
+                        contentColor = orbPrimary,
                         modifier = Modifier
                             .heightIn(min = 40.dp)
                             .testTag("wave_reset_taste_button"),
@@ -229,6 +230,7 @@ fun WaveScreen(
             Surface(
                 shape = RoundedCornerShape(20.dp),
                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.62f),
+                contentColor = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier
                     .fillMaxWidth()
                     .border(

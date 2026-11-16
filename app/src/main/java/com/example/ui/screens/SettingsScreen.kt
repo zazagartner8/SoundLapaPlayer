@@ -106,9 +106,13 @@ import androidx.compose.ui.unit.sp
 import androidx.documentfile.provider.DocumentFile
 import com.example.data.local.AudioFocusMode
 import com.example.ui.MainUiState
+import com.example.ui.StatsBackupUiState
 import com.example.ui.components.AccountAvatarImage
+import com.example.ui.components.AccountUidCopyRow
+import com.example.ui.components.Avatar18PlusWarningBanner
 import com.example.ui.components.AvatarCropDialog
 import com.example.ui.components.CountryFlagIcon
+import com.example.ui.components.StatsBackupRestoreCard
 import com.example.ui.components.rememberSoundLapaHaptics
 import com.example.ui.formatFileSize
 import com.example.ui.i18n.AppLanguage
@@ -116,6 +120,18 @@ import com.example.ui.i18n.LocalAppStrings
 import com.example.ui.theme.LiquidMint
 import com.example.ui.theme.LiquidRose
 import kotlin.math.roundToInt
+
+private fun formatRgbHex(argb: Long): String {
+    val rgb = (argb and 0xFFFFFFL).toInt()
+    return "#%06X".format(rgb)
+}
+
+private fun parseRgbHexOrNull(raw: String): Long? {
+    val cleaned = raw.trim().removePrefix("#").trim()
+    if (cleaned.length != 6) return null
+    val rgb = cleaned.toLongOrNull(16) ?: return null
+    return (0xFF000000L or rgb) and 0xFFFFFFFFL
+}
 
 private val PresetAccentColors = listOf(
     0xFF8B5CF6L, // Purple (Default)
@@ -153,10 +169,15 @@ fun SettingsScreen(
     onSyncCloudNow: () -> Unit = {},
     onSignOutGoogle: () -> Unit = {},
     onSignInGoogleFromGuest: () -> Unit = {},
+    isSigningInGoogleFromGuest: Boolean = false,
+    guestGoogleSignInError: String? = null,
     onUpdateProfile: (displayName: String, bio: String, croppedAvatarBitmap: Bitmap?, clearAvatar: Boolean) -> Unit = { _, _, _, _ -> },
     onClearProfileStatus: () -> Unit = {},
     onOpenFriendsScreen: () -> Unit = {},
     onOpenDeveloperScreen: () -> Unit = {},
+    statsBackupState: StatsBackupUiState = StatsBackupUiState(),
+    onRestoreStatsFromUri: (Uri) -> Unit = {},
+    onClearStatsRestoreStatus: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     BackHandler(onBack = onClose)
@@ -223,13 +244,22 @@ fun SettingsScreen(
         hsv
     }
     var hue by remember { mutableFloatStateOf(initialHsv[0]) }
-    var saturation by remember { mutableFloatStateOf(initialHsv[1].coerceIn(0.25f, 1f)) }
-    var brightness by remember { mutableFloatStateOf(initialHsv[2].coerceIn(0.55f, 1f)) }
+    var saturation by remember { mutableFloatStateOf(initialHsv[1].coerceIn(0f, 1f)) }
+    var brightness by remember { mutableFloatStateOf(initialHsv[2].coerceIn(0f, 1f)) }
+    var hexInput by remember { mutableStateOf(formatRgbHex(state.settings.accentColorArgb)) }
+
+    LaunchedEffect(state.settings.accentColorArgb) {
+        val formatted = formatRgbHex(state.settings.accentColorArgb)
+        if (!hexInput.equals(formatted, ignoreCase = true) && parseRgbHexOrNull(hexInput) != state.settings.accentColorArgb) {
+            hexInput = formatted
+        }
+    }
 
     fun applyHsvColor() {
         val argb = Color(
             AndroidColor.HSVToColor(floatArrayOf(hue, saturation, brightness)),
         ).toArgb().toLong() and 0xFFFFFFFFL
+        hexInput = formatRgbHex(argb)
         onSelectAccentColor(argb)
     }
 
@@ -351,7 +381,8 @@ fun SettingsScreen(
                                     }
                                 }
 
-                                state.cloudSync.statusMessage?.let { err ->
+                                val effectiveError = guestGoogleSignInError ?: state.cloudSync.statusMessage
+                                effectiveError?.let { err ->
                                     Text(
                                         text = err,
                                         style = MaterialTheme.typography.bodySmall,
@@ -364,6 +395,7 @@ fun SettingsScreen(
                                         haptics.confirm()
                                         onSignInGoogleFromGuest()
                                     },
+                                    enabled = !isSigningInGoogleFromGuest,
                                     shape = CircleShape,
                                     colors = ButtonDefaults.buttonColors(
                                         containerColor = accent,
@@ -373,11 +405,25 @@ fun SettingsScreen(
                                         .fillMaxWidth()
                                         .testTag("settings_guest_google_sign_in_button"),
                                 ) {
-                                    Text(
-                                        text = strings.settingsSignInGoogleAndSyncButton,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
+                                    if (isSigningInGoogleFromGuest) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(16.dp),
+                                            strokeWidth = 2.dp,
+                                            color = MaterialTheme.colorScheme.onPrimary,
+                                        )
+                                        Spacer(Modifier.width(8.dp))
+                                        Text(
+                                            text = strings.stats.guestSignInLoadingLabel,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    } else {
+                                        Text(
+                                            text = strings.settingsSignInGoogleAndSyncButton,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
                                 }
 
                                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -512,6 +558,13 @@ fun SettingsScreen(
                                             color = LiquidMint,
                                         )
                                     }
+                                }
+
+                                state.cloudSync.accountUid?.takeIf { it.isNotBlank() }?.let { uid ->
+                                    AccountUidCopyRow(
+                                        accountUid = uid,
+                                        accent = accent,
+                                    )
                                 }
 
                                 OutlinedButton(
@@ -703,6 +756,8 @@ fun SettingsScreen(
                                                 }
                                             }
                                         } else {
+                                            Avatar18PlusWarningBanner()
+
                                             FlowRow(
                                                 modifier = Modifier.fillMaxWidth(),
                                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1063,8 +1118,9 @@ fun SettingsScreen(
                                                 val hsv = FloatArray(3)
                                                 AndroidColor.colorToHSV(argb.toInt(), hsv)
                                                 hue = hsv[0]
-                                                saturation = hsv[1].coerceIn(0.25f, 1f)
-                                                brightness = hsv[2].coerceIn(0.55f, 1f)
+                                                saturation = hsv[1].coerceIn(0f, 1f)
+                                                brightness = hsv[2].coerceIn(0f, 1f)
+                                                hexInput = formatRgbHex(argb)
                                                 onSelectAccentColor(argb)
                                             }
                                             .testTag("color_swatch_$argb"),
@@ -1150,7 +1206,7 @@ fun SettingsScreen(
                                                 saturation = nextSat
                                                 applyHsvColor()
                                             },
-                                            valueRange = 0.25f..1f,
+                                            valueRange = 0f..1f,
                                             colors = SliderDefaults.colors(
                                                 thumbColor = accent,
                                                 activeTrackColor = accent,
@@ -1169,7 +1225,7 @@ fun SettingsScreen(
                                                 brightness = nextVal
                                                 applyHsvColor()
                                             },
-                                            valueRange = 0.55f..1f,
+                                            valueRange = 0f..1f,
                                             colors = SliderDefaults.colors(
                                                 thumbColor = accent,
                                                 activeTrackColor = accent,
@@ -1177,6 +1233,46 @@ fun SettingsScreen(
                                         )
                                     }
                                 }
+
+                                val parsedHex = parseRgbHexOrNull(hexInput)
+                                val hasInvalidHex = hexInput.removePrefix("#").trim().isNotEmpty() && parsedHex == null
+                                OutlinedTextField(
+                                    value = hexInput,
+                                    onValueChange = { raw ->
+                                        val cleaned = raw.filter { ch ->
+                                            ch == '#' || ch in '0'..'9' || ch in 'a'..'f' || ch in 'A'..'F'
+                                        }.take(7).uppercase()
+                                        hexInput = if (cleaned.startsWith("#")) cleaned else "#$cleaned".take(7)
+                                        parseRgbHexOrNull(hexInput)?.let { nextArgb ->
+                                            val hsv = FloatArray(3)
+                                            AndroidColor.colorToHSV(nextArgb.toInt(), hsv)
+                                            hue = hsv[0]
+                                            saturation = hsv[1].coerceIn(0f, 1f)
+                                            brightness = hsv[2].coerceIn(0f, 1f)
+                                            onSelectAccentColor(nextArgb)
+                                        }
+                                    },
+                                    label = { Text(strings.v34.customHexLabel) },
+                                    isError = hasInvalidHex,
+                                    supportingText = if (hasInvalidHex) {
+                                        { Text(strings.v34.customHexInvalidHint) }
+                                    } else null,
+                                    leadingIcon = {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(22.dp)
+                                                .clip(CircleShape)
+                                                .background(Color(parsedHex ?: state.settings.accentColorArgb))
+                                                .border(1.dp, MaterialTheme.colorScheme.outline, CircleShape),
+                                        )
+                                    },
+                                    singleLine = true,
+                                    shape = RoundedCornerShape(18.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(top = 4.dp)
+                                        .testTag("custom_hex_input"),
+                                )
                             }
                         }
                     }
@@ -1609,6 +1705,15 @@ fun SettingsScreen(
                                     }
                                 }
                             }
+
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                            StatsBackupRestoreCard(
+                                backupState = statsBackupState,
+                                accent = accent,
+                                onRestoreBackupUri = onRestoreStatsFromUri,
+                                onClearRestoreStatus = onClearStatsRestoreStatus,
+                            )
                         }
                     }
 
@@ -1636,6 +1741,15 @@ fun SettingsScreen(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .testTag("settings_import_input"),
+                            )
+
+                            Text(
+                                text = strings.settingsV33.importTitleFineHint,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontSize = 11.sp,
+                                lineHeight = 14.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f),
+                                modifier = Modifier.testTag("settings_import_title_hint"),
                             )
 
                             OutlinedTextField(
@@ -1751,13 +1865,6 @@ fun SettingsScreen(
                                 lineHeight = 15.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.80f),
                                 modifier = Modifier.testTag("settings_import_public_notice"),
-                            )
-                            Text(
-                                text = strings.settingsV33.importTitleFineHint,
-                                style = MaterialTheme.typography.labelSmall,
-                                fontSize = 11.sp,
-                                lineHeight = 14.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f),
                             )
                         }
                     }

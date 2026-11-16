@@ -17,6 +17,9 @@ data class PlaylistEntity(
     val description: String = "",
     val createdAt: Long = System.currentTimeMillis(),
     val coverArtPath: String? = null,
+    val isPinned: Boolean = false,
+    val pinnedAtMs: Long = 0L,
+    val sortMode: String = "CUSTOM",
 )
 
 @Entity(

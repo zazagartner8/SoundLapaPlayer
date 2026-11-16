@@ -211,6 +211,7 @@ fun ArtistProfileScreen(
                     Surface(
                         shape = CircleShape,
                         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
+                        contentColor = MaterialTheme.colorScheme.onSurface,
                     ) {
                         Text(
                             text = strings.artistProfileMenu,
@@ -451,6 +452,7 @@ fun ArtistProfileScreen(
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(22.dp),
                         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                        contentColor = MaterialTheme.colorScheme.onSurface,
                     ) {
                         Text(
                             text = strings.artistEmptyTracks,
@@ -493,6 +495,8 @@ fun ArtistProfileScreen(
             ModalBottomSheet(
                 onDismissRequest = onCloseAlbum,
                 shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+                containerColor = MaterialTheme.colorScheme.surface,
+                contentColor = MaterialTheme.colorScheme.onSurface,
             ) {
                 Column(
                     modifier = Modifier

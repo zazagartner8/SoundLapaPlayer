@@ -399,7 +399,7 @@ fun LiquidGlassCard(
     modifier: Modifier = Modifier,
     shape: Shape = RoundedCornerShape(30.dp),
     accentTint: Color = MaterialTheme.colorScheme.primary,
-    elevation: Dp = 10.dp,
+    elevation: Dp = 12.dp,
     onClick: (() -> Unit)? = null,
     content: @Composable BoxScope.() -> Unit,
 ) {
@@ -410,17 +410,18 @@ fun LiquidGlassCard(
         if (isDark) {
             Brush.linearGradient(
                 colors = listOf(
-                    Color.White.copy(alpha = 0.15f),
-                    accentTint.copy(alpha = 0.07f),
-                    Color.White.copy(alpha = 0.05f),
+                    Color.White.copy(alpha = 0.14f),
+                    accentTint.copy(alpha = 0.11f),
+                    softSurface.copy(alpha = 0.42f),
+                    Color.White.copy(alpha = 0.04f),
                 ),
             )
         } else {
             Brush.linearGradient(
                 colors = listOf(
-                    softSurface.copy(alpha = 0.94f),
-                    accentTint.copy(alpha = 0.07f),
-                    softSurface.copy(alpha = 0.80f),
+                    softSurface.copy(alpha = 0.96f),
+                    accentTint.copy(alpha = 0.09f),
+                    softSurface.copy(alpha = 0.84f),
                 ),
             )
         }
@@ -430,17 +431,17 @@ fun LiquidGlassCard(
         if (isDark) {
             Brush.linearGradient(
                 colors = listOf(
-                    Color.White.copy(alpha = 0.42f),
-                    Color.White.copy(alpha = 0.14f),
-                    accentTint.copy(alpha = 0.26f),
+                    Color.White.copy(alpha = 0.36f),
+                    accentTint.copy(alpha = 0.24f),
+                    Color.White.copy(alpha = 0.10f),
                 ),
             )
         } else {
             Brush.linearGradient(
                 colors = listOf(
-                    Color.White.copy(alpha = 0.55f),
-                    Color(0x2618151D),
-                    accentTint.copy(alpha = 0.28f),
+                    Color.White.copy(alpha = 0.65f),
+                    Color(0x2218151D),
+                    accentTint.copy(alpha = 0.30f),
                 ),
             )
         }
@@ -454,8 +455,9 @@ fun LiquidGlassCard(
             ),
         shape = shape,
         color = Color.Transparent,
+        contentColor = MaterialTheme.colorScheme.onSurface,
         tonalElevation = elevation,
-        shadowElevation = if (isDark) 0.dp else 4.dp,
+        shadowElevation = if (isDark) elevation * 0.65f else 5.dp,
     ) {
         Box(
             modifier = Modifier

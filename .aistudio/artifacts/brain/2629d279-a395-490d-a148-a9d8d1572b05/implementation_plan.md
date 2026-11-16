@@ -1,109 +1,156 @@
-# SoundLap v3.3 — UX, Visual Contrast, Player & Import Polish Plan
+# План обновления SoundLap v3.4
 
-Comprehensive polish pass fixing dark-mode text contrast across all screens, blending the top video banner seamlessly into the background, redesigning the Now Playing screen with Spotify-style vertical scroll and uncramped controls, upgrading video clip framing and background detection, repairing cloud sync counters, accelerating playlist imports, and adding iOS-style waving glossy country flags.
+Масштабное обновление **SoundLap v3.4** устраняет ключевые проблемы воспроизведения, рассинхронизации клипов, нехватки текстов песен и подтормаживаний интерфейса, сохраняя при этом фирменную типографику (`Comfortaa Bold`). Плеер, библиотека и навигация получают бесшовные морф-анимации, плавающее непрозрачное облачко вкладок в стиле Telegram, точный подбор оригинальных треков и надёжное сохранение статистики прослушиваний даже после переустановки приложения.
 
 ---
 
-## User Review & Critical Decisions
+## Критические решения и выбор пользователя
 
 > [!IMPORTANT]
-> The following decisions were confirmed during interactive clarification and govern this implementation:
-
-- **Confirmed Decision 1 (Dark Theme Text Contrast)**: Audit and fix black-on-black text across **all dark screens, cards, dialogs, and overlays** so white/on-surface content color is guaranteed everywhere on dark surfaces.
-- **Confirmed Decision 2 (Video Clip Framing)**: **Crop video to fill container (`RESIZE_MODE_ZOOM`)** with an opaque stage underneath while playing a clip so album artwork never peeks through along the edges.
-- **Confirmed Decision 3 (Cover / Video Toggle Visibility)**: **Quietly probe official clip availability in the background** when a track loads in the player, and display the `Cover | Video` switcher only if an official clip exists.
-- **Confirmed Decision 4 (Country Flag Style)**: Render **iOS-style waving ribbon flags with soft glossy sheen** in the language selector.
-
----
-
-## 1. Overview & Core Concept
-
-- **What It Delivers**: Eliminates dark-on-dark readability defects, gives the header video banner a seamless atmospheric dissolve into the app background, makes the fullscreen player spacious and scrollable like Spotify while preserving smooth swipe-down dismissal, ensures music videos fill their container edge-to-edge and only show the video switcher when a clip actually exists, keeps cloud sync track counts accurate in Settings, dramatically speeds up external playlist imports, and refines import field copy placement and language flags.
-- **Key Value**: Every primary surface—Home, Wave, Search, Library, Now Playing, and Settings—gains cleaner hierarchy, higher contrast, and faster feedback with zero visual glitches.
+> В ходе уточнения требований зафиксированы ключевые продуктовые и дизайнерские решения, которые заложены в основу архитектуры **v3.4**:
+> - **Переключатель «Обложка / Клип»**: размещается **в верхней шапке полноэкранного плеера над обложкой** (без наложения на саму обложку) и автоматически скрывается, если официальный клип для трека отсутствует.
+> - **Сохранение статистики после удаления приложения**: комбинируется **синхронизация с облаком Google (Firestore)** и **автоматическое резервное копирование JSON-дампа в публичную папку «Загрузки»** без лишних разрешений (плюс ручной импорт резервного файла в один тап при смене UID устройства после переустановки).
+> - **Навигация в стиле Telegram и мини-плеер**: нижняя панель становится **непрозрачной плавающей пилюлей (облачком)** с отступами от краёв, а **мини-проигрыватель парит чуть выше неё**.
+> - **Настройка цвета темы**: добавляется **прямой ввод HEX-кода** (`#FFFFFF`–`#000000`) с двусторонней синхронизацией и сохранением текущих ползунков оттенка, насыщенности и яркости.
+> - **Типографика**: прежний шрифт приложения (**Comfortaa Bold**) полностью сохраняется без изменений.
 
 ---
 
-## 2. User Experience & Visual Design
+## 1. Обзор и концепция v3.4
 
-### Visual Contrast & Atmosphere
-- **Guaranteed Light-on-Dark Content Color**: The root app container and transparent glass cards establish `onBackground` / `onSurface` as the active `LocalContentColor`, preventing Material 3's default black fallback on dark surfaces, cards, bottom sheets, dialogs, and empty states.
-- **Seamless Top Banner Dissolve**: The header video banner retains crisp video detail near the top while its lower vertical gradient ramps smoothly to `100%` `MaterialTheme.colorScheme.background`, eliminating any sharp horizontal seam or hard rounded cutoff between the header video and screen content.
-
-### Spotify-Style Now Playing Flow & Clip Presentation
-```
-┌──────────────────────────────────────────────┐
-│  ═══   Swipe-down Handle / Top Bar / [⋮]     │
-│      (Cover | Video pill shown iff found)    │
-├──────────────────────────────────────────────┤
-│   ┌──────────────────────────────────────┐   │
-│   │  Cover Art / Zoom-Cropped Clip       │   │
-│   │  (Opaque backdrop when video plays)  │   │
-│   └──────────────────────────────────────┘   │
-│   Track Title                     [+]  [♡]   │
-│   Artist Name  ›                             │
-│   ──────●────────────────────  01:12 / 03:24 │
-│   [Shuffle]   [Prev]  (Play)  [Next] [Repeat]│
-│   [ Next in Queue Pill ]            [Share]  │
-├ ─ ─ ─ ─ ─ ─ ─ ─ Scroll Down ─ ─ ─ ─ ─ ─ ─ ─ ─┤
-│   ┌──────────────────────────────────────┐   │
-│   │  Lyrics Preview Card        [Expand] │   │
-│   │  Active & upcoming synced lines...   │   │
-│   └──────────────────────────────────────┘   │
-└──────────────────────────────────────────────┘
-```
-- **Uncramped First Viewport**: Generous spacing separates cover/clip media, track title/artist, progress bar, Spotify-style transport controls, and Queue/Share dock.
-- **Lyrics Below the Fold**: The expandable synced lyrics card sits cleanly below the initial controls area so the main player stays uncluttered yet scrolls smoothly down to preview or expand lyrics fullscreen.
-- **Responsive Swipe-Down Dismiss**: Uses nested scroll coordination plus top-handle/header dragging so swiping down when scrolled to the top (`scrollOffset == 0`) smoothly drags and collapses the player sheet.
-
-### Settings: Cloud Sync Counter, Playlist Import & iOS-Style Flags
-- **Live Cloud Sync Counter**: Settings displays the real, continuously updated count of user library tracks (liked + uploaded + tracks in playlists) and playlists rather than staying stale or at `0`.
-- **Reordered Import Card**:
-  - Input field label becomes **«Ссылка плейлиста»** (*Playlist link* / *Link playlist*).
-  - The fine-print tip (*«Имейте в виду, что практичнее и точнее будет вставить ссылку вместо названия»*) sits directly beneath that input field instead of at the bottom of the card.
-- **iOS-Style Waving Glossy Flags**: Custom vector wave-curved flags with soft specular top-left highlight and subtle fabric edge shading for **RU**, **EN**, and **IT**.
+- **Что делает обновление**: превращает SoundLap в максимально отзывчивый и точный музыкальный клиент. Исключаются ошибки сопоставления треков (когда вместо нужной композиции запускается случайный ремикс или посторонний трек), рассинхронизация и зависания видеоклипов, лаги при прокрутке длинных плейлистов и блокировки UI при загрузке элементов трека.
+- **Целевой сценарий использования**: быстрое ежедневное прослушивание музыки с бесшовным переходом между очередью, полноэкранным плеером, синхронизированными текстами и клипами, а также удобным управлением крупными пользовательскими плейлистами.
+- **Ключевая ценность**:
+  - Мгновенный отклик во всех разделах приложения и плавный скроллинг без визуальных «швов» и лишних окантовок.
+  - Точность подбора аудио, клипов (YouTube Music / Spotify) и текстов (мультиплатформенный поиск без Genius).
+  - Полноценный контроль над плейлистами: закрепление, сортировка (включая свой порядок), выбор обложки при создании, контекстное меню по долгому нажатию и отдельная вкладка «Подписки».
 
 ---
 
-## 3. Key Product Decisions & Trade-Offs
+## 2. UX, визуальный стиль и анимации
 
-- **Root & Glass Surface `contentColor` Propagation**
-  - *Chosen Approach*: Wrap root app content in `Surface(color = background, contentColor = onBackground)` and enforce `contentColor = MaterialTheme.colorScheme.onSurface` inside `LiquidGlassCard`, bottom sheets, and dark overlays, alongside explicit screen-by-screen dark contrast verification.
-  - *Why*: Material 3 `Surface(color = Color.Transparent)` falls back to black `LocalContentColor` if no parent sets it, causing any unstyled `Text` or `Icon` on dark cards to disappear.
-- **Crop-to-Fill Video + Silent Background Clip Probe**
-  - *Chosen Approach*: Inflate clip view with `RESIZE_MODE_ZOOM`, hide/cover the underlying artwork inside an opaque stage once video playback begins, and start a cancellable low-priority background lookup whenever a track becomes active in the player to gate visibility of the `Cover | Video` switcher.
-  - *Why*: Avoids letterboxing cover leaks on aspect-ratio mismatches while preventing users from tapping "Clip" on tracks that have no official video.
-  - *Trade-Off*: Background clip checks use a cached stream lookup without fetching the heavy video stream until toggled on.
-- **Parallel + Smart-Lazy Playlist Import**
-  - *Chosen Approach*: Match tracks against local database first, raise network lookup concurrency (`Semaphore(12)`), tighten per-track search timeouts with fast YouTube/SoundCloud racing (skipping redundant cover artwork HTTP round-trips when playlist metadata already provides cover URLs), and materialize remaining tail tracks on oversized imports with instant `resolve-full` URIs.
-  - *Why*: Cuts 50–100 track Spotify/Deezer playlist import times from minutes down to a few seconds while maintaining exact artist/title/cover fidelity.
+### Ключевые пользовательские сценарии
+1. **Главная и Поиск без визуального шума**:
+   - Верхний видеобаннер полностью избавляется от рамки/окантовки и органично растворяется в цвете фона.
+   - Карточки и строки треков в разделах «В тренде», «Рекомендации», «Для вас» и внутри плейлистов лишаются обводок (рамок) — иерархия строится через мягкое свечение, градиентную глубину и живой отклик при нажатии.
+   - В поиске при подгрузке карточек исполнителей список автоматически прокручивается к началу (`index 0`), чтобы артисты сразу появлялись сверху без необходимости вручную пролистывать экран вверх.
+   - Во всех карточках, строках, плеере и результатах импорта отображаются **все исполнители трека** через запятую без обрезки до первого артиста.
+
+2. **Плавающая навигация и морф-переход в плеер**:
+   - Нижняя панель навигации оформляется как **непрозрачное парящее облачко** с системными отступами (над жестовой полосой Android).
+   - **Мини-проигрыватель** парит чуть выше облачка навигации с мягкой тенью и динамическим акцентом.
+   - Нажатие на мини-проигрыватель запускает **бесшовный морф-переход** (согласованное масштабирование, сдвиг контейнера, проявление шапки и элементов управления), а свайп вниз так же плавно сворачивает полноэкранный плеер обратно в парящую карточку мини-плеера.
+
+3. **Полноэкранный плеер, текст песни и клипы**:
+   - **Верхняя шапка плеера**: отображает реальный контекст воспроизведения (`СЕЙЧАС ИГРАЕТ` → название текущего плейлиста или альбома; «Сингл» показывается только если контекст отсутствует), а ниже над обложкой по центру располагается компактный переключатель **«Обложка / Клип»** (только если клип найден).
+   - **Эргономика управления**: между блоком кнопок управления воспроизведением (Play/Pause, Next/Prev, Shuffle, Repeat) и нижней док-панелью с кнопкой **«Очередь»** добавляется чёткий безопасный вертикальный зазор для исключения случайных нажатий.
+   - **Тексты песен в цвете активной темы**: карточка **«Предпросмотр текста»** внизу плеера и полноэкранный режим текста (со скейлом, свечением активной строки и автоскроллом) окрашиваются в **активный цвет темы пользователя** вместо цвета обложки.
+   - **Ранний бейдж `[E]` (Explicit)**: отображается сразу при появлении трека в списках и в плеере на основе каталоговых флагов и фоновой предпроверки метаданных, не дожидаясь загрузки текста.
+
+4. **Библиотека, плейлисты и детальный экран**:
+   - **Порядок вкладок в Медиатеке (5 вкладок)**:
+     `[Плейлисты] · [Лайкнутые] · [Подписки] · [Загруженные треки] · [Статистика]` — вкладка «Подписки» вынесена отдельно строго слева от «Загруженные треки».
+   - **Работа с плейлистами**:
+     - В пустом состоянии вкладки «Плейлисты» выводится заметная кнопка **«Импортировать плейлист»** рядом с созданием нового.
+     - При создании нового плейлиста доступен **выбор обложки** через системный Photo Picker (без разрешений на память).
+     - **Долгое нажатие** на карточку плейлиста открывает контекстное меню: *Воспроизвести, Перемешать, Закрепить/Открепить, Редактировать, Удалить*. Закреплённые плейлисты фиксируются вверху списка с иконкой булавки.
+     - В детальном списке треков плейлиста удалена кнопка `X` у каждого трека; действие **«Удалить из плейлиста»** перенесено в меню трёх точек.
+     - Добавлена **сортировка треков в плейлисте** (по названию, дате добавления, длительности, исполнителю, альбому и пользовательскому порядку с кнопками перемещения вверх/вниз).
+     - Исправлена строка счётчика: аккуратное **«Треков: N»** / **«Количество треков: N»** вместо «Кол-ство треков:».
+     - Исправлено наложение фоновой обложки плейлиста с цветом темы при прокрутке: размытая подложка изолирована от глобального фонового свечения и плавно затухает в сплошной цвет фона без цветного «стыка».
+
+5. **Настройки, темы (HEX + ползунки) и версия**:
+   - В конструкторе пользовательской темы рядом с ползунками оттенка/насыщенности/яркости добавляется **поле HEX-кода** (`#8B5CF6`, `#FFFFFF`, `#000000` и др.) с валидацией и безопасным расчётом контрастности текста для белого и сверхъярких акцентов.
+   - Версия приложения повышается до **v3.4** (`versionCode = 13`), обновляется экран «О приложении» и журнал изменений (RU/EN/IT).
 
 ---
 
-## 4. Technical Architecture & Data Strategy *(Technical Reference)*
+## 3. Ключевые продуктовые решения и компромиссы
+
+1. **Удаление Genius и мультиплатформенный резолвер текстов**
+   - *Выбранный подход*: полный отказ от парсинга Genius в пользу каскадно-параллельного резолвера по источникам **Spicy Lyrics, Spotify, Apple Music, YouTube Music (субтитры/timed text), SoundCloud и Amazon Music**, с обновлением версии локального кэша (чтобы старые пропуски автоматически перепроверились).
+   - *Почему*: Genius часто блокируется по сети, даёт несинхронизированный текст и расходится по версиям треков; связка Spicy Lyrics + потоковые каталоги и таймкоды YouTube Music даёт значительно больше покрытий, включая локальных и андеграундных артистов.
+   - *Альтернатива*: оставлять Genius как запасной вариант — отклонено по прямому требованию пользователя.
+
+2. **Точный подбор аудиотреков и видеоклипов (YouTube Music / Spotify)**
+   - *Выбранный подход*: жёсткая нормализация запросов, обязательная сверка всех токенов исполнителей и названия трека, штрафование сторонних ремиксов, замедленных/ускоренных версий и каверов, а также поиск клипов приоритетно через **YouTube Music (music videos) и Spotify (Canvas / видеометаданные)**.
+   - *Почему*: исключает подмену трека похожим названием (например, «стало похуй - kurokov»), а разделение пробы клипа и аудиопотока ускоряет отклик интерфейса.
+
+3. **Умная синхронизация видеоклипа и паузы**
+   - *Выбранный подход*: единый цикл синхронизации с уменьшенным порогом рассинхрона, мгновенной реакцией на `isPlaying`, паузу и перемотку (`seek`), пропорциональным расчётом скорости/прогресса при небольшом расхождении длительности клипа и трека, и отменой слепого зацикливания.
+   - *Почему*: при остановке трека клип больше не «убегает» вперёд и не застывает в багованном состоянии, а при разнице длительностей видеоряд остаётся в тайминге.
+
+4. **Переживающая удаление статистика прослушиваний в рамках Scoped Storage (Android 10+)**
+   - *Выбранный подход*: первичное автоматическое сохранение в **облаке Google (Firestore)** + локальная авто-копия JSON в системную папку **«Загрузки» (`MediaStore.Downloads`)**, запись разрешена без опасных разрешений, а также встроенный в Экран статистики и Настройки быстрый импорт сохранённой резервной копии через системный диалог выбора файла (`OpenDocument`).
+   - *Почему / Ограничение платформы*: в Android 10+ после удаления и повторной установки приложения меняется UID пакета, поэтому система запрещает новому экземпляру тихо перезаписывать или читать старый файл в `Downloads` без подтверждения пользователя. Комбинация автоматической облачной синхронизации (при входе в Google) и бесправной авто-выгрузки в «Загрузки» с 1-таповым восстановлением даёт 100% надёжность при полном соблюдении политик Google Play.
+
+5. **Максимум скорости и отсутствие фризов при открытом плеере**
+   - *Выбранный подход*: перенос пробы клипов, поиска текстов, предпроверки explicit-флагов и декодирования изображений в параллельные отменяемые корутины (при быстром переключении трека устаревшие задачи мгновенно отменяются), добавление стабильных `@Immutable`-моделей и минимизация дорогостоящих эффектов размытия в длинных списках `LazyColumn`.
+
+---
+
+## 4. Техническая архитектура и стратегия данных
+
+### Архитектурная схема системы
 
 ```
-┌───────────────────────────┐     ┌──────────────────────────────────┐
-│ Root Theme & Shell        │────▶│ Background Clip Probe (cached)   │
-│ Surface + onBackground    │     │ Emits stream != null -> show pill│
-└─────────────┬─────────────┘     └──────────────────────────────────┘
-              │
-              ▼
-┌────────────────────────────────────────────────────────────────────┐
-│ NowPlayingSheet (NestedScroll + Top-Drag Collapse)                 │
-│  ├─ First Viewport: Uncramped Cover/Zoomed Clip + Controls + Dock  │
-│  └─ Scroll Fold: Lyrics Preview Card ──▶ Fullscreen LRC Overlay    │
-└────────────────────────────────────────────────────────────────────┘
-              │
-              ▼
-┌───────────────────────────┐     ┌──────────────────────────────────┐
-│ Reactive Cloud Sync State │     │ Fast Playlist Importer           │
-│ Live track/playlist count │     │ Local hit + 12x race + lazy tail │
-└───────────────────────────┘     └──────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    СЛОЙ ИНТЕРФЕЙСА (Jetpack Compose)                    │
+│                                                                         │
+│  ┌────────────────┐  ┌─────────────────┐  ┌──────────────────────────┐  │
+│  │ Экран «Поток»  │  │  Экран «Поиск»  │  │    Экран «Медиатека»     │  │
+│  │ (без рамок,    │  │ (автоскролл к   │  │ [Плейлисты|Лайки|Подписки│  │
+│  │ слитый баннер) │  │  артистам = 0)  │  │  |Загруженные|Статистика]  │  │
+│  └───────┬────────┘  └────────┬────────┘  └────────────┬─────────────┘  │
+│          └────────────────────┼────────────────────────┘                │
+│                               ▼                                         │
+│  ┌───────────────────────────────────────────────────────────────────┐  │
+│  │       Оболочка навигации и плеера (Морф-переход + Отступы)        │  │
+│  │  • Непрозрачное плавающее облачко вкладок (стиль Telegram)        │  │
+│  │  • Парящий мини-проигрыватель чуть выше облачка навигации         │  │
+│  │  • Полноэкранный плеер:                                           │  │
+│  │     - Шапка: контекст («сейчас играет») + [Обложка | Клип] сверху │  │
+│  │     - Центр: обложка / синхронизированный Muted-клип              │  │
+│  │     - Блок управления + зазор до док-кнопки «Очередь»             │  │
+│  │     - Предпросмотр и полноэкранный текст в цвете активной темы    │  │
+│  └───────────────────────────────┬───────────────────────────────────┘  │
+└──────────────────────────────────┼──────────────────────────────────────┘
+                                   ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                VIEWMODEL И УПРАВЛЕНИЕ СОСТОЯНИЕМ                        │
+│  • PlaybackState (+ playbackContextTitle, MV state, morph progress)     │
+│  • Отменяемые фоновые джобы (lyrics, MV probe, explicit, stats sync)    │
+│  • Конструктор тем (HEX <-> HSV двусторонняя синхронизация + контраст)  │
+└──────────────┬──────────────────────────┬───────────────────────────────┘
+               ▼                          ▼
+┌──────────────────────────────┐  ┌───────────────────────────────────────┐
+│   РЕЗОЛВЕРЫ И МУЛЬТИМЕДИА    │  │        ЛОКАЛЬНЫЕ И ОБЛАЧНЫЕ ДАННЫЕ    │
+│                              │  │                                       │
+│ • Подбор аудиопотока         │  │ • Локальная БД (миграция v5 → v6):    │
+│   (строгий скоринг артистов  │  │   плейлисты (isPinned, pinnedAtMs,    │
+│   и защита от подмены трека) │  │   sortMode), порядок треков (position)│
+│ • Поиск клипов               │  │ • Резервное копирование статистики:   │
+│   (YouTube Music / Spotify)  │  │   Firestore (облако Google) +         │
+│ • Поиск текстов (v3 кэш):    │  │   MediaStore Downloads (авто-JSON) +  │
+│   Spicy Lyrics / Spotify /   │  │   SAF импорт после переустановки      │
+│   Apple Music / YT Music /   │  │ • Explicit-детектор:                  │
+│   SoundCloud / Amazon Music  │  │   метаданные каталога до загрузки     │
+└──────────────────────────────┘  └───────────────────────────────────────┘
 ```
 
-- **State Updates**:
-  - `CloudSyncUiState`: Track and playlist totals reactively track the personal library (liked tracks, user uploads, and unique playlist tracks) whenever local mutations or cloud sync finish.
-  - `MusicVideoUiState`: Adds silent availability state (`trackId`, `isCheckingAvailability`, `stream`, `isVideoModeEnabled`) so the player switcher only renders when a clip exists or is confirmed available.
-- **Interactive Mapping**:
-  - Swiping downward inside `NowPlayingSheet` triggers nested-scroll pre-scroll capture when vertical scroll offset is at `0`, feeding `dragOffsetY` smoothly toward collapse threshold.
-  - Playlist import parses source metadata, batches local/online track matching concurrently, persists playlist + cross-references, and immediately refreshes cloud metrics/counters.
+### Модель данных и миграции
+- **База данных (версия 5 → 6)**:
+  - В сущность плейлиста добавляются поля закрепления (`isPinned`, `pinnedAtMs`) и выбранный режим сортировки (`sortMode`: `CUSTOM`, `TITLE_ASC`, `ADDED_DESC`, `DURATION_DESC`, `ARTIST_ASC`, `ALBUM_ASC`).
+  - Для ручного пользовательского порядка (`CUSTOM`) используется существующий индекс позиции связи трек–плейлист, обновляемый транзакцией при перестановке треков.
+- **Синхронизация и бэкап статистики**:
+  - При каждом сохранении статистики (с троттлингом для скорости) данные отправляются в Firestore (для авторизованного Google-аккаунта) и одновременно сбрасываются в единый JSON-файл резервной копии в `Downloads/SoundLap/`.
+  - Если после удаления и переустановки пользователь вошёл в Google — статистика подтягивается автоматически; если работает локально — в «Статистике» и «Настройках» доступен 1-тап импорт этого файла.
+- **Модель трека и контекста**:
+  - Хранит полный список имён исполнителей без усечения до одного автора.
+  - Хранит ранний флаг `isExplicit` и обновляет `playbackContextTitle` при запуске из плейлиста, альбома, поиска или микса.
+
+### Матрица интерактивных состояний и обработчиков
+- **Навигация и мини-плеер**: обработка переключения 5 вкладок Медиатеки, корректный сброс/обновление запрошенного индекса (вкладка «Загруженные треки» смещается на индекс `3`, «Подписки» — на `2`, «Статистика» — на `4`).
+- **Сортировка и контекстное меню плейлистов**: долгое нажатие открывает BottomSheet/Menu с прямыми колбэками закрепления, запуска, перемешивания, редактирования (включая смену обложки) и удаления; смена сортировки мгновенно переупорядочивает отображаемый список и сохраняет режим в БД и облако.
+- **Резолвер клипа и плеера**: при смене трека предыдущие запросы текста и видеоклипа отменяются; видеоплеер подписывается на `isPlaying`, `seek` и периодическую калибровку с `MediaController` без визуальных рывков и зависаний.
+- **HEX-редактор темы**: ввод `#RRGGBB` или `RRGGBB` парсится в реальном времени, пересчитывает слайдеры HSV, сохраняет акцент в `Preferences` и обновляет контрастный `onPrimary` цвет (тёмный текст на белом `#FFFFFF` и светлых акцентах).

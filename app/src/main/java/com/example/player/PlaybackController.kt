@@ -47,6 +47,7 @@ data class PlaybackUiState(
     val repeatMode: Int = Player.REPEAT_MODE_OFF,
     val audioFocusStatus: AudioFocusUiStatus = AudioFocusUiStatus.IDLE,
     val transitionCounter: Int = 0,
+    val playbackContextTitle: String? = null,
 )
 
 class PlaybackController(
@@ -65,6 +66,7 @@ class PlaybackController(
         val track: TrackEntity,
         val queue: List<TrackEntity>,
         val startPositionMs: Long,
+        val contextTitle: String? = null,
     )
     private var pendingPlayRequest: PendingPlayRequest? = null
     private var pendingTogglePlay: Boolean = false
@@ -141,7 +143,7 @@ class PlaybackController(
                     pendingPlayRequest = null
                     pendingTogglePlay = false
                     if (pending != null) {
-                        playTrack(pending.track, pending.queue, pending.startPositionMs)
+                        playTrack(pending.track, pending.queue, pending.startPositionMs, pending.contextTitle)
                     } else if (togglePending) {
                         togglePlayPause()
                     } else {
@@ -186,7 +188,7 @@ class PlaybackController(
 
     fun playFromActiveQueue(track: TrackEntity) {
         val active = _queueTracks.value.ifEmpty { cachedQueue }
-        playTrack(track, active, startPositionMs = 0L)
+        playTrack(track, active, startPositionMs = 0L, contextTitle = _playbackState.value.playbackContextTitle)
     }
 
     fun playNextInQueue(track: TrackEntity) {
@@ -246,12 +248,18 @@ class PlaybackController(
     private fun idxOfCurrent(list: List<TrackEntity>, currentId: String?): Int =
         if (currentId == null) -1 else list.indexOfFirst { it.id == currentId }
 
-    fun playTrack(track: TrackEntity, queue: List<TrackEntity> = cachedQueue, startPositionMs: Long = 0L) {
+    fun playTrack(
+        track: TrackEntity,
+        queue: List<TrackEntity> = cachedQueue,
+        startPositionMs: Long = 0L,
+        contextTitle: String? = null,
+    ) {
         knownTracksById[track.id] = track
         queue.forEach { knownTracksById[it.id] = it }
+        val resolvedContext = contextTitle?.trim()?.takeIf { it.isNotEmpty() }
 
         val controller = mediaController ?: run {
-            pendingPlayRequest = PendingPlayRequest(track, queue, startPositionMs)
+            pendingPlayRequest = PendingPlayRequest(track, queue, startPositionMs, resolvedContext)
             // Start resolving direct audio URL immediately in parallel with service bind
             FullStreamResolver.prefetchTracks(listOf(track), dao)
             // Optimistic UI feedback so 1 tap never feels ignored while binding MediaController
@@ -261,6 +269,7 @@ class PlaybackController(
                     isPlaying = true,
                     isBuffering = true,
                     durationMs = track.durationMs,
+                    playbackContextTitle = resolvedContext,
                 )
             }
             connect()
@@ -311,47 +320,51 @@ class PlaybackController(
                 repeatMode = controller.repeatMode,
                 shuffleEnabled = controller.shuffleModeEnabled,
                 maxLeadWaitMs = 0L,
-                fallbackApplyOnActive = {
-                    startMediaItems(
-                        controller = controller,
-                        mediaItems = mediaItems,
-                        targetIndex = targetIndex,
-                        startPositionMs = startPositionMs,
-                        track = track,
-                        prefetchQueue = playableQueue,
-                        initialVolume = 1f,
-                    )
-                },
-                onDeckActivated = { _, isReady ->
-                    onCrossfadeDeckActivated(
-                        track = track,
-                        queue = playableQueue,
-                        startPositionMs = startPositionMs,
-                        isReady = isReady,
-                    )
-                },
-            )
-        } else {
-            rapidSkipTrackId = track.id
-            rapidSkipExpiresAtMs = System.currentTimeMillis() + 9_500L
-            SoundLapaPlaybackService.stopActiveCrossfade(restorePrimaryVolume = true)
-            startMediaItems(
-                controller = controller,
-                mediaItems = mediaItems,
-                targetIndex = targetIndex,
-                startPositionMs = startPositionMs,
-                track = track,
-                prefetchQueue = playableQueue,
-                initialVolume = 1f,
-            )
+                    fallbackApplyOnActive = {
+                        startMediaItems(
+                            controller = controller,
+                            mediaItems = mediaItems,
+                            targetIndex = targetIndex,
+                            startPositionMs = startPositionMs,
+                            track = track,
+                            prefetchQueue = playableQueue,
+                            initialVolume = 1f,
+                            contextTitle = resolvedContext,
+                        )
+                    },
+                    onDeckActivated = { _, isReady ->
+                        onCrossfadeDeckActivated(
+                            track = track,
+                            queue = playableQueue,
+                            startPositionMs = startPositionMs,
+                            isReady = isReady,
+                            contextTitle = resolvedContext,
+                        )
+                    },
+                )
+            } else {
+                rapidSkipTrackId = track.id
+                rapidSkipExpiresAtMs = System.currentTimeMillis() + 9_500L
+                SoundLapaPlaybackService.stopActiveCrossfade(restorePrimaryVolume = true)
+                startMediaItems(
+                    controller = controller,
+                    mediaItems = mediaItems,
+                    targetIndex = targetIndex,
+                    startPositionMs = startPositionMs,
+                    track = track,
+                    prefetchQueue = playableQueue,
+                    initialVolume = 1f,
+                    contextTitle = resolvedContext,
+                )
+            }
         }
-    }
 
     private fun onCrossfadeDeckActivated(
         track: TrackEntity,
         queue: List<TrackEntity>,
         startPositionMs: Long,
         isReady: Boolean = true,
+        contextTitle: String? = _playbackState.value.playbackContextTitle,
     ) {
         val safeStart = startPositionMs.coerceAtLeast(0L)
         lastCrossfadeActivatedId = track.id
@@ -376,6 +389,7 @@ class PlaybackController(
                 positionMs = safeStart,
                 durationMs = track.durationMs,
                 transitionCounter = it.transitionCounter + 1,
+                playbackContextTitle = contextTitle,
             )
         }
 
@@ -397,6 +411,7 @@ class PlaybackController(
         track: TrackEntity,
         prefetchQueue: List<TrackEntity>,
         initialVolume: Float?,
+        contextTitle: String? = null,
     ) {
         val safeStart = startPositionMs.coerceAtLeast(0L)
         if (initialVolume != null) {
@@ -425,6 +440,7 @@ class PlaybackController(
                 positionMs = safeStart,
                 durationMs = track.durationMs,
                 transitionCounter = it.transitionCounter + 1,
+                playbackContextTitle = contextTitle,
             )
         }
 
@@ -1019,6 +1035,28 @@ class PlaybackController(
         positionTickerJob = scope.launch {
             var lastPersistedTrackId: String? = null
             var lastPersistedPosMs = -1L
+            var activeListeningTrackId: String? = null
+            var lastListeningWallMs = 0L
+            var pendingListeningMs = 0L
+
+            fun flushPendingListening(trackId: String?, force: Boolean) {
+                if (trackId == null) return
+                val minThreshold = if (force) 1000L else 5000L
+                if (pendingListeningMs >= minThreshold) {
+                    val deltaToFlush = pendingListeningMs
+                    pendingListeningMs = 0L
+                    val trackObj = knownTracksById[trackId]
+                        ?: cachedQueue.find { it.id == trackId }
+                    if (trackObj != null) {
+                        launch(Dispatchers.IO) {
+                            preferences.recordListeningProgress(trackObj, deltaToFlush)
+                        }
+                    }
+                } else if (force) {
+                    pendingListeningMs = 0L
+                }
+            }
+
             while (isActive) {
                 val controller = mediaController
                 var isActivelyRunning = false
@@ -1048,6 +1086,23 @@ class PlaybackController(
                         true to _playbackState.value.isBuffering
                     }
                     isActivelyRunning = playing || buffering
+
+                    // Track actual elapsed wall-clock listening time for Week/Month/Year stats
+                    if (controllerMediaId != activeListeningTrackId) {
+                        flushPendingListening(activeListeningTrackId, force = true)
+                        activeListeningTrackId = controllerMediaId
+                        lastListeningWallMs = if (playing && controller.isPlaying) now else 0L
+                    } else if (playing && controller.isPlaying && controllerMediaId != null) {
+                        if (lastListeningWallMs > 0L) {
+                            val wallDelta = (now - lastListeningWallMs).coerceIn(0L, 1500L)
+                            pendingListeningMs += wallDelta
+                        }
+                        lastListeningWallMs = now
+                        flushPendingListening(controllerMediaId, force = false)
+                    } else {
+                        flushPendingListening(activeListeningTrackId, force = true)
+                        lastListeningWallMs = 0L
+                    }
 
                     if (_positionMs.value != pos) {
                         _positionMs.value = pos
@@ -1118,6 +1173,10 @@ class PlaybackController(
                             preferences.savePlaybackState(currentId, pos)
                         }
                     }
+                } else {
+                    flushPendingListening(activeListeningTrackId, force = true)
+                    activeListeningTrackId = null
+                    lastListeningWallMs = 0L
                 }
                 val nextDelayMs = when {
                     controller == null || controller.mediaItemCount == 0 -> 900L

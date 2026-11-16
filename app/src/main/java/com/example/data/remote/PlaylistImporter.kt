@@ -3,6 +3,7 @@ package com.example.data.remote
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
+import com.example.data.local.ExplicitContentDetector
 import com.example.data.local.PlaylistEntity
 import com.example.data.local.PlaylistTrackCrossRef
 import com.example.data.local.SoundLapaDao
@@ -18,6 +19,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -40,6 +42,7 @@ data class ImportedTrackQuery(
     val durationMs: Long = 180_000L,
     val albumTitle: String? = null,
     val coverArtUrl: String? = null,
+    val isExplicit: Boolean = false,
 )
 
 data class ParsedPlaylistPayload(
@@ -367,12 +370,14 @@ class PlaylistImporter(
                         ?.let { (it as? JsonObject)?.get("url")?.jsonPrimitive?.contentOrNull }
                         ?.takeIf { it.isNotBlank() }
                 }
+                val isExplicitFlag = trackObj["explicit"]?.jsonPrimitive?.booleanOrNull == true
                 queries += ImportedTrackQuery(
                     title = title,
                     artist = artist,
                     durationMs = durationMs,
                     albumTitle = albumTitle,
                     coverArtUrl = trackCover,
+                    isExplicit = isExplicitFlag,
                 )
                 if (queries.size >= MAX_IMPORT_TRACKS) break
             }
@@ -407,8 +412,13 @@ class PlaylistImporter(
             val obj = el as? JsonObject ?: return@mapNotNull null
             val trackTitle = obj["title"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
             if (trackTitle.isBlank()) return@mapNotNull null
-            val artist = (obj["artist"] as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+            val contributors = (obj["contributors"] as? JsonArray)?.mapNotNull { c ->
+                (c as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotBlank() }
+            }.orEmpty()
+            val primaryArtist = (obj["artist"] as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+            val artist = if (contributors.isNotEmpty()) contributors.distinct().joinToString(", ") else primaryArtist
             val sec = obj["duration"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 180L
+            val isExplicitFlag = obj["explicit_lyrics"]?.jsonPrimitive?.booleanOrNull == true
             val albumObj = obj["album"] as? JsonObject
             val album = if (kind == "album") {
                 title
@@ -425,6 +435,7 @@ class PlaylistImporter(
                 durationMs = (sec.coerceAtLeast(30L) * 1000L),
                 albumTitle = album,
                 coverArtUrl = trackCover,
+                isExplicit = isExplicitFlag,
             )
         }
         return ParsedPlaylistPayload(
@@ -445,10 +456,72 @@ class PlaylistImporter(
 
         if (payload.queries.isNotEmpty()) {
             val limitedQueries = payload.queries.take(MAX_IMPORT_TRACKS)
-            val semaphore = Semaphore(5)
+            val existingTracks = runCatching { dao.getAllTracksOnce() }.getOrDefault(emptyList())
+            val byId = existingTracks.associateBy { it.id }
+            val byArtistTitle = HashMap<String, TrackEntity>(existingTracks.size * 2)
+            val byTitleOnly = HashMap<String, TrackEntity>(existingTracks.size * 2)
+            for (existing in existingTracks) {
+                val isConcreteStream = !existing.sourceUri.isNullOrBlank() &&
+                    !existing.sourceUri.startsWith("soundlapa://resolve-full") &&
+                    !existing.sourceUri.startsWith("soundlap://resolve-full")
+                val artistTitleKey = "${existing.artist.trim().lowercase()}|${existing.title.trim().lowercase()}"
+                val prevByPair = byArtistTitle[artistTitleKey]
+                if (prevByPair == null || (isConcreteStream && prevByPair.sourceUri?.startsWith("soundlapa://") == true)) {
+                    byArtistTitle[artistTitleKey] = existing
+                }
+                val titleKey = existing.title.trim().lowercase()
+                val prevByTitle = byTitleOnly[titleKey]
+                if (prevByTitle == null || (isConcreteStream && prevByTitle.sourceUri?.startsWith("soundlapa://") == true)) {
+                    byTitleOnly[titleKey] = existing
+                }
+            }
+
+            // Decide upfront which unmatched items get eager parallel network resolution (first 10),
+            // while remaining items are materialized instantly with soundlapa://resolve-full for zero-wait playback lookup.
+            val localMatches = arrayOfNulls<TrackEntity>(limitedQueries.size)
+            val eagerResolveIndices = HashSet<Int>(EAGER_IMPORT_RESOLUTION_LIMIT)
+            limitedQueries.forEachIndexed { idx, item ->
+                val pairKey = "${item.artist.trim().lowercase()}|${item.title.trim().lowercase()}"
+                val lazyId = deterministicImportTrackId(item)
+                val localMatch = byId[lazyId]
+                    ?: byArtistTitle[pairKey]
+                    ?: if (item.artist.isBlank()) byTitleOnly[item.title.trim().lowercase()] else null
+                if (localMatch != null) {
+                    val hasConcreteSource = !localMatch.sourceUri.isNullOrBlank() &&
+                        !localMatch.sourceUri.startsWith("soundlapa://resolve-full") &&
+                        !localMatch.sourceUri.startsWith("soundlap://resolve-full")
+                    if (hasConcreteSource) {
+                        val enrichedCover = localMatch.coverArtPath?.takeIf { it.isNotBlank() }
+                            ?: item.coverArtUrl?.takeIf { it.isNotBlank() }
+                        val enrichedAlbum = localMatch.albumTitle?.takeIf { it.isNotBlank() }
+                            ?: item.albumTitle?.takeIf { it.isNotBlank() }
+                        localMatches[idx] = localMatch.copy(
+                            coverArtPath = enrichedCover,
+                            albumTitle = enrichedAlbum,
+                        )
+                        return@forEachIndexed
+                    }
+                }
+                if (eagerResolveIndices.size < EAGER_IMPORT_RESOLUTION_LIMIT) {
+                    eagerResolveIndices.add(idx)
+                }
+            }
+
+            val semaphore = Semaphore(IMPORT_SEMAPHORE_CONCURRENCY)
             val foundOrdered = coroutineScope {
                 limitedQueries.mapIndexed { idx, item ->
                     async {
+                        val cachedLocal = localMatches[idx]
+                        if (cachedLocal != null) {
+                            return@async idx to cachedLocal
+                        }
+                        if (item.title.isBlank()) {
+                            return@async idx to null
+                        }
+                        if (!eagerResolveIndices.contains(idx)) {
+                            return@async idx to buildLazyImportedTrack(item)
+                        }
+
                         semaphore.withPermit {
                             val searchQuery = buildString {
                                 if (item.artist.isNotBlank()) {
@@ -458,13 +531,13 @@ class PlaylistImporter(
                                 append(item.title)
                             }.trim()
                             if (searchQuery.isBlank()) return@withPermit idx to null
-                            val matched = withTimeoutOrNull(8500L) {
+                            val matched = withTimeoutOrNull(IMPORT_PER_TRACK_TIMEOUT_MS) {
                                 val scDef = async {
-                                    runCatching { FullStreamResolver.searchSoundCloud(searchQuery, limit = 6) }
+                                    runCatching { FullStreamResolver.searchSoundCloud(searchQuery, limit = 4) }
                                         .getOrDefault(emptyList())
                                 }
                                 val ytDef = async {
-                                    runCatching { FullStreamResolver.searchYouTubeMusic(searchQuery, limit = 6) }
+                                    runCatching { FullStreamResolver.searchYouTubeMusic(searchQuery, limit = 4) }
                                         .getOrDefault(emptyList())
                                 }
                                 val combinedCandidates = scDef.await() + ytDef.await()
@@ -473,7 +546,7 @@ class PlaylistImporter(
                                     targetArtist = item.artist,
                                     targetTitle = item.title,
                                     expectedDurationMs = item.durationMs,
-                                ) ?: audiusRepository.searchTracks(searchQuery, limit = 5).getOrNull()?.let { list ->
+                                ) ?: audiusRepository.searchTracks(searchQuery, limit = 4).getOrNull()?.let { list ->
                                     FullStreamResolver.pickBestTrackMatch(
                                         candidates = list,
                                         targetArtist = item.artist,
@@ -486,20 +559,21 @@ class PlaylistImporter(
                                 val resolvedTitle = item.title.takeIf { it.isNotBlank() } ?: matched.title
                                 val resolvedArtist = item.artist.takeIf { it.isNotBlank() } ?: matched.artist
                                 val preferredCover = item.coverArtUrl?.takeIf { it.isNotBlank() }
-                                    ?: matched.coverArtPath?.takeIf { FullStreamResolver.isSpotifyOrSoundCloudArtwork(it) }
+                                    ?: matched.coverArtPath?.takeIf { it.isNotBlank() }
                                     ?: audiusRepository.resolvePreferredCoverArt(
                                         artist = resolvedArtist,
                                         title = resolvedTitle,
                                     )
-                                    ?: matched.coverArtPath
                                 matched.copy(
                                     title = resolvedTitle,
                                     artist = resolvedArtist,
                                     albumTitle = item.albumTitle?.takeIf { it.isNotBlank() } ?: matched.albumTitle,
                                     coverArtPath = preferredCover,
-                                )
+                                ).also {
+                                    if (item.isExplicit) ExplicitContentDetector.markPreDetectedExplicit(it.id)
+                                }
                             } else {
-                                null
+                                buildLazyImportedTrack(item)
                             }
                             idx to finalMatched
                         }
@@ -525,7 +599,7 @@ class PlaylistImporter(
             PlaylistEntity(
                 id = playlistId,
                 name = finalName,
-                description = "Импорт (${payload.sourceLabel}) • ${uniqueTracks.size} трек(ов)",
+                description = com.example.data.local.PlaylistMetadataHelper.encodeImportedDescription(payload.sourceLabel),
                 coverArtPath = resolvedPlaylistCover,
             ),
         )
@@ -634,6 +708,53 @@ class PlaylistImporter(
     companion object {
         const val MAX_PLAYLIST_FILE_BYTES = 5 * 1024 * 1024
         const val MAX_IMPORT_TRACKS = 160
+        const val EAGER_IMPORT_RESOLUTION_LIMIT = 10
+        const val IMPORT_SEMAPHORE_CONCURRENCY = 12
+        const val IMPORT_PER_TRACK_TIMEOUT_MS = 4500L
+
+        fun deterministicImportTrackId(item: ImportedTrackQuery): String {
+            val normArtist = item.artist.trim().lowercase()
+            val normTitle = item.title.trim().lowercase()
+            val hash = kotlin.math.abs("$normArtist|$normTitle".hashCode())
+            return "imp_$hash"
+        }
+
+        fun buildLazyImportedTrack(item: ImportedTrackQuery): TrackEntity? {
+            val cleanTitle = item.title.trim()
+            if (cleanTitle.isBlank()) return null
+            val cleanArtist = item.artist.trim()
+            val lazyId = deterministicImportTrackId(item)
+            val searchQuery = listOf(cleanArtist, cleanTitle).filter { it.isNotBlank() }.joinToString(" ")
+            val duration = item.durationMs.coerceAtLeast(30_000L)
+            fun encodeParam(value: String): String =
+                java.net.URLEncoder.encode(value, "UTF-8").replace("+", "%20")
+            val lazyUri = "soundlapa://resolve-full?id=${encodeParam(lazyId)}" +
+                "&q=${encodeParam(searchQuery)}" +
+                "&artist=${encodeParam(cleanArtist)}" +
+                "&title=${encodeParam(cleanTitle)}" +
+                "&dur=$duration"
+            if (item.isExplicit) {
+                ExplicitContentDetector.markPreDetectedExplicit(lazyId)
+            }
+            return TrackEntity(
+                id = lazyId,
+                title = cleanTitle,
+                artist = cleanArtist.ifBlank { "Неизвестный артист" },
+                genre = "Импорт",
+                durationMs = duration,
+                waveformJson = TrackEntity.encodeWaveform(TrackEntity.defaultWaveform()),
+                cachedFilePath = null,
+                sourceUri = lazyUri,
+                coverArtPath = item.coverArtUrl?.takeIf { it.isNotBlank() },
+                accentColorHex = 0xFF8B5CF6L,
+                secondaryColorHex = 0xFF5B21B6L,
+                isUserUpload = false,
+                isAutoImported = true,
+                isCachedOffline = false,
+                fileSizeBytes = 0L,
+                albumTitle = item.albumTitle?.takeIf { it.isNotBlank() },
+            )
+        }
 
         private val ALLOWED_FILE_EXTENSIONS = setOf("csv", "m3u", "m3u8", "txt", "json")
         private val ALLOWED_MIME_TYPES = setOf(
@@ -947,12 +1068,14 @@ class PlaylistImporter(
                                 val trackTitle = obj["title"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
                                 val subtitle = obj["subtitle"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
                                 val dur = obj["duration"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 180_000L
+                                val isExp = obj["isExplicit"]?.jsonPrimitive?.booleanOrNull == true
                                 if (trackTitle.isBlank()) return@mapNotNull null
                                 ImportedTrackQuery(
                                     title = trackTitle,
                                     artist = subtitle,
                                     durationMs = dur,
                                     albumTitle = if (entityType == "album") decodeHtmlEntities(title) else null,
+                                    isExplicit = isExp,
                                 )
                             }
                         } else {

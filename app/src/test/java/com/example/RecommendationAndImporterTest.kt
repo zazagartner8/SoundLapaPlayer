@@ -3,10 +3,20 @@ package com.example
 import com.example.audio.RecommendationEngine
 import com.example.data.local.ListeningHistoryEntry
 import com.example.data.local.TrackEntity
+import com.example.data.local.ExplicitContentDetector
+import com.example.data.local.ListeningPlayEvent
+import com.example.data.local.ListeningStatsAggregator
+import com.example.data.local.ListeningStatsPeriod
+import com.example.data.local.PlaylistMetadataHelper
+import com.example.data.local.SoundLapUidFormatter
 import com.example.data.remote.PlaylistImporter
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.TimeUnit
+
 
 class RecommendationAndImporterTest {
 
@@ -208,5 +218,167 @@ class RecommendationAndImporterTest {
         assertRejected("notes.txt", "text/plain", "Just some random notes\nNothing like tracks here\nHello world".toByteArray())
         // HTML page saved as .json or .txt
         assertRejected("page.json", "application/json", "<!DOCTYPE html><html><body>Hi</body></html>".toByteArray())
+    }
+
+    @Test
+    fun buildLazyImportedTrackCreatesDeterministicIdAndOnDemandResolveUri() {
+        val query = com.example.data.remote.ImportedTrackQuery(
+            title = "Kosandra",
+            artist = "Miyagi",
+            durationMs = 215_000L,
+            albumTitle = "Yamakasi",
+            coverArtUrl = "https://example.com/cover.jpg",
+        )
+        val built = PlaylistImporter.buildLazyImportedTrack(query)!!
+        assertEquals(PlaylistImporter.deterministicImportTrackId(query), built.id)
+        assertTrue(built.sourceUri!!.startsWith("soundlapa://resolve-full?"))
+        assertTrue(built.isAutoImported)
+        assertEquals("https://example.com/cover.jpg", built.coverArtPath)
+        assertEquals("Yamakasi", built.albumTitle)
+    }
+
+    @Test
+    fun playlistMetadataHelperSeparatesImportSourceFromUserDescriptionAndHandlesLegacyStrings() {
+        val encoded = PlaylistMetadataHelper.encodeImportedDescription("Spotify", "Вечерний вайб")
+        val parsed = PlaylistMetadataHelper.parse(encoded)
+        assertEquals("Spotify", parsed.importSource)
+        assertEquals("Вечерний вайб", parsed.userDescription)
+
+        val legacy = PlaylistMetadataHelper.parse("Импорт (Spotify) • 12 трек(ов) Любимые биты")
+        assertEquals("Spotify", legacy.importSource)
+        assertEquals("Любимые биты", legacy.userDescription)
+
+        val edited = PlaylistMetadataHelper.mergeUserEdit(encoded, "Новое описание")
+        val reparsed = PlaylistMetadataHelper.parse(edited)
+        assertEquals("Spotify", reparsed.importSource)
+        assertEquals("Новое описание", reparsed.userDescription)
+    }
+
+    @Test
+    fun explicitContentDetectorIdentifiesProfanityInMetadataAndStrippedLyricsWithoutFalsePositives() {
+        assertTrue(ExplicitContentDetector.containsExplicitLanguage("стало похуй"))
+        assertTrue(ExplicitContentDetector.containsExplicitLanguage("No More Shit (Explicit)"))
+        assertTrue(ExplicitContentDetector.isLyricsExplicit("[00:12.34] Yeah fuck the noise\n[00:16.00] Clean line"))
+        assertFalse(ExplicitContentDetector.containsExplicitLanguage("Хорошая добрая песня о лете"))
+        assertFalse(ExplicitContentDetector.isLyricsExplicit("[00:10.00] Sunlight over the ocean"))
+    }
+
+    @Test
+    fun listeningStatsAggregatorComputesWindowsTopEntitiesAndDeterministicUid() {
+        val nowMs = 1_730_000_000_000L
+        val today = ListeningStatsAggregator.dayEpochFor(nowMs)
+        val events = listOf(
+            ListeningPlayEvent(
+                dayEpoch = today,
+                trackId = "t1",
+                title = "Kosandra",
+                artist = "Miyagi & Andy Panda",
+                genre = "Хип-хоп",
+                listenedMs = TimeUnit.MINUTES.toMillis(20),
+                playCount = 6,
+                lastPlayedAtMs = nowMs,
+            ),
+            ListeningPlayEvent(
+                dayEpoch = today - 10,
+                trackId = "t2",
+                title = "Minor",
+                artist = "Miyagi",
+                genre = "Хип-хоп",
+                listenedMs = TimeUnit.MINUTES.toMillis(15),
+                playCount = 4,
+                lastPlayedAtMs = nowMs - TimeUnit.DAYS.toMillis(10),
+            ),
+            ListeningPlayEvent(
+                dayEpoch = today - 45,
+                trackId = "t3",
+                title = "Blinding Lights",
+                artist = "The Weeknd",
+                genre = "Pop",
+                listenedMs = TimeUnit.MINUTES.toMillis(50),
+                playCount = 14,
+                lastPlayedAtMs = nowMs - TimeUnit.DAYS.toMillis(45),
+            ),
+        )
+
+        val week = ListeningStatsAggregator.compute(events, ListeningStatsPeriod.WEEK, nowMs)
+        assertEquals(20, week.totalMinutes)
+        assertEquals("Miyagi", week.favoriteArtist?.artistName)
+        assertEquals("Kosandra", week.favoriteTrack?.title)
+
+        val month = ListeningStatsAggregator.compute(events, ListeningStatsPeriod.MONTH, nowMs)
+        assertEquals(35, month.totalMinutes)
+        assertEquals("Miyagi", month.favoriteArtist?.artistName)
+
+        val year = ListeningStatsAggregator.compute(events, ListeningStatsPeriod.YEAR, nowMs)
+        assertEquals(85, year.totalMinutes)
+        assertEquals("The Weeknd", year.favoriteArtist?.artistName)
+        assertEquals("Blinding Lights", year.favoriteTrack?.title)
+
+        val merged = ListeningStatsAggregator.mergeEvents(
+            local = listOf(events.first()),
+            remote = listOf(events.first().copy(listenedMs = TimeUnit.MINUTES.toMillis(30), playCount = 9)),
+            nowMs = nowMs,
+        )
+        assertEquals(TimeUnit.MINUTES.toMillis(30), merged.first { it.trackId == "t1" }.listenedMs)
+
+        val uid1 = SoundLapUidFormatter.format("firebase_uid_abc")
+        val uid2 = SoundLapUidFormatter.format("firebase_uid_abc")
+        val uid3 = SoundLapUidFormatter.format("firebase_uid_xyz")
+        assertEquals(uid1, uid2)
+        assertNotEquals(uid1, uid3)
+        assertTrue(uid1.matches(Regex("^SL-[0-9A-F]{4}-[0-9A-F]{4}$")))
+        assertEquals("SL-GUEST", SoundLapUidFormatter.format(null))
+    }
+
+    @Test
+    fun recommendationsAndForYouAvoidDuplicatesAndRespectLanguageAffinity() {
+        val nowMs = System.currentTimeMillis()
+        val ruPlayed = track("r1", "Ночной рейс", "Куроков", "Хип-хоп", playCount = 150)
+        val ruFresh1 = track("r2", "Стало проще", "Куроков", "Хип-хоп", playCount = 120)
+        val ruFresh2 = track("r3", "Среди огней", "Скриптонит", "Хип-хоп", playCount = 300)
+        val enPop = track("e1", "Neon Skies", "Random Pop Star", "Pop", playCount = 500)
+
+        val events = listOf(
+            ListeningPlayEvent(
+                dayEpoch = ListeningStatsAggregator.dayEpochFor(nowMs),
+                trackId = "r1",
+                title = "Ночной рейс",
+                artist = "Куроков",
+                genre = "Хип-хоп",
+                listenedMs = TimeUnit.MINUTES.toMillis(25),
+                playCount = 5,
+                lastPlayedAtMs = nowMs,
+            ),
+        )
+        val history = listOf(
+            ListeningHistoryEntry(
+                trackId = "r1",
+                title = "Ночной рейс",
+                artist = "Куроков",
+                genre = "Хип-хоп",
+                playCount = 5,
+                lastPlayedAtMs = nowMs,
+            ),
+        )
+
+        val recs = RecommendationEngine.computeRecommendations(
+            allTracks = listOf(ruPlayed, ruFresh1, ruFresh2, enPop),
+            listeningHistory = history,
+            listeningEvents = events,
+            searchHistory = listOf("Куроков"),
+            limit = 2,
+        )
+        val recIds = recs.tracks.map { it.id }.toSet()
+        assertFalse(recIds.contains("e1"))
+
+        val forYou = RecommendationEngine.computeForYouTracks(
+            allTracks = listOf(ruPlayed, ruFresh1, ruFresh2, enPop),
+            listeningHistory = history,
+            listeningEvents = events,
+            searchHistory = listOf("Куроков"),
+            excludeIds = recIds,
+            limit = 2,
+        )
+        assertTrue(forYou.none { it.id in recIds })
     }
 }

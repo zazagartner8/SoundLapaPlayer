@@ -181,4 +181,132 @@ class FullStreamResolverTest {
             tempDir.deleteRecursively()
         }
     }
+
+    @Test
+    fun `computeSynchronizedVideoPositionMs aligns matching, intro-extended, shorter, and canvas clips cleanly`() {
+        // Matching duration (<= 1.5s diff): 1:1 tracking
+        assertEquals(
+            90_000L,
+            FullStreamResolver.computeSynchronizedVideoPositionMs(
+                audioPositionMs = 90_000L,
+                audioDurationMs = 180_000L,
+                clipDurationMs = 181_000L,
+            ),
+        )
+
+        // Shorter official MV edit (160s vs 200s): maps proportionally so clip completes alongside track
+        assertEquals(
+            80_000L,
+            FullStreamResolver.computeSynchronizedVideoPositionMs(
+                audioPositionMs = 100_000L,
+                audioDurationMs = 200_000L,
+                clipDurationMs = 160_000L,
+            ),
+        )
+
+        // MV with cinematic intro (+20s longer): skips intro portion & tracks proportionally to end
+        val withIntroMid = FullStreamResolver.computeSynchronizedVideoPositionMs(
+            audioPositionMs = 90_000L,
+            audioDurationMs = 180_000L,
+            clipDurationMs = 200_000L,
+        )
+        assertTrue(withIntroMid in 95_000L..110_000L)
+
+        // Short visual teaser / canvas (30s clip for 180s track): modulo loops cleanly
+        assertEquals(
+            15_000L,
+            FullStreamResolver.computeSynchronizedVideoPositionMs(
+                audioPositionMs = 75_000L,
+                audioDurationMs = 180_000L,
+                clipDurationMs = 30_000L,
+            ),
+        )
+    }
+
+    @Test
+    fun `transliterateToLatin and scoreTrackMatch accurately match Cyrillic queries and reject wrong songs`() {
+        assertEquals("kurokov", FullStreamResolver.transliterateToLatin("Куроков"))
+        assertTrue(FullStreamResolver.transliterateToLatin("стало похуй").contains("stalo"))
+
+        val exactTranslit = TrackEntity(
+            id = "sc_exact",
+            title = "stalo pohui",
+            artist = "kurokov",
+            genre = "Hip-Hop",
+            durationMs = 148_000L,
+            waveformJson = "[]",
+            cachedFilePath = null,
+            sourceUri = "https://soundcloud.com/kurokov/stalo-pohui",
+            coverArtPath = null,
+            accentColorHex = 0xFFFF5500L,
+            secondaryColorHex = 0xFF9C2B00L,
+            isUserUpload = false,
+            isCachedOffline = false,
+            fileSizeBytes = 0L,
+        )
+        val unrelatedTrack = TrackEntity(
+            id = "yt_wrong",
+            title = "Совсем Другой Трек",
+            artist = "Неизвестный Артист",
+            genre = "Rap",
+            durationMs = 210_000L,
+            waveformJson = "[]",
+            cachedFilePath = null,
+            sourceUri = "https://youtube.com/watch?v=wrong",
+            coverArtPath = null,
+            accentColorHex = 0xFFFF5500L,
+            secondaryColorHex = 0xFF9C2B00L,
+            isUserUpload = false,
+            isCachedOffline = false,
+            fileSizeBytes = 0L,
+        )
+        val slowedRemix = TrackEntity(
+            id = "yt_slowed",
+            title = "стало похуй (slowed + reverb remix)",
+            artist = "kurokov fan",
+            genre = "Hip-Hop",
+            durationMs = 185_000L,
+            waveformJson = "[]",
+            cachedFilePath = null,
+            sourceUri = "https://youtube.com/watch?v=slowed",
+            coverArtPath = null,
+            accentColorHex = 0xFFFF5500L,
+            secondaryColorHex = 0xFF9C2B00L,
+            isUserUpload = false,
+            isCachedOffline = false,
+            fileSizeBytes = 0L,
+        )
+
+        val picked = FullStreamResolver.pickBestTrackMatch(
+            candidates = listOf(unrelatedTrack, slowedRemix, exactTranslit),
+            targetArtist = "kurokov",
+            targetTitle = "стало похуй",
+            expectedDurationMs = 149_000L,
+        )
+        assertEquals("sc_exact", picked?.id)
+        assertTrue(FullStreamResolver.scoreTrackMatch(unrelatedTrack, "kurokov", "стало похуй", 149_000L) < 0)
+        assertTrue(FullStreamResolver.isUnwantedVariantTitle(slowedRemix.title))
+    }
+
+    @Test
+    fun `computeSynchronizedVideoPlaybackSpeed adapts playback speed smoothly for slightly mismatched clip lengths`() {
+        // Matching within 2 seconds -> exact 1.0x speed
+        assertEquals(
+            1.0f,
+            FullStreamResolver.computeSynchronizedVideoPlaybackSpeed(180_000L, 181_500L),
+            0.001f,
+        )
+        // Slightly longer clip (200s vs 180s) -> proportional ratio clamped smoothly (~1.11x)
+        val faster = FullStreamResolver.computeSynchronizedVideoPlaybackSpeed(180_000L, 200_000L)
+        assertTrue(faster in 1.10f..1.12f)
+        // Slightly shorter clip (160s vs 180s) -> proportional ratio (~0.89x)
+        val slower = FullStreamResolver.computeSynchronizedVideoPlaybackSpeed(180_000L, 160_000L)
+        assertTrue(slower in 0.88f..0.90f)
+        // Short looping canvas (15s vs 180s) -> normal 1.0x speed
+        assertEquals(
+            1.0f,
+            FullStreamResolver.computeSynchronizedVideoPlaybackSpeed(180_000L, 15_000L),
+            0.001f,
+        )
+    }
 }

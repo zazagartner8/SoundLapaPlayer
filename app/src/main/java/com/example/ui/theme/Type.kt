@@ -9,11 +9,7 @@ import androidx.compose.ui.unit.sp
 import com.example.R
 
 val ComfortaaBoldFamily = FontFamily(
-    Font(R.font.comfortaa, FontWeight.Normal),
-    Font(R.font.comfortaa, FontWeight.Medium),
-    Font(R.font.comfortaa, FontWeight.SemiBold),
     Font(R.font.comfortaa, FontWeight.Bold),
-    Font(R.font.comfortaa, FontWeight.ExtraBold),
 )
 
 val SoundLapaTypography = Typography(

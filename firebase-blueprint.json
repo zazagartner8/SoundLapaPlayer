@@ -33,6 +33,18 @@
           "type": "boolean",
           "description": "Whether custom avatar uploads are permanently blocked for this account due to 18+ moderation violation"
         },
+        "accountUid": {
+          "type": "string",
+          "description": "Deterministic shareable SoundLap account UID (SL-XXXX-XXXX)"
+        },
+        "searchHistory": {
+          "type": "array",
+          "description": "Recent cloud-synced search queries (max 30)"
+        },
+        "listeningStatsJson": {
+          "type": "string",
+          "description": "Compact JSON array of 365-day daily listening events for cross-device stats sync"
+        },
         "settings": {
           "type": "object",
           "description": "Cloud-synced SoundLapa preferences (language, theme, accent color, crossfade, haptics, cache, data saver)"

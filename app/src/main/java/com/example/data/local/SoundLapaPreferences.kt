@@ -104,6 +104,8 @@ data class SoundLapaSettings(
     val customUsername: String? = null,
     val devUnlockedUid: String? = null,
     val waveFilterConfig: WaveFilterConfig = WaveFilterConfig(),
+    val listeningEvents: List<ListeningPlayEvent> = emptyList(),
+    val explicitTrackIds: Set<String> = emptySet(),
 )
 
 class SoundLapaPreferences(private val context: Context) {
@@ -145,6 +147,8 @@ class SoundLapaPreferences(private val context: Context) {
         val CUSTOM_USERNAME = stringPreferencesKey("custom_username")
         val DEV_UNLOCKED_UID = stringPreferencesKey("dev_unlocked_uid")
         val WAVE_FILTER_JSON = stringPreferencesKey("wave_filter_json")
+        val LISTENING_EVENTS_JSON = stringPreferencesKey("listening_events_json")
+        val EXPLICIT_TRACK_IDS = stringPreferencesKey("explicit_track_ids_json")
     }
 
     // Synchronous SharedPreferences mirror ensures instant restoration on frame 0
@@ -208,12 +212,21 @@ class SoundLapaPreferences(private val context: Context) {
             customUsername = syncPrefs.getString("custom_username", null),
             devUnlockedUid = syncPrefs.getString("dev_unlocked_uid", null),
             waveFilterConfig = decodeWaveFilterConfig(syncPrefs.getString("wave_filter_json", null)),
+            listeningEvents = decodeListeningEvents(syncPrefs.getString("listening_events_json", null)),
+            explicitTrackIds = decodeStringSet(syncPrefs.getString("explicit_track_ids_json", null)),
         )
     }
 
     private fun decodeWaveFilterConfig(raw: String?): WaveFilterConfig {
         if (raw.isNullOrBlank()) return WaveFilterConfig()
         return runCatching { Json.decodeFromString<WaveFilterConfig>(raw) }.getOrDefault(WaveFilterConfig())
+    }
+
+    private fun decodeListeningEvents(raw: String?): List<ListeningPlayEvent> {
+        if (raw.isNullOrBlank()) return emptyList()
+        return runCatching {
+            ListeningStatsAggregator.pruneOldEvents(Json.decodeFromString<List<ListeningPlayEvent>>(raw))
+        }.getOrDefault(emptyList())
     }
 
     private fun decodeStringSet(raw: String?): Set<String> {
@@ -583,7 +596,7 @@ class SoundLapaPreferences(private val context: Context) {
         if (trimmed.length < 2) return
         val updated = (listOf(trimmed) + _settings.value.searchHistory.filterNot {
             it.equals(trimmed, ignoreCase = true)
-        }).take(15)
+        }).take(25)
         val encoded = Json.encodeToString(updated)
         updateSync({ it.copy(searchHistory = updated) }) {
             putString("search_history_json", encoded)
@@ -632,12 +645,142 @@ class SoundLapaPreferences(private val context: Context) {
             playCount = (existing?.playCount ?: 0) + 1,
             lastPlayedAtMs = now,
         )
-        val updated = (listOf(nextEntry) + current.filterNot { it.trackId == track.id }).take(50)
-        val encoded = Json.encodeToString(updated)
-        updateSync({ it.copy(listeningHistory = updated) }) {
-            putString("listening_history_json", encoded)
+        val updated = (listOf(nextEntry) + current.filterNot { it.trackId == track.id }).take(60)
+        val encodedHistory = Json.encodeToString(updated)
+
+        val todayEpoch = ListeningStatsAggregator.dayEpochFor(now)
+        val currentEvents = _settings.value.listeningEvents
+        val existingEvent = currentEvents.find { it.dayEpoch == todayEpoch && it.trackId == track.id }
+        val nextEvent = ListeningPlayEvent(
+            dayEpoch = todayEpoch,
+            trackId = track.id,
+            title = track.title.take(120),
+            artist = track.artist.take(120),
+            genre = track.genre.take(48),
+            coverArtPath = track.coverArtPath?.takeIf { it.startsWith("http", ignoreCase = true) }?.take(260),
+            listenedMs = existingEvent?.listenedMs ?: 0L,
+            playCount = (existingEvent?.playCount ?: 0) + 1,
+            lastPlayedAtMs = now,
+        )
+        val updatedEvents = ListeningStatsAggregator.pruneOldEvents(
+            listOf(nextEvent) + currentEvents.filterNot { it.dayEpoch == todayEpoch && it.trackId == track.id },
+            nowMs = now,
+        )
+        val encodedEvents = Json.encodeToString(updatedEvents)
+
+        updateSync({ it.copy(listeningHistory = updated, listeningEvents = updatedEvents) }) {
+            putString("listening_history_json", encodedHistory)
+            putString("listening_events_json", encodedEvents)
         }
-        context.soundLapaDataStore.edit { it[Keys.LISTENING_HISTORY] = encoded }
+        context.soundLapaDataStore.edit {
+            it[Keys.LISTENING_HISTORY] = encodedHistory
+            it[Keys.LISTENING_EVENTS_JSON] = encodedEvents
+        }
+    }
+
+    suspend fun recordListeningProgress(track: TrackEntity, deltaMs: Long) {
+        if (deltaMs < 500L) return
+        val now = System.currentTimeMillis()
+        val todayEpoch = ListeningStatsAggregator.dayEpochFor(now)
+        val currentEvents = _settings.value.listeningEvents
+        val existing = currentEvents.find { it.dayEpoch == todayEpoch && it.trackId == track.id }
+        val nextEvent = ListeningPlayEvent(
+            dayEpoch = todayEpoch,
+            trackId = track.id,
+            title = track.title.take(120),
+            artist = track.artist.take(120),
+            genre = track.genre.take(48),
+            coverArtPath = existing?.coverArtPath
+                ?: track.coverArtPath?.takeIf { it.startsWith("http", ignoreCase = true) }?.take(260),
+            listenedMs = (existing?.listenedMs ?: 0L) + deltaMs.coerceAtMost(300_000L),
+            playCount = (existing?.playCount ?: 0).coerceAtLeast(1),
+            lastPlayedAtMs = now,
+        )
+        val updatedEvents = ListeningStatsAggregator.pruneOldEvents(
+            listOf(nextEvent) + currentEvents.filterNot { it.dayEpoch == todayEpoch && it.trackId == track.id },
+            nowMs = now,
+        )
+        val encodedEvents = Json.encodeToString(updatedEvents)
+        updateSync({ it.copy(listeningEvents = updatedEvents) }) {
+            putString("listening_events_json", encodedEvents)
+        }
+        context.soundLapaDataStore.edit { it[Keys.LISTENING_EVENTS_JSON] = encodedEvents }
+    }
+
+    suspend fun markTracksExplicit(trackIds: Collection<String>) {
+        val clean = trackIds.map { it.trim() }.filter { it.isNotEmpty() }
+        if (clean.isEmpty()) return
+        val current = _settings.value.explicitTrackIds
+        if (clean.all { it in current }) return
+        val next = (current + clean).toList().takeLast(400).toSet()
+        val csv = next.joinToString(",")
+        updateSync({ it.copy(explicitTrackIds = next) }) {
+            putString("explicit_track_ids_json", csv)
+        }
+        context.soundLapaDataStore.edit { it[Keys.EXPLICIT_TRACK_IDS] = csv }
+    }
+
+    suspend fun mergeCloudSearchAndListening(
+        cloudSearchHistory: List<String>,
+        cloudEvents: List<ListeningPlayEvent>,
+    ) {
+        val cleanLocalSearch = _settings.value.searchHistory
+        val mergedSearch = buildList {
+            val seen = HashSet<String>()
+            for (q in cleanLocalSearch + cloudSearchHistory) {
+                val t = q.trim()
+                if (t.length >= 2 && seen.add(t.lowercase())) {
+                    add(t)
+                    if (size >= 25) break
+                }
+            }
+        }
+        val mergedEvents = ListeningStatsAggregator.mergeEvents(
+            local = _settings.value.listeningEvents,
+            remote = cloudEvents,
+        )
+        val encodedSearch = Json.encodeToString(mergedSearch)
+        val encodedEvents = Json.encodeToString(mergedEvents)
+        updateSync({
+            it.copy(
+                searchHistory = mergedSearch,
+                listeningEvents = mergedEvents,
+            )
+        }) {
+            putString("search_history_json", encodedSearch)
+            putString("listening_events_json", encodedEvents)
+        }
+        context.soundLapaDataStore.edit {
+            it[Keys.SEARCH_HISTORY] = encodedSearch
+            it[Keys.LISTENING_EVENTS_JSON] = encodedEvents
+        }
+    }
+
+    suspend fun mergeImportedStatsBackup(backup: SoundLapStatsBackup): Int {
+        val mergedEvents = ListeningStatsAggregator.mergeEvents(
+            local = _settings.value.listeningEvents,
+            remote = backup.listeningEvents,
+        )
+        val mergedHistory = ListeningStatsBackupManager.mergeHistory(
+            local = _settings.value.listeningHistory,
+            imported = backup.listeningHistory,
+        )
+        val encodedEvents = Json.encodeToString(mergedEvents)
+        val encodedHistory = Json.encodeToString(mergedHistory)
+        updateSync({
+            it.copy(
+                listeningEvents = mergedEvents,
+                listeningHistory = mergedHistory,
+            )
+        }) {
+            putString("listening_events_json", encodedEvents)
+            putString("listening_history_json", encodedHistory)
+        }
+        context.soundLapaDataStore.edit {
+            it[Keys.LISTENING_EVENTS_JSON] = encodedEvents
+            it[Keys.LISTENING_HISTORY] = encodedHistory
+        }
+        return backup.listeningEvents.size
     }
 
     suspend fun setLastCloudUserId(uid: String?) {

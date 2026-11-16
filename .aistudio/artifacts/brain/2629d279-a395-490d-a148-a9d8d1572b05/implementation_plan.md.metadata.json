@@ -1,6 +1,6 @@
 {
-  "summary":  "Implementation plan for SoundLap v3.3 visual polish, dark-mode text contrast audit, seamless top banner background blend, Spotify-style scrollable Now Playing layout with fixed swipe-to-dismiss, edge-free zoomed video clips with background availability probing, reactive cloud sync counters, accelerated playlist import with reordered link field/hint, and iOS-style waving glossy country flags.",
-  "updatedAt":  "2026-11-15T14:49:10.818640914Z",
+  "summary":  "Подробный архитектурный и UX-план обновления SoundLap v3.4: плеер, синхронизация клипов, мультиплатформенный поиск текстов без Genius, точный подбор треков, навигация в стиле Telegram, библиотека с закреплениями и сортировкой, неубиваемая статистика, HEX-темизация и оптимизация производительности.",
+  "updatedAt":  "2026-11-16T16:10:59.659203791Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

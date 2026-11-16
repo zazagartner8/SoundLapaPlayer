@@ -82,13 +82,21 @@ object GoogleAuthManager {
                 if (credential is CustomCredential && credential.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
                     val googleIdToken = GoogleIdTokenCredential.createFrom(credential.data).idToken
                     val authCredential = GoogleAuthProvider.getCredential(googleIdToken, null)
-                    Firebase.auth.signInWithCredential(authCredential).await()
-                    onAuthSuccess()
+                    withContext(kotlinx.coroutines.NonCancellable) {
+                        Firebase.auth.signInWithCredential(authCredential).await()
+                    }
+                    withContext(kotlinx.coroutines.Dispatchers.Main.immediate) {
+                        onAuthSuccess()
+                    }
                 } else {
-                    onUnauthenticated()
+                    withContext(kotlinx.coroutines.Dispatchers.Main.immediate) {
+                        onUnauthenticated()
+                    }
                 }
             } catch (_: Exception) {
-                onUnauthenticated()
+                withContext(kotlinx.coroutines.Dispatchers.Main.immediate) {
+                    onUnauthenticated()
+                }
             }
         }
     }
@@ -108,11 +116,6 @@ object GoogleAuthManager {
             return
         }
 
-        val signInOption = GetSignInWithGoogleOption.Builder(serverClientId = clientId).build()
-        val request = GetCredentialRequest.Builder()
-            .addCredentialOption(signInOption)
-            .build()
-
         val activity = context.findActivity()
         if (activity == null) {
             onAuthError("Activity context required for Google Sign-In")
@@ -121,22 +124,53 @@ object GoogleAuthManager {
 
         scope.launch {
             try {
-                val result = credentialManager.getCredential(activity, request)
-                val credential = result.credential
+                val signInOption = GetSignInWithGoogleOption.Builder(serverClientId = clientId).build()
+                val primaryRequest = GetCredentialRequest.Builder()
+                    .addCredentialOption(signInOption)
+                    .build()
+
+                val response = try {
+                    credentialManager.getCredential(activity, primaryRequest)
+                } catch (cancel: GetCredentialCancellationException) {
+                    throw cancel
+                } catch (primaryErr: androidx.credentials.exceptions.GetCredentialException) {
+                    Log.w(TAG, "Primary SignInWithGoogle flow failed (${primaryErr.type}), trying GoogleIdOption fallback")
+                    val fallbackOption = GetGoogleIdOption.Builder()
+                        .setFilterByAuthorizedAccounts(false)
+                        .setServerClientId(clientId)
+                        .setAutoSelectEnabled(false)
+                        .build()
+                    val fallbackRequest = GetCredentialRequest.Builder()
+                        .addCredentialOption(fallbackOption)
+                        .build()
+                    credentialManager.getCredential(activity, fallbackRequest)
+                }
+
+                val credential = response.credential
                 if (credential is CustomCredential && credential.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
                     val googleIdToken = GoogleIdTokenCredential.createFrom(credential.data).idToken
                     val authCredential = GoogleAuthProvider.getCredential(googleIdToken, null)
-                    Firebase.auth.signInWithCredential(authCredential).await()
-                    onAuthSuccess()
+                    withContext(kotlinx.coroutines.NonCancellable) {
+                        Firebase.auth.signInWithCredential(authCredential).await()
+                    }
+                    withContext(kotlinx.coroutines.Dispatchers.Main.immediate) {
+                        onAuthSuccess()
+                    }
                 } else {
-                    onAuthError("Unexpected credential type")
+                    withContext(kotlinx.coroutines.Dispatchers.Main.immediate) {
+                        onAuthError("Unexpected credential type: ${credential.type}")
+                    }
                 }
             } catch (e: GetCredentialCancellationException) {
                 Log.w(TAG, "Google Sign-In flow cancelled or dismissed: ${e.message}", e)
-                onAuthCancelled()
+                withContext(kotlinx.coroutines.Dispatchers.Main.immediate) {
+                    onAuthCancelled()
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Google Sign-In failed", e)
-                onAuthError(e.localizedMessage ?: "Sign in failed")
+                withContext(kotlinx.coroutines.Dispatchers.Main.immediate) {
+                    onAuthError(e.localizedMessage ?: "Sign in failed")
+                }
             }
         }
     }

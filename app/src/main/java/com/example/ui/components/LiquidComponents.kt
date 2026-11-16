@@ -80,6 +80,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
+import com.example.data.local.ExplicitContentDetector
+import com.example.data.local.LocalExplicitTrackIds
 import com.example.data.local.TrackEntity
 import com.example.ui.BugReportUiState
 import com.example.ui.SoundLapaTab
@@ -101,10 +103,12 @@ fun SystemUtilityTopBar(
     val strings = LocalAppStrings.current
     val accent = MaterialTheme.colorScheme.primary
 
+    val topBannerShape = RoundedCornerShape(bottomStart = 28.dp, bottomEnd = 28.dp)
+
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(bottomStart = 24.dp, bottomEnd = 24.dp)),
+            .clip(topBannerShape),
     ) {
         TopBannerVideo(
             accent = accent,
@@ -345,6 +349,13 @@ fun QuickPickGridCard(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val trackAccent = Color(track.accentColorHex)
+    val containerColor = if (isCurrentPlaying) {
+        trackAccent.copy(alpha = 0.18f)
+    } else {
+        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f)
+    }
+
     Surface(
         modifier = modifier
             .fillMaxWidth()
@@ -352,7 +363,10 @@ fun QuickPickGridCard(
             .testTag("quick_pick_${track.id}"),
         onClick = onClick,
         shape = QuickPickShape,
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f),
+        color = containerColor,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        tonalElevation = if (isCurrentPlaying) 8.dp else 4.dp,
+        shadowElevation = if (isCurrentPlaying) 6.dp else 2.dp,
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -394,10 +408,11 @@ fun TrackRowItem(
     val subtitle = remember(track.artist, track.durationMs) {
         "${track.artist} • ${formatDuration(track.durationMs)}"
     }
+    val trackAccent = Color(track.accentColorHex)
     val rowBackground = if (isCurrentTrack) {
-        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.52f)
+        trackAccent.copy(alpha = 0.16f)
     } else {
-        Color.Transparent
+        MaterialTheme.colorScheme.surface.copy(alpha = 0.34f)
     }
     val thumbSize = if (compact) 48.dp else 62.dp
     val thumbRadius = if (compact) 11.dp else 15.dp
@@ -406,6 +421,7 @@ fun TrackRowItem(
     Row(
         modifier = modifier
             .fillMaxWidth()
+            .clip(TrackRowShape)
             .background(rowBackground, TrackRowShape)
             .clickable(onClick = onPlayClick)
             .padding(horizontal = 8.dp, vertical = verticalPad)
@@ -440,19 +456,32 @@ fun TrackRowItem(
             }
         }
 
+        val explicitIds = LocalExplicitTrackIds.current
+        val isExplicit = remember(track.id, track.title, track.albumTitle, track.description, explicitIds) {
+            ExplicitContentDetector.isExplicit(track, explicitIds)
+        }
         Column(
             modifier = Modifier.weight(1f),
             horizontalAlignment = Alignment.Start,
             verticalArrangement = Arrangement.spacedBy(if (compact) 2.dp else 3.dp),
         ) {
-            Text(
-                text = track.title,
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
-                color = if (isCurrentTrack) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                if (isExplicit) {
+                    ExplicitTrackBadge()
+                }
+                Text(
+                    text = track.title,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (isCurrentTrack) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+            }
             Text(
                 text = subtitle,
                 style = MaterialTheme.typography.bodySmall,
@@ -462,49 +491,20 @@ fun TrackRowItem(
             )
         }
 
-        if (onRemoveFromPlaylistClick != null) {
-            Box(
-                modifier = Modifier
-                    .size(48.dp)
-                    .clip(CircleShape)
-                    .clickable(onClick = onRemoveFromPlaylistClick)
-                    .testTag("track_remove_${track.id}"),
-                contentAlignment = Alignment.Center,
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(24.dp)
-                        .border(
-                            width = 1.4.dp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f),
-                            shape = CircleShape,
-                        ),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Close,
-                        contentDescription = strings.removeFromPlaylist,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(14.dp),
-                    )
-                }
-            }
-        } else {
-            Box(
-                modifier = Modifier
-                    .size(48.dp)
-                    .clip(CircleShape)
-                    .clickable(onClick = onLikeClick)
-                    .testTag("track_like_${track.id}"),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    imageVector = if (track.isLiked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
-                    contentDescription = strings.cdLikeTrack,
-                    tint = if (track.isLiked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(20.dp),
-                )
-            }
+        Box(
+            modifier = Modifier
+                .size(48.dp)
+                .clip(CircleShape)
+                .clickable(onClick = onLikeClick)
+                .testTag("track_like_${track.id}"),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = if (track.isLiked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+                contentDescription = strings.cdLikeTrack,
+                tint = if (track.isLiked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(20.dp),
+            )
         }
 
         Box(
@@ -540,19 +540,50 @@ fun FloatingMiniPlayer(
     AnimatedVisibility(visible = track != null, modifier = modifier) {
         if (track == null) return@AnimatedVisibility
         val accent = Color(track.accentColorHex)
+        val explicitIds = LocalExplicitTrackIds.current
+        val isExplicit = remember(track.id, track.title, track.albumTitle, track.description, explicitIds) {
+            ExplicitContentDetector.isExplicit(track, explicitIds)
+        }
+        val onSurface = MaterialTheme.colorScheme.onSurface
+        val borderBrush = remember(accent, onSurface) {
+            androidx.compose.ui.graphics.Brush.horizontalGradient(
+                colors = listOf(
+                    accent.copy(alpha = 0.55f),
+                    onSurface.copy(alpha = 0.14f),
+                    accent.copy(alpha = 0.32f),
+                ),
+            )
+        }
+        val bgBrush = remember(accent) {
+            androidx.compose.ui.graphics.Brush.horizontalGradient(
+                colors = listOf(
+                    accent.copy(alpha = 0.14f),
+                    Color.Transparent,
+                ),
+            )
+        }
 
         Surface(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 12.dp)
                 .clip(MiniPlayerShape)
+                .border(
+                    width = 1.dp,
+                    brush = borderBrush,
+                    shape = MiniPlayerShape,
+                )
                 .clickable(onClick = onExpand)
                 .testTag("floating_mini_player"),
             shape = MiniPlayerShape,
-            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.86f),
-            tonalElevation = 8.dp,
-            shadowElevation = 8.dp,
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.90f),
+            contentColor = MaterialTheme.colorScheme.onSurface,
+            tonalElevation = 10.dp,
+            shadowElevation = 12.dp,
         ) {
+            Box(
+                modifier = Modifier.background(bgBrush),
+            ) {
             Column {
                 Row(
                     modifier = Modifier
@@ -572,13 +603,22 @@ fun FloatingMiniPlayer(
                         horizontalAlignment = Alignment.Start,
                         verticalArrangement = Arrangement.spacedBy(2.dp),
                     ) {
-                        Text(
-                            text = track.title,
-                            style = MaterialTheme.typography.titleSmall,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        ) {
+                            if (isExplicit) {
+                                ExplicitTrackBadge()
+                            }
+                            Text(
+                                text = track.title,
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false),
+                            )
+                        }
                         Text(
                             text = track.artist,
                             style = MaterialTheme.typography.bodySmall,
@@ -644,6 +684,7 @@ fun FloatingMiniPlayer(
                     accent = accent,
                 )
             }
+            }
         }
     }
 }
@@ -688,7 +729,7 @@ private fun MiniPlayerProgressLine(
             .padding(bottom = 3.dp)
             .height(3.dp)
             .clip(CircleShape),
-        color = accent,
+        color = MaterialTheme.colorScheme.primary,
         trackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.14f),
         strokeCap = StrokeCap.Round,
     )
@@ -702,57 +743,66 @@ fun LiquidBottomNavBar(
 ) {
     val strings = LocalAppStrings.current
     val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    val pillColor = if (isDark) Color(0xFF171520) else Color(0xFFFFFFFF)
+    val pillStroke = if (isDark) {
+        Color.White.copy(alpha = 0.10f)
+    } else {
+        MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)
+    }
 
-    Surface(
-        modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
-        color = if (isDark) Color(0xEC0E0D14) else MaterialTheme.colorScheme.surface.copy(alpha = 0.95f),
-        tonalElevation = 6.dp,
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .windowInsetsPadding(WindowInsets.navigationBars)
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        contentAlignment = Alignment.Center,
     ) {
-        Row(
+        Surface(
             modifier = Modifier
                 .fillMaxWidth()
-                .windowInsetsPadding(WindowInsets.navigationBars)
-                .padding(horizontal = 12.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.SpaceEvenly,
-            verticalAlignment = Alignment.CenterVertically,
+                .testTag("floating_telegram_bottom_nav"),
+            shape = CircleShape,
+            color = pillColor,
+            contentColor = MaterialTheme.colorScheme.onSurface,
+            tonalElevation = 0.dp,
+            shadowElevation = 14.dp,
+            border = androidx.compose.foundation.BorderStroke(0.75.dp, pillStroke),
         ) {
-            NavTabItem(
-                selected = selectedTab == SoundLapaTab.HOME,
-                label = strings.tabHome,
-                selectedIconRes = R.drawable.ic_nav_home_filled,
-                unselectedIconRes = R.drawable.ic_nav_home_outline,
-                testTag = "nav_tab_home",
-                onClick = { onSelectTab(SoundLapaTab.HOME) },
-                modifier = Modifier.weight(1f),
-            )
-            NavTabItem(
-                selected = selectedTab == SoundLapaTab.WAVE,
-                label = strings.tabWave,
-                selectedIconRes = R.drawable.ic_nav_wave_filled,
-                unselectedIconRes = R.drawable.ic_nav_wave_outline,
-                testTag = "nav_tab_wave",
-                onClick = { onSelectTab(SoundLapaTab.WAVE) },
-                modifier = Modifier.weight(1f),
-            )
-            NavTabItem(
-                selected = selectedTab == SoundLapaTab.SEARCH,
-                label = strings.tabSearch,
-                selectedIconRes = R.drawable.ic_nav_search_filled,
-                unselectedIconRes = R.drawable.ic_nav_search_outline,
-                testTag = "nav_tab_search",
-                onClick = { onSelectTab(SoundLapaTab.SEARCH) },
-                modifier = Modifier.weight(1f),
-            )
-            NavTabItem(
-                selected = selectedTab == SoundLapaTab.LIBRARY,
-                label = strings.tabLibrary,
-                selectedIconRes = R.drawable.ic_nav_library_filled,
-                unselectedIconRes = R.drawable.ic_nav_library_outline,
-                testTag = "nav_tab_library",
-                onClick = { onSelectTab(SoundLapaTab.LIBRARY) },
-                modifier = Modifier.weight(1f),
-            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 10.dp, vertical = 5.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                NavTabItem(
+                    selected = selectedTab == SoundLapaTab.HOME,
+                    label = strings.tabHome,
+                    selectedIconRes = R.drawable.ic_nav_home_filled,
+                    unselectedIconRes = R.drawable.ic_nav_home_outline,
+                    testTag = "nav_tab_home",
+                    onClick = { onSelectTab(SoundLapaTab.HOME) },
+                    modifier = Modifier.weight(1f),
+                )
+                NavTabItem(
+                    selected = selectedTab == SoundLapaTab.SEARCH,
+                    label = strings.tabSearch,
+                    selectedIconRes = R.drawable.ic_nav_search_filled,
+                    unselectedIconRes = R.drawable.ic_nav_search_outline,
+                    testTag = "nav_tab_search",
+                    onClick = { onSelectTab(SoundLapaTab.SEARCH) },
+                    modifier = Modifier.weight(1f),
+                )
+                NavTabItem(
+                    selected = selectedTab == SoundLapaTab.LIBRARY,
+                    label = strings.tabLibrary,
+                    selectedIconRes = R.drawable.ic_nav_library_filled,
+                    unselectedIconRes = R.drawable.ic_nav_library_outline,
+                    testTag = "nav_tab_library",
+                    onClick = { onSelectTab(SoundLapaTab.LIBRARY) },
+                    modifier = Modifier.weight(1f),
+                )
+            }
         }
     }
 }
@@ -852,22 +902,6 @@ fun LiquidNavigationRail(
             colors = NavigationRailItemDefaults.colors(indicatorColor = accent.copy(alpha = 0.18f)),
         )
         NavigationRailItem(
-            selected = selectedTab == SoundLapaTab.WAVE,
-            onClick = { onSelectTab(SoundLapaTab.WAVE) },
-            icon = {
-                Icon(
-                    painter = painterResource(
-                        if (selectedTab == SoundLapaTab.WAVE) R.drawable.ic_nav_wave_filled
-                        else R.drawable.ic_nav_wave_outline,
-                    ),
-                    contentDescription = strings.tabWave,
-                    modifier = Modifier.size(22.dp),
-                )
-            },
-            label = { Text(strings.tabWave) },
-            colors = NavigationRailItemDefaults.colors(indicatorColor = accent.copy(alpha = 0.18f)),
-        )
-        NavigationRailItem(
             selected = selectedTab == SoundLapaTab.SEARCH,
             onClick = { onSelectTab(SoundLapaTab.SEARCH) },
             icon = {
@@ -921,6 +955,9 @@ fun BugReportDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surface,
+        titleContentColor = MaterialTheme.colorScheme.onSurface,
+        textContentColor = MaterialTheme.colorScheme.onSurface,
         icon = {
             Icon(
                 imageVector = Icons.Rounded.Flag,

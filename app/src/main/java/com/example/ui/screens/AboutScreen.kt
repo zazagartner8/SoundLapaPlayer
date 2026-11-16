@@ -231,6 +231,7 @@ fun AboutScreen(
                                     Surface(
                                         shape = CircleShape,
                                         color = accent.copy(alpha = 0.22f),
+                                        contentColor = accent,
                                         modifier = Modifier.border(
                                             width = 1.dp,
                                             color = accent.copy(alpha = 0.45f),
@@ -253,6 +254,7 @@ fun AboutScreen(
                                         },
                                         shape = CircleShape,
                                         color = MaterialTheme.colorScheme.surface.copy(alpha = 0.65f),
+                                        contentColor = MaterialTheme.colorScheme.onSurface,
                                         modifier = Modifier.testTag("about_creator_badge"),
                                     ) {
                                         Text(

@@ -390,6 +390,7 @@ private fun CompactSearchField(
             .testTag("home_search_field"),
         shape = CircleShape,
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.8f),
+        contentColor = MaterialTheme.colorScheme.onSurface,
     ) {
         Row(
             modifier = Modifier
@@ -469,12 +470,17 @@ private fun FilterPill(
         modifier = Modifier
             .clip(CircleShape)
             .background(
-                if (selected) accent
-                else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
+                if (selected) {
+                    androidx.compose.ui.graphics.Brush.horizontalGradient(
+                        listOf(accent, accent.copy(alpha = 0.84f)),
+                    )
+                } else {
+                    androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.70f))
+                },
             )
             .border(
                 width = 1.dp,
-                color = if (selected) accent else Color.Transparent,
+                color = if (selected) Color.White.copy(alpha = 0.34f) else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.09f),
                 shape = CircleShape,
             )
             .clickable(onClick = onClick)
@@ -496,21 +502,33 @@ private fun TrendingSquareCard(
     isCurrent: Boolean,
     onClick: () -> Unit,
 ) {
+    val trackAccent = Color(track.accentColorHex)
     Column(
         modifier = Modifier
-            .width(152.dp)
-            .clip(RoundedCornerShape(20.dp))
+            .width(156.dp)
+            .clip(RoundedCornerShape(22.dp))
+            .background(
+                if (isCurrent) trackAccent.copy(alpha = 0.16f)
+                else MaterialTheme.colorScheme.surface.copy(alpha = 0.38f),
+            )
             .clickable(onClick = onClick)
-            .padding(4.dp),
+            .padding(6.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        TrackCoverArtwork(
-            track = track,
+        Box(
             modifier = Modifier.size(144.dp),
-            cornerRadius = 18.dp,
-            targetSizePx = 540,
-        )
-        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        ) {
+            TrackCoverArtwork(
+                track = track,
+                modifier = Modifier.fillMaxSize(),
+                cornerRadius = 18.dp,
+                targetSizePx = 540,
+            )
+        }
+        Column(
+            modifier = Modifier.padding(horizontal = 2.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
             Text(
                 text = track.title,
                 style = MaterialTheme.typography.titleSmall,

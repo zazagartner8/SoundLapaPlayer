@@ -74,12 +74,14 @@ fun ChangelogHistoryScreen(
                         Icon(
                             imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
                             contentDescription = strings.close,
+                            tint = MaterialTheme.colorScheme.onBackground,
                         )
                     }
                     Text(
                         text = changelog.screenTitle,
                         style = MaterialTheme.typography.headlineSmall,
                         fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onBackground,
                     )
                 }
             }
@@ -102,6 +104,7 @@ fun ChangelogHistoryScreen(
                             Surface(
                                 shape = RoundedCornerShape(50),
                                 color = if (index == 0) accent else MaterialTheme.colorScheme.surfaceVariant,
+                                contentColor = if (index == 0) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
                             ) {
                                 Text(
                                     text = entry.version,
@@ -118,6 +121,7 @@ fun ChangelogHistoryScreen(
                             Surface(
                                 shape = RoundedCornerShape(50),
                                 color = accent.copy(alpha = 0.14f),
+                                contentColor = accent,
                             ) {
                                 Text(
                                     text = entry.badge,
@@ -133,6 +137,7 @@ fun ChangelogHistoryScreen(
                             text = entry.title,
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface,
                         )
 
                         entry.items.forEach { bullet ->

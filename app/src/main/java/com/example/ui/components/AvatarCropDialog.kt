@@ -123,6 +123,7 @@ fun AvatarCropDialog(
                 .padding(horizontal = 20.dp),
             shape = RoundedCornerShape(28.dp),
             color = MaterialTheme.colorScheme.surface,
+            contentColor = MaterialTheme.colorScheme.onSurface,
             tonalElevation = 8.dp,
         ) {
             Column(
@@ -301,6 +302,8 @@ fun AvatarCropDialog(
                         Text(strings.playerV33.cropAvatarResetButton)
                     }
                 }
+
+                Avatar18PlusWarningBanner()
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),

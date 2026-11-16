@@ -59,10 +59,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.data.local.ListeningHistoryEntry
+import com.example.data.local.ListeningPlayEvent
+import com.example.data.local.TrackEntity
 import com.example.data.remote.CloudFriend
 import com.example.data.remote.CloudPublicProfile
 import com.example.data.remote.normalizeUsernameHandle
+import com.example.ui.StatsBackupUiState
 import com.example.ui.components.AccountAvatarImage
+import com.example.ui.components.AccountUidCopyRow
+import com.example.ui.components.ListeningStatsSection
 import com.example.ui.i18n.LocalAppStrings
 import com.example.ui.shaders.LiquidGlassCard
 
@@ -76,6 +82,7 @@ fun DeveloperVerifiedPill(
         modifier = modifier,
         shape = RoundedCornerShape(50),
         color = accent.copy(alpha = 0.20f),
+        contentColor = accent,
         border = androidx.compose.foundation.BorderStroke(1.dp, accent.copy(alpha = 0.55f)),
     ) {
         Row(
@@ -104,6 +111,7 @@ fun DeveloperVerifiedPill(
 fun UserProfileAndFriendsScreen(
     isSignedIn: Boolean,
     currentUid: String?,
+    accountUid: String? = null,
     currentProfile: CloudPublicProfile?,
     inspectedProfile: CloudPublicProfile?,
     friends: List<CloudFriend>,
@@ -111,6 +119,9 @@ fun UserProfileAndFriendsScreen(
     isSearching: Boolean,
     isClaimingUsername: Boolean,
     statusMessage: String?,
+    listeningEvents: List<ListeningPlayEvent> = emptyList(),
+    fallbackHistory: List<ListeningHistoryEntry> = emptyList(),
+    allTracks: List<TrackEntity> = emptyList(),
     accent: Color,
     onBack: () -> Unit,
     onClearInspectedProfile: () -> Unit,
@@ -119,7 +130,11 @@ fun UserProfileAndFriendsScreen(
     onInspectProfile: (CloudPublicProfile) -> Unit,
     onAddFriend: (CloudPublicProfile) -> Unit,
     onRemoveFriend: (String) -> Unit,
+    onPlayTrack: (TrackEntity) -> Unit = {},
     onSignInRequest: () -> Unit,
+    statsBackupState: StatsBackupUiState? = null,
+    onRestoreStatsFromUri: ((android.net.Uri) -> Unit)? = null,
+    onClearStatsRestoreStatus: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val strings = LocalAppStrings.current
@@ -139,6 +154,7 @@ fun UserProfileAndFriendsScreen(
     var searchQuery by remember { mutableStateOf("") }
 
     val friendUids = remember(friends) { friends.mapTo(HashSet()) { it.friendUid } }
+    val tracksById = remember(allTracks) { allTracks.associateBy { it.id } }
 
     Box(
         modifier = modifier
@@ -169,6 +185,7 @@ fun UserProfileAndFriendsScreen(
                         Icon(
                             imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
                             contentDescription = strings.close,
+                            tint = MaterialTheme.colorScheme.onBackground,
                         )
                     }
                     Text(
@@ -179,6 +196,7 @@ fun UserProfileAndFriendsScreen(
                         },
                         style = MaterialTheme.typography.headlineSmall,
                         fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onBackground,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f),
@@ -417,10 +435,29 @@ fun UserProfileAndFriendsScreen(
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
+                                    accountUid?.takeIf { it.isNotBlank() }?.let { uid ->
+                                        AccountUidCopyRow(
+                                            accountUid = uid,
+                                            accent = accent,
+                                        )
+                                    }
                                 }
                             }
                         }
                     }
+                }
+
+                item(key = "profile_listening_stats", contentType = "listening_stats") {
+                    ListeningStatsSection(
+                        events = listeningEvents,
+                        fallbackHistory = fallbackHistory,
+                        tracksById = tracksById,
+                        accent = accent,
+                        onPlayTrack = onPlayTrack,
+                        backupState = statsBackupState,
+                        onRestoreBackupUri = onRestoreStatsFromUri,
+                        onClearRestoreStatus = onClearStatsRestoreStatus,
+                    )
                 }
 
                 if (!statusMessage.isNullOrBlank()) {
@@ -554,6 +591,7 @@ fun UserProfileAndFriendsScreen(
                                     .testTag("friend_row_${friend.friendUid}"),
                                 shape = RoundedCornerShape(20.dp),
                                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                                contentColor = MaterialTheme.colorScheme.onSurface,
                             ) {
                                 Row(
                                     modifier = Modifier
@@ -631,6 +669,7 @@ private fun PublicUserRowCard(
             .testTag("public_user_row_${profile.userId}"),
         shape = RoundedCornerShape(20.dp),
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+        contentColor = MaterialTheme.colorScheme.onSurface,
     ) {
         Row(
             modifier = Modifier

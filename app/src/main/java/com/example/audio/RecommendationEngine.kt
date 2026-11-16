@@ -1,6 +1,7 @@
 package com.example.audio
 
 import com.example.data.local.ListeningHistoryEntry
+import com.example.data.local.ListeningPlayEvent
 import com.example.data.local.TrackEntity
 import com.example.data.local.WaveFilterConfig
 import kotlin.math.ln
@@ -21,11 +22,129 @@ object RecommendationEngine {
         "клип", "трек", "песня", "версия", "аудио", "микс",
     )
 
+    private data class TasteProfile(
+        val artistWeights: Map<String, Float>,
+        val genreWeights: Map<String, Float>,
+        val tokenWeights: Map<String, Float>,
+        val topSeedArtists: List<String>,
+        val topSeedGenres: List<String>,
+        val preferredLanguage: String, // "ru", "en", or "auto"
+        val cyrillicShare: Float,
+        val hasPersonalSignals: Boolean,
+    )
+
+    private fun buildTasteProfile(
+        allTracks: List<TrackEntity>,
+        listeningHistory: List<ListeningHistoryEntry>,
+        listeningEvents: List<ListeningPlayEvent>,
+        searchHistory: List<String>,
+    ): TasteProfile {
+        val artistWeights = HashMap<String, Float>()
+        val artistDisplayByKey = HashMap<String, String>()
+        val genreWeights = HashMap<String, Float>()
+        val genreDisplayByKey = HashMap<String, String>()
+        val tokenWeights = HashMap<String, Float>()
+
+        var cyrillicWeight = 0f
+        var latinWeight = 0f
+
+        // 1. Duration-weighted recent listening events (minutes listened reflect true affinity)
+        val nowMs = System.currentTimeMillis()
+        for (event in listeningEvents) {
+            val ageDays = ((nowMs - event.lastPlayedAtMs).coerceAtLeast(0L) / 86_400_000f)
+            val recencyFactor = 1.8f / (1f + ageDays * 0.14f)
+            val minutes = (event.listenedMs.coerceAtLeast(15_000L) / 60_000f).coerceIn(0.25f, 8f)
+            val weight = recencyFactor * (0.8f + minutes)
+            addArtistSignal(event.artist, weight, artistWeights, artistDisplayByKey)
+            addGenreSignal(event.genre, weight * 0.9f, genreWeights, genreDisplayByKey)
+            tokenize("${event.title} ${event.artist}").forEach { token ->
+                tokenWeights[token] = (tokenWeights[token] ?: 0f) + weight * 0.55f
+            }
+            val sample = "${event.title} ${event.artist}"
+            if (containsCyrillic(sample)) cyrillicWeight += weight else latinWeight += weight
+        }
+
+        // 2. Signals from aggregate listening history
+        listeningHistory.forEachIndexed { index, entry ->
+            val recencyFactor = 1.6f / (1f + index * 0.22f)
+            val freqFactor = (1f + ln((entry.playCount.coerceAtLeast(1) + 1).toDouble()).toFloat())
+            val weight = recencyFactor * freqFactor
+
+            addArtistSignal(entry.artist, weight, artistWeights, artistDisplayByKey)
+            addGenreSignal(entry.genre, weight, genreWeights, genreDisplayByKey)
+            tokenize("${entry.title} ${entry.artist}").forEach { token ->
+                tokenWeights[token] = (tokenWeights[token] ?: 0f) + weight * 0.65f
+            }
+            val sample = "${entry.title} ${entry.artist}"
+            if (containsCyrillic(sample)) cyrillicWeight += weight * 0.7f else latinWeight += weight * 0.7f
+        }
+
+        // 3. Signals from liked tracks and user uploads
+        allTracks.forEach { track ->
+            if (track.isLiked) {
+                addArtistSignal(track.artist, 2.5f, artistWeights, artistDisplayByKey)
+                addGenreSignal(track.genre, 1.9f, genreWeights, genreDisplayByKey)
+                tokenize("${track.title} ${track.artist}").forEach { token ->
+                    tokenWeights[token] = (tokenWeights[token] ?: 0f) + 1.0f
+                }
+                if (containsCyrillic("${track.title} ${track.artist}")) cyrillicWeight += 1.4f else latinWeight += 1.4f
+            } else if (track.isUserUpload) {
+                addArtistSignal(track.artist, 0.9f, artistWeights, artistDisplayByKey)
+                addGenreSignal(track.genre, 0.8f, genreWeights, genreDisplayByKey)
+            }
+        }
+
+        // 4. Signals from recent searches (artists, moods, genres user actively searches)
+        searchHistory.take(8).forEachIndexed { index, query ->
+            val qWeight = 1.35f / (1f + index * 0.25f)
+            addArtistSignal(query, qWeight * 0.85f, artistWeights, artistDisplayByKey)
+            tokenize(query).forEach { token ->
+                tokenWeights[token] = (tokenWeights[token] ?: 0f) + qWeight
+            }
+            if (containsCyrillic(query)) cyrillicWeight += qWeight * 0.8f else latinWeight += qWeight * 0.8f
+        }
+
+        val topSeedArtists = artistWeights.entries
+            .sortedByDescending { it.value }
+            .mapNotNull { artistDisplayByKey[it.key] }
+            .distinct()
+            .take(4)
+
+        val topSeedGenres = genreWeights.entries
+            .sortedByDescending { it.value }
+            .mapNotNull { genreDisplayByKey[it.key] }
+            .distinct()
+            .take(3)
+
+        val totalLang = cyrillicWeight + latinWeight
+        val cyrShare = if (totalLang > 0f) cyrillicWeight / totalLang else 0.5f
+        val prefLang = when {
+            totalLang < 1.5f -> "auto"
+            cyrShare >= 0.62f -> "ru"
+            cyrShare <= 0.35f -> "en"
+            else -> "auto"
+        }
+
+        val hasSignals = artistWeights.isNotEmpty() || genreWeights.isNotEmpty() || tokenWeights.isNotEmpty()
+        return TasteProfile(
+            artistWeights = artistWeights,
+            genreWeights = genreWeights,
+            tokenWeights = tokenWeights,
+            topSeedArtists = topSeedArtists,
+            topSeedGenres = topSeedGenres,
+            preferredLanguage = prefLang,
+            cyrillicShare = cyrShare,
+            hasPersonalSignals = hasSignals,
+        )
+    }
+
     fun computeRecommendations(
         allTracks: List<TrackEntity>,
         listeningHistory: List<ListeningHistoryEntry>,
         searchHistory: List<String> = emptyList(),
         limit: Int = 12,
+        listeningEvents: List<ListeningPlayEvent> = emptyList(),
+        excludeIds: Set<String> = emptySet(),
     ): RecommendationResult {
         if (allTracks.isEmpty()) {
             return RecommendationResult(
@@ -36,141 +155,77 @@ object RecommendationEngine {
             )
         }
 
-        val artistWeights = HashMap<String, Float>()
-        val artistDisplayByKey = HashMap<String, String>()
-        val genreWeights = HashMap<String, Float>()
-        val genreDisplayByKey = HashMap<String, String>()
-        val tokenWeights = HashMap<String, Float>()
-
-        // 1. Signals from actual listening history (recency + repeat play count)
-        listeningHistory.forEachIndexed { index, entry ->
-            val recencyFactor = 1.6f / (1f + index * 0.25f)
-            val freqFactor = (1f + ln((entry.playCount.coerceAtLeast(1) + 1).toDouble()).toFloat())
-            val weight = recencyFactor * freqFactor
-
-            addArtistSignal(entry.artist, weight, artistWeights, artistDisplayByKey)
-            addGenreSignal(entry.genre, weight, genreWeights, genreDisplayByKey)
-            tokenize("${entry.title} ${entry.artist}").forEach { token ->
-                tokenWeights[token] = (tokenWeights[token] ?: 0f) + weight * 0.7f
-            }
-        }
-
-        // 2. Signals from liked tracks and user uploads
-        allTracks.forEach { track ->
-            if (track.isLiked) {
-                addArtistSignal(track.artist, 2.4f, artistWeights, artistDisplayByKey)
-                addGenreSignal(track.genre, 1.8f, genreWeights, genreDisplayByKey)
-                tokenize("${track.title} ${track.artist}").forEach { token ->
-                    tokenWeights[token] = (tokenWeights[token] ?: 0f) + 1.0f
-                }
-            } else if (track.isUserUpload) {
-                addArtistSignal(track.artist, 0.9f, artistWeights, artistDisplayByKey)
-                addGenreSignal(track.genre, 0.8f, genreWeights, genreDisplayByKey)
-            }
-        }
-
-        // 3. Signals from recent searches
-        searchHistory.take(5).forEachIndexed { index, query ->
-            val qWeight = 1.1f / (1f + index * 0.3f)
-            tokenize(query).forEach { token ->
-                tokenWeights[token] = (tokenWeights[token] ?: 0f) + qWeight
-            }
-        }
-
-        val topSeedArtists = artistWeights.entries
-            .sortedByDescending { it.value }
-            .mapNotNull { artistDisplayByKey[it.key] }
-            .distinct()
-            .take(3)
-
-        val topSeedGenres = genreWeights.entries
-            .sortedByDescending { it.value }
-            .mapNotNull { genreDisplayByKey[it.key] }
-            .distinct()
-            .take(2)
-
-        val hasPersonalSignals = artistWeights.isNotEmpty() || genreWeights.isNotEmpty() || tokenWeights.isNotEmpty()
-        val recentExactIds = listeningHistory.take(3).mapTo(HashSet()) { it.trackId }
+        val profile = buildTasteProfile(allTracks, listeningHistory, listeningEvents, searchHistory)
+        val recentExactIds = listeningHistory.take(5).mapTo(HashSet()) { it.trackId }
         val allHistoryIds = listeningHistory.mapTo(HashSet()) { it.trackId }
+        val nowMs = System.currentTimeMillis()
+        val lastPlayedById = listeningHistory.associate { it.trackId to it.lastPlayedAtMs }
 
-        val scored = allTracks.map { track ->
+        val candidatePool = if (excludeIds.isNotEmpty()) {
+            allTracks.filter { it.id !in excludeIds }.ifEmpty { allTracks }
+        } else {
+            allTracks
+        }
+
+        val scored = candidatePool.map { track ->
             val normArtist = normalizeKey(track.artist)
             val normGenre = normalizeKey(track.genre)
             val trackTokens = tokenize("${track.title} ${track.artist}")
+            val isCyr = containsCyrillic("${track.title} ${track.artist}")
 
             var score = 0f
-            if (hasPersonalSignals) {
-                // Direct or overlapping artist match
-                val directArtistWeight = artistWeights[normArtist] ?: 0f
-                score += directArtistWeight * 42f
+            if (profile.hasPersonalSignals) {
+                val directArtistWeight = profile.artistWeights[normArtist] ?: 0f
+                score += directArtistWeight * 40f
 
                 val trackArtistTokens = tokenize(track.artist)
                 val artistTokenOverlap = trackArtistTokens.sumOf { tok ->
-                    val w = tokenWeights[tok] ?: 0f
-                    w.toDouble()
+                    (profile.tokenWeights[tok] ?: 0f).toDouble()
                 }.toFloat()
-                score += artistTokenOverlap * 16f
+                score += artistTokenOverlap * 15f
 
-                // Genre affinity
-                val genreWeight = genreWeights[normGenre] ?: 0f
-                score += genreWeight * 22f
+                val genreWeight = profile.genreWeights[normGenre] ?: 0f
+                score += genreWeight * 26f
 
-                // Title & vibe token similarity
                 val tokenMatchScore = trackTokens.sumOf { tok ->
-                    (tokenWeights[tok] ?: 0f).toDouble()
+                    (profile.tokenWeights[tok] ?: 0f).toDouble()
                 }.toFloat()
-                score += tokenMatchScore * 11f
+                score += tokenMatchScore * 12f
 
-                // Surface undiscovered / unplayed tracks ahead of tracks just played seconds ago
-                if (track.id in recentExactIds) {
-                    score -= 48f
-                } else if (track.id in allHistoryIds) {
-                    score -= 12f
+                // Language affinity
+                score += when (profile.preferredLanguage) {
+                    "ru" -> if (isCyr) 26f else -14f
+                    "en" -> if (!isCyr) 22f else -12f
+                    else -> if (isCyr) (profile.cyrillicShare - 0.5f) * 20f else ((1f - profile.cyrillicShare) - 0.5f) * 20f
                 }
 
-                // Modest popularity tie-breaker so genuinely well-known matching tracks rise cleanly
-                score += ln((track.playCount.coerceAtLeast(1) + 1).toDouble()).toFloat() * 0.9f
+                // Strong novelty bias so recently played tracks never clutter Recommendations repeatedly
+                val lastPlayed = lastPlayedById[track.id] ?: 0L
+                val hoursSincePlay = if (lastPlayed > 0L) ((nowMs - lastPlayed).coerceAtLeast(0L) / 3_600_000f) else 999f
+                when {
+                    track.id in recentExactIds || hoursSincePlay < 4f -> score -= 95f
+                    track.id in allHistoryIds || hoursSincePlay < 24f -> score -= 42f
+                    else -> score += 16f // Fresh discovery bonus
+                }
+
+                score += ln((track.playCount.coerceAtLeast(1) + 1).toDouble()).toFloat() * 0.85f
             } else {
-                // Cold-start fallback: popular tracks skipping the very top 4 quick-pick items
                 score = ln((track.playCount.coerceAtLeast(1) + 1).toDouble()).toFloat() * 3f +
-                    if (track.isLiked) 6f else 0f
+                    (if (track.isLiked) 6f else 0f) +
+                    if (track.id in recentExactIds) -40f else 0f
             }
             track to score
         }.sortedByDescending { it.second }
 
-        // Enforce artist diversity (max 2 per artist in primary pass) so recommendations stay varied
-        val picked = mutableListOf<TrackEntity>()
-        val artistCounts = HashMap<String, Int>()
-        for ((track, _) in scored) {
-            if (picked.size >= limit) break
-            val key = normalizeKey(track.artist).ifBlank { track.id }
-            val count = artistCounts[key] ?: 0
-            if (count < 2) {
-                picked += track
-                artistCounts[key] = count + 1
-            }
-        }
-        if (picked.size < limit) {
-            val pickedIds = picked.mapTo(HashSet()) { it.id }
-            for ((track, _) in scored) {
-                if (picked.size >= limit) break
-                if (track.id !in pickedIds) {
-                    picked += track
-                }
-            }
-        }
+        val maxPerArtist = if (candidatePool.size >= limit * 2) 1 else 2
+        val picked = pickDiverseTracks(scored.map { it.first }, limit = limit, maxPerArtist = maxPerArtist)
 
-        // Build online discovery queries based on top listened artists + top search terms
         val onlineQueries = buildList {
-            topSeedArtists.take(2).forEach { artist ->
-                add(artist)
-            }
-            val latestEntry = listeningHistory.firstOrNull()
-            if (latestEntry != null && latestEntry.artist.isNotBlank() && topSeedGenres.isNotEmpty()) {
-                val mixQuery = "${latestEntry.artist} ${topSeedGenres.first()}"
-                if (none { it.equals(mixQuery, ignoreCase = true) }) {
-                    add(mixQuery)
-                }
+            profile.topSeedArtists.take(2).forEach { add(it) }
+            val latestArtist = listeningHistory.firstOrNull()?.artist?.trim().orEmpty()
+            if (latestArtist.isNotBlank() && profile.topSeedGenres.isNotEmpty()) {
+                val mixQuery = "$latestArtist ${profile.topSeedGenres.first()}"
+                if (none { it.equals(mixQuery, ignoreCase = true) }) add(mixQuery)
             }
             if (isEmpty()) {
                 searchHistory.firstOrNull()?.let { add(it) }
@@ -179,10 +234,86 @@ object RecommendationEngine {
 
         return RecommendationResult(
             tracks = picked,
-            topSeedArtists = topSeedArtists,
-            topSeedGenres = topSeedGenres,
+            topSeedArtists = profile.topSeedArtists.take(3),
+            topSeedGenres = profile.topSeedGenres.take(2),
             onlineSeedQueries = onlineQueries,
         )
+    }
+
+    fun computeForYouTracks(
+        allTracks: List<TrackEntity>,
+        listeningHistory: List<ListeningHistoryEntry>,
+        listeningEvents: List<ListeningPlayEvent> = emptyList(),
+        searchHistory: List<String> = emptyList(),
+        excludeIds: Set<String> = emptySet(),
+        limit: Int = 36,
+    ): List<TrackEntity> {
+        if (allTracks.isEmpty()) return emptyList()
+        val profile = buildTasteProfile(allTracks, listeningHistory, listeningEvents, searchHistory)
+        val allHistoryIds = listeningHistory.mapTo(HashSet()) { it.trackId }
+
+        val nonExcluded = allTracks.filter { it.id !in excludeIds }
+        val pool = nonExcluded.ifEmpty { allTracks }
+
+        val scored = pool.map { track ->
+            val normArtist = normalizeKey(track.artist)
+            val normGenre = normalizeKey(track.genre)
+            val isCyr = containsCyrillic("${track.title} ${track.artist}")
+            val trackTokens = tokenize("${track.title} ${track.artist}")
+
+            var score = 0f
+            if (profile.hasPersonalSignals) {
+                score += (profile.genreWeights[normGenre] ?: 0f) * 32f
+                score += (profile.artistWeights[normArtist] ?: 0f) * 24f
+                score += trackTokens.sumOf { (profile.tokenWeights[it] ?: 0f).toDouble() }.toFloat() * 14f
+                score += when (profile.preferredLanguage) {
+                    "ru" -> if (isCyr) 28f else -16f
+                    "en" -> if (!isCyr) 24f else -14f
+                    else -> 0f
+                }
+                // Strongly boost unheard tracks so "Для вас" differs cleanly from "Рекомендации"
+                if (track.id !in allHistoryIds) score += 26f else score -= 34f
+            } else {
+                score += ln((track.playCount.coerceAtLeast(1) + 1).toDouble()).toFloat() * 2.5f
+            }
+            if (track.isLiked) score -= 8f // Let fresh tracks float above already-liked catalog
+            score += ln((track.playCount.coerceAtLeast(1) + 1).toDouble()).toFloat() * 0.7f
+            track to score
+        }.sortedByDescending { it.second }
+
+        return pickDiverseTracks(scored.map { it.first }, limit = limit, maxPerArtist = 2)
+    }
+
+    private fun pickDiverseTracks(
+        ordered: List<TrackEntity>,
+        limit: Int,
+        maxPerArtist: Int,
+    ): List<TrackEntity> {
+        val picked = mutableListOf<TrackEntity>()
+        val seenTitles = HashSet<String>()
+        val artistCounts = HashMap<String, Int>()
+        for (track in ordered) {
+            if (picked.size >= limit) break
+            val titleKey = normalizeKey(track.title)
+            if (titleKey.isNotBlank() && !seenTitles.add(titleKey)) continue
+            val key = normalizeKey(track.artist.substringBefore(",").trim()).ifBlank { track.id }
+            val count = artistCounts[key] ?: 0
+            if (count < maxPerArtist) {
+                picked += track
+                artistCounts[key] = count + 1
+            }
+        }
+        if (picked.size < limit) {
+            val pickedIds = picked.mapTo(HashSet()) { it.id }
+            for (track in ordered) {
+                if (picked.size >= limit) break
+                if (track.id !in pickedIds) {
+                    picked += track
+                    pickedIds += track.id
+                }
+            }
+        }
+        return picked
     }
 
     fun computeTrendingSimilarTracks(
