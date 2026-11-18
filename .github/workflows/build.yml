@@ -1,5 +1,8 @@
 name: Build Android APK
-on: [workflow_dispatch]
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
 
 jobs:
   build:
@@ -10,12 +13,14 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '21'
-      - name: Create missing files and fix Kotlin annotations
+      - name: Create missing files and copy keystore
         run: |
           touch .env.example
           touch .env
-          sed -i '/^[[:space:]]\{8,\}@Volatile/d' app/src/main/java/com/example/data/remote/AudiusRepository.kt || true
-          keytool -genkeypair -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          sed -i '/^[[:space:]]*@[[:alpha:]]*Volatile/d' app/src/main/java/com/example/data/remote/AudiusRepository.kt || true
+          mkdir -p ~/.android
+          cp debug.keystore ~/.android/debug.keystore
+          cp debug.keystore app/debug.keystore
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
