@@ -67,6 +67,7 @@ import com.example.ui.WaveUiState
 import com.example.ui.components.rememberSoundLapaHaptics
 import com.example.ui.i18n.LocalAppStrings
 import com.example.ui.shaders.LocalBatterySaverEnabled
+import com.example.ui.shaders.LocalIsMainUiVisible
 import com.example.ui.shaders.TrackCoverArtwork
 import com.example.ui.shaders.rememberIsAppForeground
 import kotlin.math.PI
@@ -366,37 +367,44 @@ private fun WavePulsingSphereOrb(
 ) {
     val strings = LocalAppStrings.current
     val batterySaver = LocalBatterySaverEnabled.current
+    val isUiVisible = LocalIsMainUiVisible.current
     val isForeground = rememberIsAppForeground()
-    val animateOrb = !batterySaver && isForeground
+    val animateOrb = !batterySaver && isForeground && isUiVisible
 
-    val pulseTransition = rememberInfiniteTransition(label = "waveOrb")
-    val rawBreath by pulseTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(
-                durationMillis = if (isPlaying) 1900 else 3200,
-                easing = FastOutSlowInEasing,
+    val breath: Float
+    val orbit: Float
+    if (animateOrb) {
+        val pulseTransition = rememberInfiniteTransition(label = "waveOrb")
+        val rawBreath by pulseTransition.animateFloat(
+            initialValue = 0f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(
+                    durationMillis = if (isPlaying) 1900 else 3200,
+                    easing = FastOutSlowInEasing,
+                ),
+                repeatMode = RepeatMode.Reverse,
             ),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "waveBreath",
-    )
-    val rawOrbit by pulseTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = (2f * PI).toFloat(),
-        animationSpec = infiniteRepeatable(
-            animation = tween(
-                durationMillis = if (isPlaying) 5400 else 9600,
-                easing = LinearEasing,
+            label = "waveBreath",
+        )
+        val rawOrbit by pulseTransition.animateFloat(
+            initialValue = 0f,
+            targetValue = (2f * PI).toFloat(),
+            animationSpec = infiniteRepeatable(
+                animation = tween(
+                    durationMillis = if (isPlaying) 5400 else 9600,
+                    easing = LinearEasing,
+                ),
+                repeatMode = RepeatMode.Restart,
             ),
-            repeatMode = RepeatMode.Restart,
-        ),
-        label = "waveOrbit",
-    )
-
-    val breath = if (animateOrb) rawBreath else 0.35f
-    val orbit = if (animateOrb) rawOrbit else 0f
+            label = "waveOrbit",
+        )
+        breath = rawBreath
+        orbit = rawOrbit
+    } else {
+        breath = 0.35f
+        orbit = 0f
+    }
     val activeScale by animateFloatAsState(
         targetValue = if (isPlaying) 1.06f else 0.96f,
         animationSpec = spring(dampingRatio = 0.72f, stiffness = 240f),

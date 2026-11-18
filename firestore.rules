@@ -31,8 +31,21 @@ service cloud.firestore {
 
     function isVerifiedDeveloper() {
       return isSignedIn() &&
-        request.auth.token.email == 'livex0464@gmail.com' &&
+        request.auth.token.email is string &&
+        hashing.sha256(request.auth.token.email.lower()).toHexString().lower() == '15f1e7a5e2780e58b8f5fdb2bf5fd811e841467762a079169d03c1d8552479d3' &&
         request.auth.token.email_verified == true;
+    }
+
+    function isNotBanned() {
+      return isSignedIn() &&
+        !exists(/databases/$(database)/documents/banned_users/$(request.auth.uid));
+    }
+
+    function isValidBanRecord(userId, data) {
+      return data.userId is string && data.userId == userId && isValidId(userId) &&
+        data.bannedByUid is string && data.bannedByUid == request.auth.uid &&
+        data.bannedAtMs is int && data.bannedAtMs >= 0 &&
+        (!('reason' in data) || (data.reason is string && data.reason.size() <= 300));
     }
 
     function isValidUserSettings(s) {
@@ -72,7 +85,15 @@ service cloud.firestore {
         (!('accountUid' in data) || (data.accountUid is string && data.accountUid.size() >= 3 && data.accountUid.size() <= 32)) &&
         (!('searchHistory' in data) || (data.searchHistory is list && data.searchHistory.size() <= 30)) &&
         (!('listeningStatsJson' in data) || (data.listeningStatsJson is string && data.listeningStatsJson.size() <= 80000)) &&
-        (!('settings' in data) || isValidUserSettings(data.settings));
+        (!('settings' in data) || isValidUserSettings(data.settings)) &&
+        (!('isOnline' in data) || data.isOnline is bool) &&
+        (!('lastActiveAtMs' in data) || (data.lastActiveAtMs is int && data.lastActiveAtMs >= 0)) &&
+        (!('currentTrackId' in data) || (data.currentTrackId is string && data.currentTrackId.size() <= 200)) &&
+        (!('currentTrackTitle' in data) || (data.currentTrackTitle is string && data.currentTrackTitle.size() <= 200)) &&
+        (!('currentTrackArtist' in data) || (data.currentTrackArtist is string && data.currentTrackArtist.size() <= 200)) &&
+        (!('currentTrackCoverUrl' in data) || (data.currentTrackCoverUrl is string && data.currentTrackCoverUrl.size() <= 1000)) &&
+        (!('currentTrackIsPlaying' in data) || data.currentTrackIsPlaying is bool) &&
+        (!('currentTrackUpdatedAtMs' in data) || (data.currentTrackUpdatedAtMs is int && data.currentTrackUpdatedAtMs >= 0));
     }
 
     function isValidBugReport(data) {
@@ -82,7 +103,6 @@ service cloud.firestore {
         (!('reporterAvatarUrl' in data) || (data.reporterAvatarUrl is string && data.reporterAvatarUrl.size() <= 100000)) &&
         data.message is string && data.message.size() >= 1 && data.message.size() <= 2000 &&
         data.appVersion is string && data.appVersion.size() >= 1 && data.appVersion.size() <= 64 &&
-        data.devAccessKey is string && data.devAccessKey == 'shelban852' &&
         data.createdAtMs is int && data.createdAtMs >= 0;
     }
 
@@ -112,6 +132,9 @@ service cloud.firestore {
         data.name is string && data.name.size() >= 1 && data.name.size() <= 160 &&
         (!('description' in data) || (data.description is string && data.description.size() <= 500)) &&
         (!('coverArtPath' in data) || (data.coverArtPath is string && data.coverArtPath.size() <= 1000)) &&
+        (!('isPinned' in data) || data.isPinned is bool) &&
+        (!('pinnedAtMs' in data) || (data.pinnedAtMs is int && data.pinnedAtMs >= 0)) &&
+        (!('sortMode' in data) || (data.sortMode is string && data.sortMode.size() >= 1 && data.sortMode.size() <= 32)) &&
         data.playlistCreatedAtMs is int && data.playlistCreatedAtMs >= 0;
     }
 
@@ -127,8 +150,7 @@ service cloud.firestore {
       return data.userId is string && data.userId == request.auth.uid &&
         data.storageBytes is int && data.storageBytes >= 0 && data.storageBytes <= 10737418240 &&
         data.tracksCount is int && data.tracksCount >= 0 && data.tracksCount <= 100000 &&
-        data.playlistsCount is int && data.playlistsCount >= 0 && data.playlistsCount <= 50000 &&
-        data.devAccessKey is string && data.devAccessKey == 'shelban852';
+        data.playlistsCount is int && data.playlistsCount >= 0 && data.playlistsCount <= 50000;
     }
 
     function isValidPublicProfile(userId, data) {
@@ -172,21 +194,26 @@ service cloud.firestore {
     }
 
     match /users/{userId} {
-      allow get: if isOwner(userId) && isValidId(userId);
-      allow list: if isOwner(userId);
+      allow get: if ((isOwner(userId) && isNotBanned()) || isVerifiedDeveloper()) && isValidId(userId);
+      allow list: if (isOwner(userId) && isNotBanned()) || isVerifiedDeveloper();
 
       allow create: if isOwner(userId) &&
+        isNotBanned() &&
         isValidId(userId) &&
         incoming().keys().hasAll(['userId', 'displayName', 'createdAt', 'updatedAt']) &&
         incoming().keys().hasOnly([
           'userId', 'displayName', 'username', 'email', 'photoUrl', 'bio', 'avatarBlocked',
-          'accountUid', 'searchHistory', 'listeningStatsJson', 'settings', 'createdAt', 'updatedAt'
+          'accountUid', 'searchHistory', 'listeningStatsJson', 'settings',
+          'isOnline', 'lastActiveAtMs', 'currentTrackId', 'currentTrackTitle',
+          'currentTrackArtist', 'currentTrackCoverUrl', 'currentTrackIsPlaying',
+          'currentTrackUpdatedAtMs', 'createdAt', 'updatedAt'
         ]) &&
         incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
         isValidUserProfile(incoming());
 
       allow update: if isOwner(userId) &&
+        isNotBanned() &&
         isValidId(userId) &&
         isValidUserProfile(incoming()) &&
         incoming().userId == existing().userId &&
@@ -195,16 +222,20 @@ service cloud.firestore {
         (!('avatarBlocked' in existing()) || !existing().avatarBlocked || (incoming().avatarBlocked == true && !('photoUrl' in incoming()))) &&
         incoming().diff(existing()).affectedKeys().hasOnly([
           'displayName', 'username', 'email', 'photoUrl', 'bio', 'avatarBlocked',
-          'accountUid', 'searchHistory', 'listeningStatsJson', 'settings', 'updatedAt'
+          'accountUid', 'searchHistory', 'listeningStatsJson', 'settings',
+          'isOnline', 'lastActiveAtMs', 'currentTrackId', 'currentTrackTitle',
+          'currentTrackArtist', 'currentTrackCoverUrl', 'currentTrackIsPlaying',
+          'currentTrackUpdatedAtMs', 'updatedAt'
         ]);
 
-      allow delete: if isOwner(userId) && isValidId(userId);
+      allow delete: if ((isOwner(userId) && isNotBanned()) || isVerifiedDeveloper()) && isValidId(userId);
 
       match /tracks/{trackDocId} {
-        allow get: if isOwner(userId) && isValidId(trackDocId);
-        allow list: if isOwner(userId);
+        allow get: if ((isOwner(userId) && isNotBanned()) || isVerifiedDeveloper()) && isValidId(trackDocId);
+        allow list: if (isOwner(userId) && isNotBanned()) || isVerifiedDeveloper();
 
         allow create: if isOwner(userId) &&
+          isNotBanned() &&
           isValidId(trackDocId) &&
           incoming().keys().hasAll([
             'userId', 'trackId', 'title', 'artist', 'genre', 'durationMs',
@@ -222,6 +253,7 @@ service cloud.firestore {
           isValidSavedTrack(incoming());
 
         allow update: if isOwner(userId) &&
+          isNotBanned() &&
           isValidId(trackDocId) &&
           isValidSavedTrack(incoming()) &&
           incoming().userId == existing().userId &&
@@ -234,20 +266,22 @@ service cloud.firestore {
             'playCount', 'likeCount', 'description', 'albumTitle', 'trackCreatedAtMs', 'updatedAt'
           ]);
 
-        allow delete: if isOwner(userId) && isValidId(trackDocId);
+        allow delete: if ((isOwner(userId) && isNotBanned()) || isVerifiedDeveloper()) && isValidId(trackDocId);
       }
 
       match /playlists/{playlistDocId} {
-        allow get: if isOwner(userId) && isValidId(playlistDocId);
-        allow list: if isOwner(userId);
+        allow get: if ((isOwner(userId) && isNotBanned()) || isVerifiedDeveloper()) && isValidId(playlistDocId);
+        allow list: if (isOwner(userId) && isNotBanned()) || isVerifiedDeveloper();
 
         allow create: if isOwner(userId) &&
+          isNotBanned() &&
           isValidId(playlistDocId) &&
           incoming().keys().hasAll([
             'userId', 'playlistId', 'name', 'playlistCreatedAtMs', 'createdAt', 'updatedAt'
           ]) &&
           incoming().keys().hasOnly([
             'userId', 'playlistId', 'name', 'description', 'coverArtPath',
+            'isPinned', 'pinnedAtMs', 'sortMode',
             'playlistCreatedAtMs', 'createdAt', 'updatedAt'
           ]) &&
           incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
@@ -255,6 +289,7 @@ service cloud.firestore {
           isValidUserPlaylist(incoming());
 
         allow update: if isOwner(userId) &&
+          isNotBanned() &&
           isValidId(playlistDocId) &&
           isValidUserPlaylist(incoming()) &&
           incoming().userId == existing().userId &&
@@ -262,16 +297,19 @@ service cloud.firestore {
           incoming().createdAt == existing().createdAt &&
           incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
           incoming().diff(existing()).affectedKeys().hasOnly([
-            'name', 'description', 'coverArtPath', 'playlistCreatedAtMs', 'updatedAt'
+            'name', 'description', 'coverArtPath',
+            'isPinned', 'pinnedAtMs', 'sortMode',
+            'playlistCreatedAtMs', 'updatedAt'
           ]);
 
-        allow delete: if isOwner(userId) && isValidId(playlistDocId);
+        allow delete: if ((isOwner(userId) && isNotBanned()) || isVerifiedDeveloper()) && isValidId(playlistDocId);
 
         match /items/{itemDocId} {
-          allow get: if isOwner(userId) && isValidId(playlistDocId) && isValidId(itemDocId);
-          allow list: if isOwner(userId);
+          allow get: if ((isOwner(userId) && isNotBanned()) || isVerifiedDeveloper()) && isValidId(playlistDocId) && isValidId(itemDocId);
+          allow list: if (isOwner(userId) && isNotBanned()) || isVerifiedDeveloper();
 
           allow create: if isOwner(userId) &&
+            isNotBanned() &&
             isValidId(playlistDocId) &&
             isValidId(itemDocId) &&
             isValidUserPlaylistItem(incoming()) &&
@@ -289,6 +327,7 @@ service cloud.firestore {
             );
 
           allow update: if isOwner(userId) &&
+            isNotBanned() &&
             isValidId(playlistDocId) &&
             isValidId(itemDocId) &&
             isValidUserPlaylistItem(incoming()) &&
@@ -299,15 +338,16 @@ service cloud.firestore {
             incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
             incoming().diff(existing()).affectedKeys().hasOnly(['position', 'addedAtMs', 'updatedAt']);
 
-          allow delete: if isOwner(userId) && isValidId(playlistDocId) && isValidId(itemDocId);
+          allow delete: if ((isOwner(userId) && isNotBanned()) || isVerifiedDeveloper()) && isValidId(playlistDocId) && isValidId(itemDocId);
         }
       }
 
       match /friends/{friendUid} {
-        allow get: if isOwner(userId) && isValidId(friendUid);
-        allow list: if isOwner(userId);
+        allow get: if ((isOwner(userId) && isNotBanned()) || isVerifiedDeveloper()) && isValidId(friendUid);
+        allow list: if (isOwner(userId) && isNotBanned()) || isVerifiedDeveloper();
 
         allow create: if isOwner(userId) &&
+          isNotBanned() &&
           isValidId(friendUid) &&
           incoming().keys().hasAll([
             'userId', 'friendUid', 'displayName', 'isDeveloper', 'addedAtMs', 'createdAt', 'updatedAt'
@@ -321,6 +361,7 @@ service cloud.firestore {
           isValidFriendDoc(userId, friendUid, incoming());
 
         allow update: if isOwner(userId) &&
+          isNotBanned() &&
           isValidId(friendUid) &&
           isValidFriendDoc(userId, friendUid, incoming()) &&
           incoming().userId == existing().userId &&
@@ -331,14 +372,15 @@ service cloud.firestore {
             'username', 'displayName', 'photoUrl', 'isDeveloper', 'addedAtMs', 'updatedAt'
           ]);
 
-        allow delete: if isOwner(userId) && isValidId(friendUid);
+        allow delete: if ((isOwner(userId) && isNotBanned()) || isVerifiedDeveloper()) && isValidId(friendUid);
       }
 
       match /artist_subscriptions/{artistKey} {
-        allow get: if isOwner(userId) && isValidId(artistKey);
-        allow list: if isOwner(userId);
+        allow get: if ((isOwner(userId) && isNotBanned()) || isVerifiedDeveloper()) && isValidId(artistKey);
+        allow list: if (isOwner(userId) && isNotBanned()) || isVerifiedDeveloper();
 
         allow create: if isOwner(userId) &&
+          isNotBanned() &&
           isValidId(artistKey) &&
           incoming().keys().hasAll([
             'userId', 'artistKey', 'artistName', 'subscribedAtMs', 'createdAt', 'updatedAt'
@@ -352,6 +394,7 @@ service cloud.firestore {
           isValidArtistSubscriptionDoc(userId, artistKey, incoming());
 
         allow update: if isOwner(userId) &&
+          isNotBanned() &&
           isValidId(artistKey) &&
           isValidArtistSubscriptionDoc(userId, artistKey, incoming()) &&
           incoming().userId == existing().userId &&
@@ -362,15 +405,16 @@ service cloud.firestore {
             'artistName', 'avatarUrl', 'soundCloudUrl', 'spotifyArtistId', 'subscribedAtMs', 'updatedAt'
           ]);
 
-        allow delete: if isOwner(userId) && isValidId(artistKey);
+        allow delete: if ((isOwner(userId) && isNotBanned()) || isVerifiedDeveloper()) && isValidId(artistKey);
       }
     }
 
     match /public_profiles/{userId} {
-      allow get: if isSignedIn() && isValidId(userId);
-      allow list: if isSignedIn() && (existing().isPublic == true || existing().isDeveloper == true);
+      allow get: if isNotBanned() && isValidId(userId);
+      allow list: if isNotBanned() && (existing().isPublic == true || existing().isDeveloper == true);
 
       allow create, update: if isOwner(userId) &&
+        isNotBanned() &&
         isValidId(userId) &&
         incoming().keys().hasAll([
           'userId', 'displayName', 'isDeveloper', 'isPublic', 'updatedAt'
@@ -381,14 +425,14 @@ service cloud.firestore {
         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
         isValidPublicProfile(userId, incoming());
 
-      allow delete: if isOwner(userId) && isValidId(userId);
+      allow delete: if ((isOwner(userId) && isNotBanned()) || isVerifiedDeveloper()) && isValidId(userId);
     }
 
     match /usernames/{handle} {
-      allow get: if isSignedIn() && isValidHandle(handle);
-      allow list: if isSignedIn() && existing().isPublic == true;
+      allow get: if (isNotBanned() || isVerifiedDeveloper()) && isValidHandle(handle);
+      allow list: if (isNotBanned() && existing().isPublic == true) || isVerifiedDeveloper();
 
-      allow create: if isSignedIn() &&
+      allow create: if isNotBanned() &&
         isValidHandle(handle) &&
         incoming().keys().hasAll([
           'username', 'userId', 'displayName', 'isDeveloper', 'isPublic', 'updatedAt'
@@ -399,7 +443,7 @@ service cloud.firestore {
         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
         isValidUsernameDoc(handle, incoming());
 
-      allow update: if isSignedIn() &&
+      allow update: if isNotBanned() &&
         isValidHandle(handle) &&
         existing().userId == request.auth.uid &&
         incoming().keys().hasAll([
@@ -413,26 +457,27 @@ service cloud.firestore {
         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
         isValidUsernameDoc(handle, incoming());
 
-      allow delete: if isSignedIn() && isValidHandle(handle) && existing().userId == request.auth.uid;
+      allow delete: if isValidHandle(handle) &&
+        ((isNotBanned() && existing().userId == request.auth.uid) || isVerifiedDeveloper());
     }
 
     match /bug_reports/{reportId} {
       allow get: if isSignedIn() &&
         isValidId(reportId) &&
-        (existing().userId == request.auth.uid || existing().devAccessKey == 'shelban852');
+        ((isNotBanned() && existing().userId == request.auth.uid) || isVerifiedDeveloper());
 
       allow list: if isSignedIn() &&
-        (existing().userId == request.auth.uid || existing().devAccessKey == 'shelban852');
+        ((isNotBanned() && existing().userId == request.auth.uid) || isVerifiedDeveloper());
 
-      allow create: if isSignedIn() &&
+      allow create: if isNotBanned() &&
         isValidId(reportId) &&
         incoming().keys().hasAll([
           'reportId', 'userId', 'reporterName', 'message',
-          'appVersion', 'devAccessKey', 'createdAtMs', 'createdAt'
+          'appVersion', 'createdAtMs', 'createdAt'
         ]) &&
         incoming().keys().hasOnly([
           'reportId', 'userId', 'reporterName', 'reporterAvatarUrl', 'message',
-          'appVersion', 'devAccessKey', 'createdAtMs', 'createdAt'
+          'appVersion', 'createdAtMs', 'createdAt'
         ]) &&
         incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
         isValidBugReport(incoming());
@@ -441,34 +486,51 @@ service cloud.firestore {
 
       allow delete: if isSignedIn() &&
         isValidId(reportId) &&
-        (existing().userId == request.auth.uid || existing().devAccessKey == 'shelban852');
+        ((isNotBanned() && existing().userId == request.auth.uid) || isVerifiedDeveloper());
     }
 
     match /cloud_metrics/{userId} {
-      allow get: if isOwner(userId) && isValidId(userId);
-      allow list: if isSignedIn() && existing().devAccessKey == 'shelban852';
+      allow get: if ((isOwner(userId) && isNotBanned()) || isVerifiedDeveloper()) && isValidId(userId);
+      allow list: if isVerifiedDeveloper();
 
       allow create: if isOwner(userId) &&
+        isNotBanned() &&
         isValidId(userId) &&
         incoming().keys().hasAll([
-          'userId', 'storageBytes', 'tracksCount', 'playlistsCount', 'devAccessKey', 'updatedAt'
+          'userId', 'storageBytes', 'tracksCount', 'playlistsCount', 'updatedAt'
         ]) &&
         incoming().keys().hasOnly([
-          'userId', 'storageBytes', 'tracksCount', 'playlistsCount', 'devAccessKey', 'updatedAt'
+          'userId', 'storageBytes', 'tracksCount', 'playlistsCount', 'updatedAt'
         ]) &&
         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
         isValidCloudMetrics(incoming());
 
       allow update: if isOwner(userId) &&
+        isNotBanned() &&
         isValidId(userId) &&
         incoming().keys().hasOnly([
-          'userId', 'storageBytes', 'tracksCount', 'playlistsCount', 'devAccessKey', 'updatedAt'
+          'userId', 'storageBytes', 'tracksCount', 'playlistsCount', 'updatedAt'
         ]) &&
         incoming().userId == existing().userId &&
         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
         isValidCloudMetrics(incoming());
 
-      allow delete: if isOwner(userId) && isValidId(userId);
+      allow delete: if ((isOwner(userId) && isNotBanned()) || isVerifiedDeveloper()) && isValidId(userId);
+    }
+
+    match /banned_users/{userId} {
+      allow get: if (isOwner(userId) || isVerifiedDeveloper()) && isValidId(userId);
+      allow list: if isVerifiedDeveloper();
+
+      allow create, update: if isVerifiedDeveloper() &&
+        isValidId(userId) &&
+        userId != request.auth.uid &&
+        incoming().keys().hasAll(['userId', 'bannedByUid', 'bannedAtMs', 'updatedAt']) &&
+        incoming().keys().hasOnly(['userId', 'reason', 'bannedByUid', 'bannedAtMs', 'updatedAt']) &&
+        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+        isValidBanRecord(userId, incoming());
+
+      allow delete: if isVerifiedDeveloper() && isValidId(userId);
     }
   }
 }

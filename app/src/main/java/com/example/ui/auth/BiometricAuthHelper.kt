@@ -9,6 +9,7 @@ import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import java.security.KeyStore
+import java.security.MessageDigest
 import javax.crypto.KeyGenerator
 
 enum class BiometricAvailability {
@@ -20,7 +21,7 @@ enum class BiometricAvailability {
 private const val ALLOWED_AUTHENTICATORS =
     BiometricManager.Authenticators.BIOMETRIC_STRONG or BiometricManager.Authenticators.BIOMETRIC_WEAK
 
-private const val DEV_ALLOWED_EMAIL = "livex0464@gmail.com"
+private const val DEV_EMAIL_SHA256 = "15f1e7a5e2780e58b8f5fdb2bf5fd811e841467762a079169d03c1d8552479d3"
 private const val DEV_KEYSTORE_PROVIDER = "AndroidKeyStore"
 private const val DEV_KEY_ALIAS_PREFIX = "soundlap_dev_bio_v1_"
 
@@ -30,8 +31,15 @@ tailrec fun Context.findFragmentActivity(): FragmentActivity? = when (this) {
     else -> null
 }
 
+fun sha256NormalizedHex(value: String?): String {
+    val normalized = value?.trim()?.lowercase().orEmpty()
+    if (normalized.isEmpty()) return ""
+    val digest = MessageDigest.getInstance("SHA-256").digest(normalized.toByteArray(Charsets.UTF_8))
+    return digest.joinToString("") { "%02x".format(it) }
+}
+
 fun isAllowedDeveloperEmail(email: String?): Boolean =
-    email?.trim()?.equals(DEV_ALLOWED_EMAIL, ignoreCase = true) == true
+    sha256NormalizedHex(email) == DEV_EMAIL_SHA256
 
 fun hasProvisionedDeveloperBiometricKey(uid: String?): Boolean {
     val cleanUid = uid?.trim()?.takeIf { it.isNotEmpty() } ?: return false
@@ -85,21 +93,23 @@ fun launchDeveloperBiometricPrompt(
     context: Context,
     signedInUid: String?,
     signedInEmail: String?,
-    activatedDevUid: String?,
     title: String,
     subtitle: String,
     negativeButtonText: String,
     unavailableMessage: String,
     failedMessage: String,
     onAuthenticated: () -> Unit,
-    onFallbackOrDismiss: () -> Unit,
+    onDismissed: () -> Unit,
     onError: (String) -> Unit,
 ) {
-    if (!isAllowedDeveloperEmail(signedInEmail) ||
-        signedInUid.isNullOrBlank() ||
-        activatedDevUid != signedInUid ||
-        !hasProvisionedDeveloperBiometricKey(signedInUid)
-    ) {
+    if (!isAllowedDeveloperEmail(signedInEmail) || signedInUid.isNullOrBlank()) {
+        onError(failedMessage)
+        return
+    }
+    if (!hasProvisionedDeveloperBiometricKey(signedInUid)) {
+        provisionDeveloperBiometricKey(signedInUid, signedInEmail)
+    }
+    if (!hasProvisionedDeveloperBiometricKey(signedInUid)) {
         onError(failedMessage)
         return
     }
@@ -118,7 +128,6 @@ fun launchDeveloperBiometricPrompt(
         override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
             super.onAuthenticationSucceeded(result)
             if (isAllowedDeveloperEmail(signedInEmail) &&
-                activatedDevUid == signedInUid &&
                 hasProvisionedDeveloperBiometricKey(signedInUid)
             ) {
                 onAuthenticated()
@@ -133,7 +142,7 @@ fun launchDeveloperBiometricPrompt(
                 BiometricPrompt.ERROR_NEGATIVE_BUTTON,
                 BiometricPrompt.ERROR_USER_CANCELED,
                 BiometricPrompt.ERROR_CANCELED,
-                -> onFallbackOrDismiss()
+                -> onDismissed()
                 else -> onError(errString.toString().ifBlank { failedMessage })
             }
         }

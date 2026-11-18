@@ -1,12 +1,17 @@
 package com.example.ui.components
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.AnimatedVisibilityScope
+import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -525,6 +530,7 @@ fun TrackRowItem(
     }
 }
 
+@OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 fun FloatingMiniPlayer(
     track: TrackEntity?,
@@ -536,9 +542,12 @@ fun FloatingMiniPlayer(
     onNext: () -> Unit,
     onExpand: () -> Unit,
     modifier: Modifier = Modifier,
+    sharedTransitionScope: SharedTransitionScope? = null,
+    animatedVisibilityScope: AnimatedVisibilityScope? = null,
 ) {
-    AnimatedVisibility(visible = track != null, modifier = modifier) {
-        if (track == null) return@AnimatedVisibility
+    if (track == null) return
+
+    val content: @Composable () -> Unit = {
         val accent = Color(track.accentColorHex)
         val explicitIds = LocalExplicitTrackIds.current
         val isExplicit = remember(track.id, track.title, track.albumTitle, track.description, explicitIds) {
@@ -563,10 +572,51 @@ fun FloatingMiniPlayer(
             )
         }
 
+        val sharedCardModifier = if (sharedTransitionScope != null && animatedVisibilityScope != null) {
+            with(sharedTransitionScope) {
+                Modifier.sharedBounds(
+                    sharedContentState = rememberSharedContentState(key = "player_container_${track.id}"),
+                    animatedVisibilityScope = animatedVisibilityScope,
+                    enter = fadeIn(tween(220)),
+                    exit = fadeOut(tween(180)),
+                    boundsTransform = { _, _ -> spring(dampingRatio = 0.86f, stiffness = 360f) },
+                    resizeMode = SharedTransitionScope.ResizeMode.RemeasureToBounds,
+                )
+            }
+        } else {
+            Modifier
+        }
+
+        val sharedCoverModifier = if (sharedTransitionScope != null && animatedVisibilityScope != null) {
+            with(sharedTransitionScope) {
+                Modifier.sharedElement(
+                    state = rememberSharedContentState(key = "player_cover_${track.id}"),
+                    animatedVisibilityScope = animatedVisibilityScope,
+                    boundsTransform = { _, _ -> spring(dampingRatio = 0.86f, stiffness = 360f) },
+                )
+            }
+        } else {
+            Modifier
+        }
+
+        val sharedTitleModifier = if (sharedTransitionScope != null && animatedVisibilityScope != null) {
+            with(sharedTransitionScope) {
+                Modifier.sharedBounds(
+                    sharedContentState = rememberSharedContentState(key = "player_title_${track.id}"),
+                    animatedVisibilityScope = animatedVisibilityScope,
+                    boundsTransform = { _, _ -> spring(dampingRatio = 0.86f, stiffness = 360f) },
+                    resizeMode = SharedTransitionScope.ResizeMode.ScaleToBounds(),
+                )
+            }
+        } else {
+            Modifier
+        }
+
         Surface(
-            modifier = Modifier
+            modifier = (if (animatedVisibilityScope != null) modifier else Modifier)
                 .fillMaxWidth()
                 .padding(horizontal = 12.dp)
+                .then(sharedCardModifier)
                 .clip(MiniPlayerShape)
                 .border(
                     width = 1.dp,
@@ -594,7 +644,9 @@ fun FloatingMiniPlayer(
                 ) {
                     TrackCoverArtwork(
                         track = track,
-                        modifier = Modifier.size(46.dp),
+                        modifier = Modifier
+                            .size(46.dp)
+                            .then(sharedCoverModifier),
                         cornerRadius = 14.dp,
                         targetSizePx = 220,
                     )
@@ -616,7 +668,9 @@ fun FloatingMiniPlayer(
                                 color = MaterialTheme.colorScheme.onSurface,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f, fill = false),
+                                modifier = Modifier
+                                    .weight(1f, fill = false)
+                                    .then(sharedTitleModifier),
                             )
                         }
                         Text(
@@ -685,6 +739,14 @@ fun FloatingMiniPlayer(
                 )
             }
             }
+        }
+    }
+
+    if (animatedVisibilityScope != null) {
+        content()
+    } else {
+        AnimatedVisibility(visible = true, modifier = modifier) {
+            content()
         }
     }
 }

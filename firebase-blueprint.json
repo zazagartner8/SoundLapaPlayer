@@ -49,6 +49,38 @@
           "type": "object",
           "description": "Cloud-synced SoundLapa preferences (language, theme, accent color, crossfade, haptics, cache, data saver)"
         },
+        "isOnline": {
+          "type": "boolean",
+          "description": "Whether user session is currently in foreground"
+        },
+        "lastActiveAtMs": {
+          "type": "integer",
+          "description": "Client epoch milliseconds when presence or playback state changed"
+        },
+        "currentTrackId": {
+          "type": "string",
+          "description": "Currently loaded track identifier"
+        },
+        "currentTrackTitle": {
+          "type": "string",
+          "description": "Title of currently loaded track"
+        },
+        "currentTrackArtist": {
+          "type": "string",
+          "description": "Artist of currently loaded track"
+        },
+        "currentTrackCoverUrl": {
+          "type": "string",
+          "description": "Compact cover artwork URL of currently loaded track"
+        },
+        "currentTrackIsPlaying": {
+          "type": "boolean",
+          "description": "Whether audio playback is currently playing"
+        },
+        "currentTrackUpdatedAtMs": {
+          "type": "integer",
+          "description": "Client epoch milliseconds when now-playing track info changed"
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",
@@ -91,10 +123,6 @@
           "type": "string",
           "description": "SoundLapa app version string"
         },
-        "devAccessKey": {
-          "type": "string",
-          "description": "Developer reports access verification key"
-        },
         "createdAtMs": {
           "type": "integer",
           "description": "Client epoch milliseconds when report was sent"
@@ -111,7 +139,6 @@
         "reporterName",
         "message",
         "appVersion",
-        "devAccessKey",
         "createdAtMs",
         "createdAt"
       ]
@@ -243,6 +270,18 @@
           "type": "string",
           "description": "Optional cover artwork URL"
         },
+        "isPinned": {
+          "type": "boolean",
+          "description": "Whether the playlist is pinned to top of library"
+        },
+        "pinnedAtMs": {
+          "type": "integer",
+          "description": "Epoch milliseconds when playlist was pinned"
+        },
+        "sortMode": {
+          "type": "string",
+          "description": "Track sorting mode inside the playlist"
+        },
         "playlistCreatedAtMs": {
           "type": "integer",
           "description": "Client epoch timestamp when playlist was created"
@@ -334,10 +373,6 @@
           "type": "integer",
           "description": "Count of cloud playlist documents"
         },
-        "devAccessKey": {
-          "type": "string",
-          "description": "Developer metrics access verification key"
-        },
         "updatedAt": {
           "type": "string",
           "format": "date-time",
@@ -349,7 +384,6 @@
         "storageBytes",
         "tracksCount",
         "playlistsCount",
-        "devAccessKey",
         "updatedAt"
       ]
     },
@@ -417,6 +451,19 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["userId", "artistKey", "artistName", "subscribedAtMs", "createdAt", "updatedAt"]
+    },
+    "BanRecord": {
+      "title": "BanRecord",
+      "description": "Developer-managed account ban record preventing banned users from accessing cloud data",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "reason": { "type": "string" },
+        "bannedByUid": { "type": "string" },
+        "bannedAtMs": { "type": "integer" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "bannedByUid", "bannedAtMs", "updatedAt"]
     }
   },
   "firestore": {
@@ -454,11 +501,15 @@
     },
     "/bug_reports/{reportId}": {
       "schema": { "$ref": "#/entities/BugReport" },
-      "description": "User bug reports queried in the password-protected Developer Reports section"
+      "description": "User bug reports queried by verified developer"
     },
     "/cloud_metrics/{userId}": {
       "schema": { "$ref": "#/entities/CloudMetrics" },
       "description": "Aggregated cloud byte usage per user for developer storage monitoring"
+    },
+    "/banned_users/{userId}": {
+      "schema": { "$ref": "#/entities/BanRecord" },
+      "description": "Server-enforced ban records created/removed exclusively by verified developer"
     }
   }
 }

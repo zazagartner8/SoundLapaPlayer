@@ -100,7 +100,6 @@ fun AboutScreen(
     val versionSummary = remember {
         buildString {
             appendLine("SoundLap v${BuildConfig.VERSION_NAME}")
-            appendLine("Package: ${BuildConfig.APPLICATION_ID}")
             appendLine("Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
             append("Engine: AndroidX Media3 / ExoPlayer • Compose Material 3")
         }
@@ -384,7 +383,6 @@ fun AboutScreen(
                                 AboutSpecRow(strings.aboutSpecAudioEngineLabel, "AndroidX Media3 / ExoPlayer", accent)
                                 AboutSpecRow(strings.aboutSpecUiStackLabel, "Jetpack Compose + Material 3", accent)
                                 AboutSpecRow(strings.aboutSpecStorageLabel, "Room SQLite + DataStore", accent)
-                                AboutSpecRow(strings.aboutSpecPackageLabel, BuildConfig.APPLICATION_ID, accent)
                                 AboutSpecRow(
                                     strings.aboutSpecOsLabel,
                                     "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",

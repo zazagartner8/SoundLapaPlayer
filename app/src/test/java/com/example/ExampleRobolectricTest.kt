@@ -49,7 +49,7 @@ class ExampleRobolectricTest {
     assertFalse(SoundLapaSettings().isGuestMode)
     assertFalse(SoundLapaSettings().batterySaverEnabled)
     assertEquals(com.example.data.local.AudioFocusMode.PAUSE, SoundLapaSettings().audioFocusMode)
-    assertEquals("3.4", BuildConfig.VERSION_NAME)
+    assertEquals("3.4.1", BuildConfig.VERSION_NAME)
     assertNotNull(HomeRoute)
 
     val ru = stringsForLanguage("ru")
@@ -57,9 +57,9 @@ class ExampleRobolectricTest {
     assertEquals("Лайкнутые", ru.favoritesTab)
     assertEquals("Загруженные треки", ru.myTracksTab)
     assertEquals("Сингл", ru.singleReleaseLabel)
-    assertTrue(ru.aboutWhatsNewTitle.contains("3.4"))
-    assertTrue(stringsForLanguage("en").aboutWhatsNewTitle.contains("3.4"))
-    assertTrue(stringsForLanguage("it").aboutWhatsNewTitle.contains("3.4"))
+    assertTrue(ru.aboutWhatsNewTitle.contains("3.4.1"))
+    assertTrue(stringsForLanguage("en").aboutWhatsNewTitle.contains("3.4.1"))
+    assertTrue(stringsForLanguage("it").aboutWhatsNewTitle.contains("3.4.1"))
     assertTrue(ru.confirmDeleteTitle.isNotBlank())
     assertTrue(ru.deleteConfirmAction.isNotBlank())
     assertTrue(ru.artistSearchProfileSubtitle.isNotBlank())
@@ -502,9 +502,7 @@ class ExampleRobolectricTest {
   }
 
   @Test
-  fun `new settings labels guest warning and developer password match requirements`() {
-    assertEquals("shelban852", com.example.data.remote.DEVELOPER_REPORTS_PASSWORD)
-
+  fun `new settings labels guest warning and developer section match requirements`() {
     val ru = stringsForLanguage("ru")
     assertEquals("Плавность перехода трека и файлы", ru.settingsPlaybackSection)
     assertEquals(
@@ -614,9 +612,13 @@ class ExampleRobolectricTest {
       assertTrue(s.startupLoadingCoversStatus(2, 5).contains("2"))
     }
     assertEquals("Использование хранилища облака", stringsForLanguage("ru").settingsDeveloperStorageTitle)
-    assertEquals("или", stringsForLanguage("ru").settingsDeveloperOrPasswordDivider)
-    assertEquals("or", stringsForLanguage("en").settingsDeveloperOrPasswordDivider)
-    assertEquals("oppure", stringsForLanguage("it").settingsDeveloperOrPasswordDivider)
+    assertEquals("Пользователи", stringsForLanguage("ru").devExtras.tabUsers)
+    assertEquals("Users", stringsForLanguage("en").devExtras.tabUsers)
+    assertEquals("Utenti", stringsForLanguage("it").devExtras.tabUsers)
+    listOf("ru", "en", "it").forEach { lang ->
+      val hint = stringsForLanguage(lang).settingsV33.biometricOwnerOnlyHint
+      assertFalse(hint.contains("@"))
+    }
   }
 
   @Test
@@ -945,6 +947,58 @@ class ExampleRobolectricTest {
     } finally {
       db.close()
     }
+  }
+
+  @Test
+  fun `v3_4_1 strings changelog and claimed handle labels are populated across languages`() {
+    listOf("ru", "en", "it").forEach { code ->
+      val s = stringsForLanguage(code)
+      assertEquals("v3.4.1", s.changelog.versions.first().version)
+      assertTrue(s.aboutWhatsNewTitle.contains("3.4.1"))
+      assertTrue(s.social.usernameClaimedButton.isNotBlank())
+      assertTrue(s.social.developerBadgeInfoTitle.isNotBlank())
+      assertTrue(s.social.developerBadgeInfoBody.isNotBlank())
+      assertTrue(s.v34.importPlaylistShort.isNotBlank())
+      assertTrue(s.v34.importPlaylistShort.length < s.v34.importPlaylistButton.length)
+      assertTrue(s.social.settingsSignedInAsCaption.isNotBlank())
+      assertTrue(s.social.settingsUsernamePrefixLabel.isNotBlank())
+      assertTrue(s.devExtras.banUserButton.isNotBlank())
+      assertTrue(s.devExtras.unbanUserButton.isNotBlank())
+      assertTrue(s.devExtras.deleteUserFromServerButton.isNotBlank())
+      assertTrue(s.v34.bannedScreenTitle.isNotBlank())
+      assertTrue(s.v34.chooseArtistDialogTitle.isNotBlank())
+    }
+
+    val ru = stringsForLanguage("ru")
+    assertEquals("Пользователи", ru.devExtras.tabUsers)
+    assertEquals("Вы вошли как", ru.social.settingsSignedInAsCaption)
+    assertEquals("Юзернейм", ru.social.settingsUsernamePrefixLabel)
+    assertEquals("Проверить и сохранить", ru.playerV33.cropAvatarApplyButton)
+    assertEquals("Пасхалка", ru.v34.easterEggTitle)
+    assertEquals("катись нахуй отсюда", ru.v34.easterEggDescription)
+  }
+
+  @Test
+  fun `easter egg search matcher and artist collaborator splitter work as specified`() {
+    assertTrue(com.example.ui.screens.isEasterEggSearchQuery("Тайлер Винстон"))
+    assertTrue(com.example.ui.screens.isEasterEggSearchQuery("тайлер  винстон!"))
+    assertTrue(com.example.ui.screens.isEasterEggSearchQuery("Tyler Winston"))
+    assertTrue(com.example.ui.screens.isEasterEggSearchQuery("@tylerw1nston"))
+    assertFalse(com.example.ui.screens.isEasterEggSearchQuery("Miyagi"))
+    assertFalse(com.example.ui.screens.isEasterEggSearchQuery(""))
+
+    assertEquals(
+      listOf("Miyagi", "Эндшпиль", "TumaniYO"),
+      com.example.ui.components.splitArtistCredits("Miyagi & Эндшпиль, TumaniYO"),
+    )
+    assertEquals(
+      listOf("Artist One", "Artist Two"),
+      com.example.ui.components.splitArtistCredits("Artist One feat. Artist Two"),
+    )
+    assertEquals(
+      listOf("Solo Artist"),
+      com.example.ui.components.splitArtistCredits("Solo Artist"),
+    )
   }
 }
 

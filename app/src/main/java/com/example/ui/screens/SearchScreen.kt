@@ -1,5 +1,8 @@
 package com.example.ui.screens
 
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -48,6 +51,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
@@ -59,7 +67,7 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import coil.compose.SubcomposeAsyncImage
+import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.example.data.local.TrackEntity
 import com.example.data.remote.SearchArtistProfile
@@ -184,6 +192,16 @@ fun SearchScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .onFocusChanged { isFocused = it.isFocused }
+                                .onPreviewKeyEvent { keyEvent ->
+                                    val isEnterKey = keyEvent.key == Key.Enter || keyEvent.key == Key.NumPadEnter
+                                    if (isEnterKey && keyEvent.type == KeyEventType.KeyUp) {
+                                        onSubmitSearch(textFieldValue.text)
+                                        focusManager.clearFocus()
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                }
                                 .testTag("search_tab_text_field"),
                         )
                     }
@@ -372,6 +390,7 @@ fun SearchScreen(
                     val currentOnToggleLike by rememberUpdatedState(onToggleLike)
                     val currentOnOpenTrackOptions by rememberUpdatedState(onOpenTrackOptions)
                     val currentOnOpenArtistProfile by rememberUpdatedState(onOpenArtistProfile)
+                    val latestSearchResults by rememberUpdatedState(state.searchScreenResults)
                     val resultsListState = rememberLazyListState()
                     val firstArtistId = state.searchArtistProfiles.firstOrNull()?.id
                     LaunchedEffect(trimmedQuery, firstArtistId) {
@@ -390,17 +409,25 @@ fun SearchScreen(
                             key = { "artist_${it.id}" },
                             contentType = { "artist_profile" },
                         ) { profile ->
-                            val onArtistClick = remember(profile) {
+                            val latestProfile by rememberUpdatedState(profile)
+                            val onArtistClick = remember(profile.id) {
                                 {
                                     haptics.tick()
                                     focusManager.clearFocus()
-                                    currentOnOpenArtistProfile(profile)
+                                    currentOnOpenArtistProfile(latestProfile)
                                 }
                             }
                             ArtistSearchResultCard(
                                 profile = profile,
                                 subtitle = "${strings.artistSearchProfileSubtitle} • ${profile.sourceLabel}",
                                 onClick = onArtistClick,
+                                modifier = Modifier.animateItem(
+                                    fadeInSpec = tween(180),
+                                    placementSpec = spring(
+                                        dampingRatio = 0.85f,
+                                        stiffness = Spring.StiffnessMediumLow,
+                                    ),
+                                ),
                             )
                         }
 
@@ -410,23 +437,24 @@ fun SearchScreen(
                             contentType = { "track_row" },
                         ) { track ->
                             val isCurrent = state.playback.currentTrackId == track.id
-                            val onPlay = remember(track, state.searchScreenResults) {
+                            val latestTrack by rememberUpdatedState(track)
+                            val onPlay = remember(track.id) {
                                 {
                                     haptics.tap()
                                     focusManager.clearFocus()
-                                    currentOnPlayTrack(track, state.searchScreenResults)
+                                    currentOnPlayTrack(latestTrack, latestSearchResults)
                                 }
                             }
-                            val onLike = remember(track) {
+                            val onLike = remember(track.id) {
                                 {
                                     haptics.confirm()
-                                    currentOnToggleLike(track)
+                                    currentOnToggleLike(latestTrack)
                                 }
                             }
-                            val onMore = remember(track) {
+                            val onMore = remember(track.id) {
                                 {
                                     haptics.tick()
-                                    currentOnOpenTrackOptions(track)
+                                    currentOnOpenTrackOptions(latestTrack)
                                 }
                             }
                             TrackRowItem(
@@ -436,6 +464,13 @@ fun SearchScreen(
                                 onPlayClick = onPlay,
                                 onLikeClick = onLike,
                                 onMoreClick = onMore,
+                                modifier = Modifier.animateItem(
+                                    fadeInSpec = tween(180),
+                                    placementSpec = spring(
+                                        dampingRatio = 0.85f,
+                                        stiffness = Spring.StiffnessMediumLow,
+                                    ),
+                                ),
                             )
                         }
                     }
@@ -450,11 +485,12 @@ private fun ArtistSearchResultCard(
     profile: SearchArtistProfile,
     subtitle: String,
     onClick: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
     val primary = MaterialTheme.colorScheme.primary
     Surface(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(22.dp))
             .clickable(onClick = onClick)
@@ -477,25 +513,21 @@ private fun ArtistSearchResultCard(
                     .background(primary.copy(alpha = 0.16f)),
                 contentAlignment = Alignment.Center,
             ) {
-                if (!profile.avatarUrl.isNullOrBlank()) {
-                    SubcomposeAsyncImage(
+                var avatarLoadFailed by remember(profile.avatarUrl) { mutableStateOf(false) }
+                if (!profile.avatarUrl.isNullOrBlank() && !avatarLoadFailed) {
+                    AsyncImage(
                         model = ImageRequest.Builder(context)
                             .data(profile.avatarUrl)
-                            .crossfade(true)
+                            .size(160)
+                            .allowHardware(true)
+                            .crossfade(false)
                             .build(),
                         contentDescription = profile.name,
                         contentScale = ContentScale.Crop,
+                        onError = { avatarLoadFailed = true },
                         modifier = Modifier
                             .fillMaxSize()
                             .clip(CircleShape),
-                        error = {
-                            Icon(
-                                imageVector = Icons.Rounded.Person,
-                                contentDescription = null,
-                                tint = primary,
-                                modifier = Modifier.size(26.dp),
-                            )
-                        },
                     )
                 } else {
                     Icon(

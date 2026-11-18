@@ -30,6 +30,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -114,6 +115,8 @@ fun rememberIsAppForeground(): Boolean {
 }
 
 val LocalBatterySaverEnabled = compositionLocalOf { false }
+val LocalIsMainUiVisible = compositionLocalOf { true }
+val LocalIsFastScrolling = compositionLocalOf { false }
 
 @Composable
 fun FloatingCoverBackdrop(
@@ -122,8 +125,11 @@ fun FloatingCoverBackdrop(
     modifier: Modifier = Modifier,
 ) {
     val batterySaver = LocalBatterySaverEnabled.current
+    val isUiVisible = LocalIsMainUiVisible.current
+    val isFastScrolling = LocalIsFastScrolling.current
     val isForeground = rememberIsAppForeground()
-    val phase = if (isForeground && !batterySaver) {
+    var lastPhase by remember { mutableFloatStateOf(0f) }
+    val phase = if (isForeground && isUiVisible && !batterySaver && !isFastScrolling) {
         val infiniteTransition = rememberInfiniteTransition(label = "floatingCoverLoop")
         val animatedPhase by infiniteTransition.animateFloat(
             initialValue = 0f,
@@ -134,9 +140,10 @@ fun FloatingCoverBackdrop(
             ),
             label = "coverLoopPhase",
         )
+        lastPhase = animatedPhase
         animatedPhase
     } else {
-        0f
+        lastPhase
     }
     val motionEnergy by animateFloatAsState(
         targetValue = if (isPlaying && isForeground) 1.0f else 0.35f,
@@ -202,7 +209,7 @@ fun FloatingCoverBackdrop(
                 TrackCoverArtwork(
                     track = targetTrack,
                     cornerRadius = 0.dp,
-                    targetSizePx = 280,
+                    targetSizePx = 128,
                     crossfade = true,
                     modifier = Modifier.fillMaxSize(),
                 )
@@ -276,8 +283,11 @@ fun LiquidShaderBackdrop(
         }
     }
 
+    val isUiVisible = LocalIsMainUiVisible.current
+    val isFastScrolling = LocalIsFastScrolling.current
     val isForeground = rememberIsAppForeground()
-    val timeSec = if (isForeground) {
+    var lastTimeSec by remember { mutableFloatStateOf(0f) }
+    val timeSec = if (isForeground && isUiVisible && !isFastScrolling) {
         val infiniteTransition = rememberInfiniteTransition(label = "liquidTime")
         val animatedTimeSec by infiniteTransition.animateFloat(
             initialValue = 0f,
@@ -288,9 +298,10 @@ fun LiquidShaderBackdrop(
             ),
             label = "timeSec",
         )
+        lastTimeSec = animatedTimeSec
         animatedTimeSec
     } else {
-        0f
+        lastTimeSec
     }
 
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -353,9 +364,7 @@ private fun FallbackAuroraCanvas(
     modifier: Modifier = Modifier,
 ) {
     Canvas(
-        modifier = modifier
-            .fillMaxSize()
-            .blur(48.dp),
+        modifier = modifier.fillMaxSize(),
     ) {
         drawRect(color = baseColor)
         val orb1 = Offset(

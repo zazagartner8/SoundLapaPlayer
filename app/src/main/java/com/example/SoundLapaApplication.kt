@@ -42,6 +42,7 @@ class SoundLapaApplication : Application(), ImageLoaderFactory {
                     .maxSizeBytes(128L * 1024L * 1024L)
                     .build()
             }
+            .respectCacheHeaders(false)
             .allowHardware(true)
             .crossfade(false)
             .build()

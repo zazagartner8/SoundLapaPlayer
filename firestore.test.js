@@ -10,6 +10,7 @@ let testEnv;
 const PROJECT_ID = process.env.GCP_PROJECT || "demo-no-project";
 const ALICE_UID = "alice_123";
 const BOB_UID = "bob_456";
+const DEV_TEST_EMAIL = process.env.SOUNDLAP_DEV_TEST_EMAIL || "";
 
 const [emulatorHost, emulatorPortStr] = (
   process.env.FIRESTORE_EMULATOR_HOST || "127.0.0.1:8085"
@@ -253,10 +254,16 @@ test("User profile supports custom bio, compressed avatar data URI, and synced s
   );
 });
 
-test("Bug reports enforce authenticated create, password-filtered list query, and immutability", async () => {
+test("Bug reports enforce authenticated create, verified-developer read/delete, and immutability", async () => {
   const unauthDb = testEnv.unauthenticatedContext().firestore();
-  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
-  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID, {
+    email: "alice@example.com",
+    email_verified: true,
+  }).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID, {
+    email: "bob@example.com",
+    email_verified: true,
+  }).firestore();
 
   const validReport = {
     reportId: "rep_1",
@@ -264,29 +271,37 @@ test("Bug reports enforce authenticated create, password-filtered list query, an
     reporterName: "Alice",
     reporterAvatarUrl: "https://example.com/a.jpg",
     message: "Button alignment issue",
-    appVersion: "3.3",
-    devAccessKey: "shelban852",
+    appVersion: "3.4.1",
     createdAtMs: 1700000001000,
     createdAt: ts(),
   };
 
   await assertFails(unauthDb.collection("bug_reports").doc("rep_1").set(validReport));
-  await assertFails(unauthDb.collection("bug_reports").where("devAccessKey", "==", "shelban852").get());
+  await assertFails(unauthDb.collection("bug_reports").get());
   await assertFails(bobDb.collection("bug_reports").doc("rep_1").set(validReport));
 
   await assertSucceeds(aliceDb.collection("bug_reports").doc("rep_1").set(validReport));
 
-  // Unfiltered list or wrong devAccessKey query fails
+  // Unrelated non-dev user cannot list all reports or delete Alice's report
   await assertFails(bobDb.collection("bug_reports").get());
-  await assertFails(bobDb.collection("bug_reports").where("devAccessKey", "==", "wrongpass").get());
+  await assertFails(bobDb.collection("bug_reports").doc("rep_1").get());
+  await assertFails(bobDb.collection("bug_reports").doc("rep_1").delete());
 
-  // Query with exact devAccessKey succeeds
-  await assertSucceeds(bobDb.collection("bug_reports").where("devAccessKey", "==", "shelban852").get());
-
-  // Immutable against edits; unauthenticated or unrelated-user delete rejected; authorized dev delete succeeds
+  // Reporter can query their own reports and delete their own report, but cannot update
+  await assertSucceeds(aliceDb.collection("bug_reports").where("userId", "==", ALICE_UID).get());
   await assertFails(aliceDb.collection("bug_reports").doc("rep_1").update({ message: "Edited" }));
   await assertFails(unauthDb.collection("bug_reports").doc("rep_1").delete());
-  await assertSucceeds(bobDb.collection("bug_reports").doc("rep_1").delete());
+
+  if (DEV_TEST_EMAIL) {
+    const devDb = testEnv.authenticatedContext("dev_uid_1", {
+      email: DEV_TEST_EMAIL,
+      email_verified: true,
+    }).firestore();
+    await assertSucceeds(devDb.collection("bug_reports").get());
+    await assertSucceeds(devDb.collection("bug_reports").doc("rep_1").delete());
+  } else {
+    await assertSucceeds(aliceDb.collection("bug_reports").doc("rep_1").delete());
+  }
 });
 
 test("Avatar 18+ moderation block deletes cloud photoUrl and prevents re-enabling or uploading new avatar", async () => {
@@ -344,17 +359,22 @@ test("Avatar 18+ moderation block deletes cloud photoUrl and prevents re-enablin
   );
 });
 
-test("Cloud metrics allow owner writes and developer devAccessKey queries while blocking cross-user writes", async () => {
+test("Cloud metrics allow owner writes and verified-developer reads while blocking non-dev list queries", async () => {
   const unauthDb = testEnv.unauthenticatedContext().firestore();
-  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
-  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID, {
+    email: "alice@example.com",
+    email_verified: true,
+  }).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID, {
+    email: "bob@example.com",
+    email_verified: true,
+  }).firestore();
 
   const aliceMetrics = {
     userId: ALICE_UID,
     storageBytes: 12480,
     tracksCount: 8,
     playlistsCount: 2,
-    devAccessKey: "shelban852",
     updatedAt: ts(),
   };
 
@@ -363,10 +383,18 @@ test("Cloud metrics allow owner writes and developer devAccessKey queries while 
   await assertSucceeds(aliceDb.collection("cloud_metrics").doc(ALICE_UID).set(aliceMetrics));
   await assertSucceeds(aliceDb.collection("cloud_metrics").doc(ALICE_UID).update({ storageBytes: 9600, updatedAt: ts() }));
 
-  // Unfiltered list or wrong devAccessKey rejected; exact devAccessKey succeeds
+  // Non-dev cannot list all cloud_metrics or read Alice's metrics
   await assertFails(bobDb.collection("cloud_metrics").get());
-  await assertFails(bobDb.collection("cloud_metrics").where("devAccessKey", "==", "wrong").get());
-  await assertSucceeds(bobDb.collection("cloud_metrics").where("devAccessKey", "==", "shelban852").get());
+  await assertFails(bobDb.collection("cloud_metrics").doc(ALICE_UID).get());
+  await assertSucceeds(aliceDb.collection("cloud_metrics").doc(ALICE_UID).get());
+
+  if (DEV_TEST_EMAIL) {
+    const devDb = testEnv.authenticatedContext("dev_uid_1", {
+      email: DEV_TEST_EMAIL,
+      email_verified: true,
+    }).firestore();
+    await assertSucceeds(devDb.collection("cloud_metrics").get());
+  }
 });
 
 test("Public profiles, @username registry, and exclusive verified developer badge boundaries", async () => {
@@ -379,14 +407,6 @@ test("Public profiles, @username registry, and exclusive verified developer badg
     email: "bob@example.com",
     email_verified: true,
   }).firestore();
-  const unverifiedDevDb = testEnv.authenticatedContext("dev_unverified", {
-    email: "livex0464@gmail.com",
-    email_verified: false,
-  }).firestore();
-  const devDb = testEnv.authenticatedContext("dev_uid_1", {
-    email: "livex0464@gmail.com",
-    email_verified: true,
-  }).firestore();
 
   // Regular user cannot claim isDeveloper: true
   await assertFails(
@@ -394,17 +414,6 @@ test("Public profiles, @username registry, and exclusive verified developer badg
       userId: ALICE_UID,
       displayName: "Fake Dev",
       username: "fake_dev",
-      isDeveloper: true,
-      isPublic: true,
-      updatedAt: ts(),
-    })
-  );
-
-  // Unverified developer email also cannot claim isDeveloper: true
-  await assertFails(
-    unverifiedDevDb.collection("public_profiles").doc("dev_unverified").set({
-      userId: "dev_unverified",
-      displayName: "Unverified Dev",
       isDeveloper: true,
       isPublic: true,
       updatedAt: ts(),
@@ -446,34 +455,53 @@ test("Public profiles, @username registry, and exclusive verified developer badg
   );
   await assertFails(bobDb.collection("public_profiles").doc(ALICE_UID).delete());
 
-  // Verified developer (livex0464@gmail.com) can set isDeveloper: true
-  await assertSucceeds(
-    devDb.collection("public_profiles").doc("dev_uid_1").set({
-      userId: "dev_uid_1",
-      displayName: "TylerW1nston",
-      username: "tylerw1nston",
-      isDeveloper: true,
-      isPublic: true,
-      updatedAt: ts(),
-    })
-  );
-  await assertSucceeds(
-    devDb.collection("usernames").doc("tylerw1nston").set({
-      username: "tylerw1nston",
-      userId: "dev_uid_1",
-      displayName: "TylerW1nston",
-      isDeveloper: true,
-      isPublic: true,
-      updatedAt: ts(),
-    })
-  );
+  if (DEV_TEST_EMAIL) {
+    const unverifiedDevDb = testEnv.authenticatedContext("dev_unverified", {
+      email: DEV_TEST_EMAIL,
+      email_verified: false,
+    }).firestore();
+    await assertFails(
+      unverifiedDevDb.collection("public_profiles").doc("dev_unverified").set({
+        userId: "dev_unverified",
+        displayName: "Unverified Dev",
+        isDeveloper: true,
+        isPublic: true,
+        updatedAt: ts(),
+      })
+    );
+
+    const devDb = testEnv.authenticatedContext("dev_uid_1", {
+      email: DEV_TEST_EMAIL,
+      email_verified: true,
+    }).firestore();
+    await assertSucceeds(
+      devDb.collection("public_profiles").doc("dev_uid_1").set({
+        userId: "dev_uid_1",
+        displayName: "TylerW1nston",
+        username: "tylerw1nston",
+        isDeveloper: true,
+        isPublic: true,
+        updatedAt: ts(),
+      })
+    );
+    await assertSucceeds(
+      devDb.collection("usernames").doc("tylerw1nston").set({
+        username: "tylerw1nston",
+        userId: "dev_uid_1",
+        displayName: "TylerW1nston",
+        isDeveloper: true,
+        isPublic: true,
+        updatedAt: ts(),
+      })
+    );
+    await assertSucceeds(bobDb.collection("usernames").doc("tylerw1nston").get());
+  }
 
   // List queries require isPublic==true (or isDeveloper==true); unauthenticated denied
   await assertFails(unauthDb.collection("public_profiles").where("isPublic", "==", true).get());
   await assertFails(bobDb.collection("public_profiles").get());
   await assertSucceeds(bobDb.collection("public_profiles").where("isPublic", "==", true).get());
   await assertSucceeds(bobDb.collection("public_profiles").where("isDeveloper", "==", true).get());
-  await assertSucceeds(bobDb.collection("usernames").doc("tylerw1nston").get());
 });
 
 test("Friends and artist subscriptions enforce owner isolation and schema validation", async () => {
@@ -527,6 +555,148 @@ test("Friends and artist subscriptions enforce owner isolation and schema valida
   await assertFails(bobDb.collection("users").doc(ALICE_UID).collection("artist_subscriptions").get());
 
   await assertSucceeds(subRef.delete());
+});
+
+test("User online presence and active track fields validate schema and allow read-only verified developer inspection", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID, {
+    email: "alice@example.com",
+    email_verified: true,
+  }).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID, {
+    email: "bob@example.com",
+    email_verified: true,
+  }).firestore();
+  const aliceDoc = aliceDb.collection("users").doc(ALICE_UID);
+
+  await assertSucceeds(aliceDoc.set(validProfile(ALICE_UID)));
+  await assertSucceeds(
+    aliceDoc.update({
+      isOnline: true,
+      lastActiveAtMs: 1700000002000,
+      currentTrackId: "sp_track_1",
+      currentTrackTitle: "Yamakasi",
+      currentTrackArtist: "Miyagi",
+      currentTrackCoverUrl: "https://i.scdn.co/image/cover",
+      currentTrackIsPlaying: true,
+      currentTrackUpdatedAtMs: 1700000002000,
+      updatedAt: ts(),
+    })
+  );
+
+  // Regular user cannot read Alice's presence/private user doc or list all users
+  await assertFails(bobDb.collection("users").get());
+  await assertFails(bobDb.collection("users").doc(ALICE_UID).get());
+
+  if (DEV_TEST_EMAIL) {
+    const devDb = testEnv.authenticatedContext("dev_uid_1", {
+      email: DEV_TEST_EMAIL,
+      email_verified: true,
+    }).firestore();
+    await assertSucceeds(devDb.collection("users").get());
+    await assertSucceeds(devDb.collection("users").doc(ALICE_UID).get());
+    await assertSucceeds(devDb.collection("users").doc(ALICE_UID).collection("tracks").get());
+    await assertSucceeds(devDb.collection("users").doc(ALICE_UID).collection("playlists").get());
+    await assertSucceeds(devDb.collection("users").doc(ALICE_UID).collection("friends").get());
+    await assertSucceeds(devDb.collection("users").doc(ALICE_UID).collection("artist_subscriptions").get());
+    // Verified developer cannot mutate Alice's profile
+    await assertFails(devDb.collection("users").doc(ALICE_UID).update({ displayName: "Hacked", updatedAt: ts() }));
+  }
+});
+
+test("Banned user is blocked from all cloud reads/writes while non-developer cannot tamper with banned_users", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID, {
+    email: "alice@example.com",
+    email_verified: true,
+  }).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID, {
+    email: "bob@example.com",
+    email_verified: true,
+  }).firestore();
+
+  // Seed Alice's data before ban
+  await assertSucceeds(aliceDb.collection("users").doc(ALICE_UID).set(validProfile(ALICE_UID)));
+  await assertSucceeds(aliceDb.collection("users").doc(ALICE_UID).collection("tracks").doc("t1").set(validTrack(ALICE_UID, "t1")));
+
+  // Regular user cannot create a ban record or delete another user's profile
+  await assertFails(
+    bobDb.collection("banned_users").doc(ALICE_UID).set({
+      userId: ALICE_UID,
+      reason: "Fake ban",
+      bannedByUid: BOB_UID,
+      bannedAtMs: 1700000003000,
+      updatedAt: ts(),
+    })
+  );
+  await assertFails(bobDb.collection("users").doc(ALICE_UID).delete());
+
+  // Seed ban record using disabled rules (or verified dev when DEV_TEST_EMAIL is provided)
+  if (DEV_TEST_EMAIL) {
+    const devDb = testEnv.authenticatedContext("dev_uid_1", {
+      email: DEV_TEST_EMAIL,
+      email_verified: true,
+    }).firestore();
+    await assertSucceeds(
+      devDb.collection("banned_users").doc(ALICE_UID).set({
+        userId: ALICE_UID,
+        reason: "Abuse",
+        bannedByUid: "dev_uid_1",
+        bannedAtMs: 1700000003000,
+        updatedAt: ts(),
+      })
+    );
+    // Developer cannot ban themselves
+    await assertFails(
+      devDb.collection("banned_users").doc("dev_uid_1").set({
+        userId: "dev_uid_1",
+        reason: "Self ban",
+        bannedByUid: "dev_uid_1",
+        bannedAtMs: 1700000003000,
+        updatedAt: ts(),
+      })
+    );
+  } else {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await ctx.firestore().collection("banned_users").doc(ALICE_UID).set({
+        userId: ALICE_UID,
+        reason: "Abuse",
+        bannedByUid: "dev_uid_1",
+        bannedAtMs: 1700000003000,
+        updatedAt: ts(),
+      });
+    });
+  }
+
+  // Alice can read her own ban status doc so app shows Ban Screen
+  await assertSucceeds(aliceDb.collection("banned_users").doc(ALICE_UID).get());
+  // Alice cannot delete or tamper with her own ban doc
+  await assertFails(aliceDb.collection("banned_users").doc(ALICE_UID).delete());
+  // Bob cannot read Alice's ban record
+  await assertFails(bobDb.collection("banned_users").doc(ALICE_UID).get());
+
+  // Banned Alice is blocked from reading/writing own data or public profiles
+  await assertFails(aliceDb.collection("users").doc(ALICE_UID).get());
+  await assertFails(aliceDb.collection("users").doc(ALICE_UID).collection("tracks").get());
+  await assertFails(aliceDb.collection("users").doc(ALICE_UID).update({ displayName: "Alice2", updatedAt: ts() }));
+  await assertFails(aliceDb.collection("public_profiles").where("isPublic", "==", true).get());
+  await assertFails(aliceDb.collection("cloud_metrics").doc(ALICE_UID).set({
+    userId: ALICE_UID,
+    storageBytes: 100,
+    tracksCount: 0,
+    playlistsCount: 0,
+    updatedAt: ts(),
+  }));
+
+  if (DEV_TEST_EMAIL) {
+    const devDb = testEnv.authenticatedContext("dev_uid_1", {
+      email: DEV_TEST_EMAIL,
+      email_verified: true,
+    }).firestore();
+    await assertSucceeds(devDb.collection("banned_users").doc(ALICE_UID).delete());
+    await assertSucceeds(devDb.collection("users").doc(ALICE_UID).collection("tracks").doc("t1").delete());
+    await assertSucceeds(devDb.collection("users").doc(ALICE_UID).delete());
+    // Unbanned Alice is now able to recreate profile
+    await assertSucceeds(aliceDb.collection("users").doc(ALICE_UID).set(validProfile(ALICE_UID)));
+  }
 });
 
 

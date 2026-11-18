@@ -104,8 +104,6 @@ internal fun compactCloudTrackDescription(raw: String?): String? {
     return trimmed.take(120)
 }
 
-const val DEVELOPER_REPORTS_PASSWORD: String = "shelban852"
-const val DEVELOPER_EMAIL: String = "livex0464@gmail.com"
 const val DEVELOPER_DEFAULT_HANDLE: String = "tylerw1nston"
 
 internal fun normalizeUsernameHandle(raw: String): String =
@@ -203,6 +201,18 @@ data class CloudUserProfile(
     val searchHistory: List<String>? = null,
     val listeningStatsJson: String? = null,
     val settings: Map<String, Any?>? = null,
+    @get:PropertyName("isOnline")
+    @set:PropertyName("isOnline")
+    var isOnline: Boolean = false,
+    val lastActiveAtMs: Long = 0L,
+    val currentTrackId: String? = null,
+    val currentTrackTitle: String? = null,
+    val currentTrackArtist: String? = null,
+    val currentTrackCoverUrl: String? = null,
+    @get:PropertyName("currentTrackIsPlaying")
+    @set:PropertyName("currentTrackIsPlaying")
+    var currentTrackIsPlaying: Boolean = false,
+    val currentTrackUpdatedAtMs: Long = 0L,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null,
 ) {
@@ -423,7 +433,6 @@ data class CloudBugReport(
     val reporterAvatarUrl: String? = null,
     val message: String = "",
     val appVersion: String = "",
-    val devAccessKey: String = DEVELOPER_REPORTS_PASSWORD,
     val createdAtMs: Long = 0L,
     @ServerTimestamp val createdAt: Timestamp? = null,
 ) {
@@ -433,8 +442,7 @@ data class CloudBugReport(
         put("reporterName", reporterName.trim().ifBlank { "SoundLap User" }.take(64))
         reporterAvatarUrl?.trim()?.takeIf { it.isNotEmpty() }?.let { put("reporterAvatarUrl", it.take(MAX_CLOUD_AVATAR_LEN)) }
         put("message", message.trim().ifBlank { "Bug report" }.take(1000))
-        put("appVersion", appVersion.trim().ifBlank { "3.4" }.take(32))
-        put("devAccessKey", DEVELOPER_REPORTS_PASSWORD)
+        put("appVersion", appVersion.trim().ifBlank { "3.4.1" }.take(32))
         put("createdAtMs", createdAtMs.coerceAtLeast(0L))
         put("createdAt", FieldValue.serverTimestamp())
     }
@@ -671,7 +679,6 @@ data class CloudUserMetrics(
     val storageBytes: Long = 0L,
     val tracksCount: Int = 0,
     val playlistsCount: Int = 0,
-    val devAccessKey: String = DEVELOPER_REPORTS_PASSWORD,
     @ServerTimestamp val updatedAt: Timestamp? = null,
 ) {
     fun toCreateMap(uid: String): Map<String, Any> = mapOf(
@@ -679,7 +686,6 @@ data class CloudUserMetrics(
         "storageBytes" to storageBytes.coerceAtLeast(0L),
         "tracksCount" to tracksCount.coerceAtLeast(0),
         "playlistsCount" to playlistsCount.coerceAtLeast(0),
-        "devAccessKey" to DEVELOPER_REPORTS_PASSWORD,
         "updatedAt" to FieldValue.serverTimestamp(),
     )
 
@@ -687,10 +693,68 @@ data class CloudUserMetrics(
         "storageBytes" to storageBytes.coerceAtLeast(0L),
         "tracksCount" to tracksCount.coerceAtLeast(0),
         "playlistsCount" to playlistsCount.coerceAtLeast(0),
-        "devAccessKey" to DEVELOPER_REPORTS_PASSWORD,
         "updatedAt" to FieldValue.serverTimestamp(),
     )
 }
+
+@IgnoreExtraProperties
+data class CloudBanRecord(
+    @DocumentId val docId: String = "",
+    val userId: String = "",
+    val reason: String? = null,
+    val bannedByUid: String = "",
+    val bannedAtMs: Long = 0L,
+    @ServerTimestamp val updatedAt: Timestamp? = null,
+) {
+    fun toWriteMap(targetUid: String, actorUid: String): Map<String, Any> = buildMap {
+        put("userId", safeFirestoreDocId(targetUid))
+        reason?.trim()?.takeIf { it.isNotEmpty() }?.let { put("reason", it.take(300)) }
+        put("bannedByUid", actorUid)
+        put("bannedAtMs", bannedAtMs.coerceAtLeast(0L))
+        put("updatedAt", FieldValue.serverTimestamp())
+    }
+}
+
+data class DeveloperUserPlaylistDetails(
+    val playlist: CloudUserPlaylist,
+    val tracks: List<CloudSavedTrack> = emptyList(),
+)
+
+data class DeveloperUserOverview(
+    val userId: String,
+    val accountUid: String? = null,
+    val displayName: String = "SoundLap User",
+    val username: String? = null,
+    val email: String? = null,
+    val photoUrl: String? = null,
+    val bio: String? = null,
+    val isOnline: Boolean = false,
+    val lastActiveAtMs: Long = 0L,
+    val currentTrackId: String? = null,
+    val currentTrackTitle: String? = null,
+    val currentTrackArtist: String? = null,
+    val currentTrackCoverUrl: String? = null,
+    val currentTrackIsPlaying: Boolean = false,
+    val currentTrackUpdatedAtMs: Long = 0L,
+    val storageBytes: Long = 0L,
+    val tracksCount: Int = 0,
+    val playlistsCount: Int = 0,
+    val listeningEvents: List<ListeningPlayEvent> = emptyList(),
+    val searchHistory: List<String> = emptyList(),
+    val settings: CloudUserSettings? = null,
+    val profileUpdatedAtMs: Long = 0L,
+    val isBanned: Boolean = false,
+    val banReason: String? = null,
+    val bannedAtMs: Long = 0L,
+)
+
+data class DeveloperUserFullDetails(
+    val overview: DeveloperUserOverview,
+    val tracks: List<CloudSavedTrack> = emptyList(),
+    val playlists: List<DeveloperUserPlaylistDetails> = emptyList(),
+    val friends: List<CloudFriend> = emptyList(),
+    val subscriptions: List<CloudArtistSubscription> = emptyList(),
+)
 
 data class CloudStorageStats(
     val usedBytes: Long = 0L,
@@ -860,7 +924,6 @@ internal fun estimateBugReportBytes(report: CloudBugReport): Long =
             "reporterAvatarUrl" to report.reporterAvatarUrl,
             "message" to report.message,
             "appVersion" to report.appVersion,
-            "devAccessKey" to report.devAccessKey,
             "createdAtMs" to report.createdAtMs,
         ),
     )

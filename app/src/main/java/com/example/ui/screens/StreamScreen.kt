@@ -2,6 +2,8 @@ package com.example.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -95,6 +97,7 @@ fun StreamScreen(
     val recommendedRowState = rememberLazyListState()
     val pullToRefreshState = rememberPullToRefreshState()
 
+    val currentOnSelectFilter by rememberUpdatedState(onSelectFilter)
     val currentOnPlayTrack by rememberUpdatedState(onPlayTrack)
     val currentOnPlayRecommendedTrack by rememberUpdatedState(onPlayRecommendedTrack)
     val currentOnToggleLike by rememberUpdatedState(onToggleLike)
@@ -134,7 +137,7 @@ fun StreamScreen(
             ),
             verticalArrangement = Arrangement.spacedBy(18.dp),
         ) {
-            item(key = "expandable_search") {
+            item(key = "expandable_search", contentType = "search_bar") {
                 val slideEase = remember { CubicBezierEasing(0.22f, 1f, 0.36f, 1f) }
                 AnimatedVisibility(
                     visible = state.isSearchActive,
@@ -162,14 +165,17 @@ fun StreamScreen(
                         contentType = { "filter_pill" },
                     ) { filter ->
                         val selected = state.selectedFilter == filter
+                        val onFilterClick = remember(filter) {
+                            {
+                                haptics.tick()
+                                currentOnSelectFilter(filter)
+                            }
+                        }
                         FilterPill(
                             label = filterDisplayLabel(filter, strings),
                             testTag = "filter_chip_$filter",
                             selected = selected,
-                            onClick = {
-                                haptics.tick()
-                                onSelectFilter(filter)
-                            },
+                            onClick = onFilterClick,
                         )
                     }
                 }
@@ -193,10 +199,11 @@ fun StreamScreen(
                                         pair.forEach { track ->
                                             val isCurrentPlaying =
                                                 state.currentTrackId == track.id && state.isPlaying
-                                            val onQuickPickClick = remember(track) {
+                                            val latestTrack by rememberUpdatedState(track)
+                                            val onQuickPickClick = remember(track.id) {
                                                 {
                                                     haptics.tap()
-                                                    currentOnPlayTrack(track)
+                                                    currentOnPlayTrack(latestTrack)
                                                 }
                                             }
                                             QuickPickGridCard(
@@ -234,8 +241,9 @@ fun StreamScreen(
                                     contentType = { "trending_card" },
                                 ) { track ->
                                     val isCurrent = state.currentTrackId == track.id
-                                    val onTrendingClick = remember(track) {
-                                        { currentOnPlayTrack(track) }
+                                    val latestTrack by rememberUpdatedState(track)
+                                    val onTrendingClick = remember(track.id) {
+                                        { currentOnPlayTrack(latestTrack) }
                                     }
                                     TrendingSquareCard(
                                         track = track,
@@ -270,10 +278,11 @@ fun StreamScreen(
                                     contentType = { "recommended_card" },
                                 ) { track ->
                                     val isCurrent = state.currentTrackId == track.id
-                                    val onRecommendedClick = remember(track) {
+                                    val latestTrack by rememberUpdatedState(track)
+                                    val onRecommendedClick = remember(track.id) {
                                         {
                                             haptics.tap()
-                                            currentOnPlayRecommendedTrack(track)
+                                            currentOnPlayRecommendedTrack(latestTrack)
                                         }
                                     }
                                     TrendingSquareCard(
@@ -288,7 +297,7 @@ fun StreamScreen(
                 }
             }
 
-            item(key = "tracks_section_header") {
+            item(key = "tracks_section_header", contentType = "section_header") {
                 Text(
                     text = if (state.selectedFilter == "Все") {
                         strings.forYou
@@ -301,7 +310,7 @@ fun StreamScreen(
             }
 
             if (state.filteredTracks.isEmpty()) {
-                item(key = "empty_tracks") {
+                item(key = "empty_tracks", contentType = "empty_notice") {
                     Surface(
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(22.dp),
@@ -333,22 +342,23 @@ fun StreamScreen(
                     contentType = { "track_row" },
                 ) { track ->
                     val isCurrent = state.currentTrackId == track.id
-                    val onPlayClick = remember(track) {
+                    val latestTrack by rememberUpdatedState(track)
+                    val onPlayClick = remember(track.id) {
                         {
                             haptics.tap()
-                            currentOnPlayTrack(track)
+                            currentOnPlayTrack(latestTrack)
                         }
                     }
-                    val onLikeClick = remember(track) {
+                    val onLikeClick = remember(track.id) {
                         {
                             haptics.confirm()
-                            currentOnToggleLike(track)
+                            currentOnToggleLike(latestTrack)
                         }
                     }
-                    val onMoreClick = remember(track) {
+                    val onMoreClick = remember(track.id) {
                         {
                             haptics.tick()
-                            currentOnOpenTrackOptions(track)
+                            currentOnOpenTrackOptions(latestTrack)
                         }
                     }
                     TrackRowItem(
@@ -358,6 +368,13 @@ fun StreamScreen(
                         onPlayClick = onPlayClick,
                         onLikeClick = onLikeClick,
                         onMoreClick = onMoreClick,
+                        modifier = Modifier.animateItem(
+                            fadeInSpec = tween(180),
+                            placementSpec = spring(
+                                dampingRatio = 0.86f,
+                                stiffness = Spring.StiffnessMediumLow,
+                            ),
+                        ),
                     )
                 }
             }

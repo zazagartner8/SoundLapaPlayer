@@ -6,15 +6,20 @@ import com.example.data.local.PlaylistEntity
 import com.example.data.local.PlaylistTrackCrossRef
 import com.example.data.local.SoundLapaDao
 import com.example.data.local.TrackEntity
+import com.example.ui.auth.isAllowedDeveloperEmail
 import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.DocumentSnapshot
+import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.FirebaseFirestoreException
 import com.google.firebase.firestore.snapshots
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.emitAll
@@ -67,7 +72,7 @@ class CloudLibraryRepository(
 
     fun isCurrentUserVerifiedDeveloper(): Boolean {
         val user = auth.currentUser ?: return false
-        return user.email.equals(DEVELOPER_EMAIL, ignoreCase = true) && user.isEmailVerified
+        return isAllowedDeveloperEmail(user.email) && user.isEmailVerified
     }
 
     suspend fun upsertUserProfile(
@@ -466,20 +471,19 @@ class CloudLibraryRepository(
         }
     }
 
-    suspend fun fetchDeveloperBugReports(accessPassword: String): Result<List<CloudBugReport>> =
+    suspend fun fetchDeveloperBugReports(): Result<List<CloudBugReport>> =
         withContext(Dispatchers.IO) {
             try {
                 requireUserId()
             } catch (e: Exception) {
                 return@withContext Result.failure(e)
             }
-            if (accessPassword != DEVELOPER_REPORTS_PASSWORD) {
-                return@withContext Result.failure(IllegalAccessException("Invalid developer password"))
+            if (!isCurrentUserVerifiedDeveloper()) {
+                return@withContext Result.failure(IllegalAccessException("Verified developer account required"))
             }
             val path = "bug_reports"
             try {
                 val snapshot = db.collection(path)
-                    .whereEqualTo("devAccessKey", accessPassword)
                     .get()
                     .await()
                 val reports = snapshot.toObjects(
@@ -497,15 +501,14 @@ class CloudLibraryRepository(
 
     suspend fun deleteDeveloperBugReport(
         docIdOrReportId: String,
-        accessPassword: String,
     ): Result<Unit> = withContext(Dispatchers.IO) {
         try {
             requireUserId()
         } catch (e: Exception) {
             return@withContext Result.failure(e)
         }
-        if (accessPassword != DEVELOPER_REPORTS_PASSWORD) {
-            return@withContext Result.failure(IllegalAccessException("Invalid developer password"))
+        if (!isCurrentUserVerifiedDeveloper()) {
+            return@withContext Result.failure(IllegalAccessException("Verified developer account required"))
         }
         val cleanId = docIdOrReportId.trim()
         if (cleanId.isEmpty()) {
@@ -602,15 +605,15 @@ class CloudLibraryRepository(
         }
     }
 
-    suspend fun fetchDeveloperCloudStorageStats(accessPassword: String): Result<CloudStorageStats> =
+    suspend fun fetchDeveloperCloudStorageStats(): Result<CloudStorageStats> =
         withContext(Dispatchers.IO) {
             val uid = try {
                 requireUserId()
             } catch (e: Exception) {
                 return@withContext Result.failure(e)
             }
-            if (accessPassword != DEVELOPER_REPORTS_PASSWORD) {
-                return@withContext Result.failure(IllegalAccessException("Invalid developer password"))
+            if (!isCurrentUserVerifiedDeveloper()) {
+                return@withContext Result.failure(IllegalAccessException("Verified developer account required"))
             }
             try {
                 // Measure exact live Firestore documents owned by the signed-in user
@@ -638,7 +641,6 @@ class CloudLibraryRepository(
                 val currentUserPlaylists = playlistsSnap.size()
 
                 val metricsSnapshot = db.collection("cloud_metrics")
-                    .whereEqualTo("devAccessKey", accessPassword)
                     .get()
                     .await()
                 val userMetrics = metricsSnapshot.toObjects(
@@ -664,7 +666,6 @@ class CloudLibraryRepository(
                 }
 
                 val reportsSnapshot = db.collection("bug_reports")
-                    .whereEqualTo("devAccessKey", accessPassword)
                     .get()
                     .await()
                 val reportsBytes = reportsSnapshot.documents.sumOf { doc ->
@@ -1686,4 +1687,472 @@ class CloudLibraryRepository(
             Result.failure(e)
         }
     }
+
+    suspend fun updateUserPresenceAndNowPlaying(
+        isOnline: Boolean,
+        trackId: String?,
+        trackTitle: String?,
+        trackArtist: String?,
+        trackCoverUrl: String?,
+        isPlaying: Boolean,
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        val uid = try {
+            requireUserId()
+        } catch (e: Exception) {
+            return@withContext Result.failure(e)
+        }
+        val docRef = userDocRef(uid)
+        val now = System.currentTimeMillis()
+        val cleanTrackId = trackId?.trim()?.takeIf { it.isNotEmpty() }?.take(180)
+        val cleanTitle = trackTitle?.trim()?.takeIf { it.isNotEmpty() }?.take(180)
+        val cleanArtist = trackArtist?.trim()?.takeIf { it.isNotEmpty() }?.take(180)
+        val cleanCover = compactCloudUrl(trackCoverUrl, 320)
+        try {
+            val snap = docRef.get().await()
+            if (snap.exists()) {
+                val updateMap = buildMap<String, Any> {
+                    put("isOnline", isOnline)
+                    put("lastActiveAtMs", now)
+                    put("currentTrackIsPlaying", isPlaying && cleanTrackId != null)
+                    put("currentTrackUpdatedAtMs", now)
+                    if (cleanTrackId != null) {
+                        put("currentTrackId", cleanTrackId)
+                        put("currentTrackTitle", cleanTitle ?: "Track")
+                        put("currentTrackArtist", cleanArtist ?: "Artist")
+                        if (cleanCover != null) {
+                            put("currentTrackCoverUrl", cleanCover)
+                        } else {
+                            put("currentTrackCoverUrl", FieldValue.delete())
+                        }
+                    } else {
+                        put("currentTrackId", FieldValue.delete())
+                        put("currentTrackTitle", FieldValue.delete())
+                        put("currentTrackArtist", FieldValue.delete())
+                        put("currentTrackCoverUrl", FieldValue.delete())
+                    }
+                    put("updatedAt", FieldValue.serverTimestamp())
+                }
+                docRef.update(updateMap).await()
+            } else {
+                val fallbackName = auth.currentUser?.displayName?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: auth.currentUser?.email?.substringBefore('@')?.takeIf { it.isNotBlank() }
+                    ?: "SoundLap User"
+                val baseProfile = CloudUserProfile(
+                    docId = uid,
+                    userId = uid,
+                    displayName = fallbackName,
+                    email = auth.currentUser?.email,
+                    photoUrl = auth.currentUser?.photoUrl?.toString(),
+                )
+                val createMap = baseProfile.toCreateMap(uid).toMutableMap()
+                createMap["isOnline"] = isOnline
+                createMap["lastActiveAtMs"] = now
+                createMap["currentTrackIsPlaying"] = isPlaying && cleanTrackId != null
+                createMap["currentTrackUpdatedAtMs"] = now
+                if (cleanTrackId != null) {
+                    createMap["currentTrackId"] = cleanTrackId
+                    createMap["currentTrackTitle"] = cleanTitle ?: "Track"
+                    createMap["currentTrackArtist"] = cleanArtist ?: "Artist"
+                    if (cleanCover != null) {
+                        createMap["currentTrackCoverUrl"] = cleanCover
+                    }
+                }
+                docRef.set(createMap).await()
+            }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, docRef.path)
+            Result.failure(e)
+        }
+    }
+
+    private fun bannedUsersCollection() = db.collection("banned_users")
+
+    fun observeOwnBanStatus(uid: String): Flow<CloudBanRecord?> = flow {
+        val safeUid = safeFirestoreDocId(uid)
+        if (safeUid.isBlank()) {
+            emit(null)
+            return@flow
+        }
+        val docRef = bannedUsersCollection().document(safeUid)
+        emitAll(
+            docRef.snapshots()
+                .map { snapshot ->
+                    if (snapshot.exists()) {
+                        snapshot.toObject(
+                            CloudBanRecord::class.java,
+                            DocumentSnapshot.ServerTimestampBehavior.ESTIMATE,
+                        )
+                    } else {
+                        null
+                    }
+                }
+                .catch { error ->
+                    val firestoreError = generateSequence(error) { it.cause }
+                        .filterIsInstance<FirebaseFirestoreException>()
+                        .firstOrNull()
+                    if (firestoreError == null && error is CancellationException) throw error
+                    val exceptionToLog = firestoreError ?: (error as? Exception)
+                    if (exceptionToLog != null && auth.currentUser?.uid == uid) {
+                        handleFirestoreError(exceptionToLog, OperationType.GET, docRef.path)
+                    }
+                    emit(null)
+                },
+        )
+    }
+
+    suspend fun banUser(
+        targetUid: String,
+        reason: String? = null,
+    ): Result<CloudBanRecord> = withContext(Dispatchers.IO) {
+        val actorUid = try {
+            requireUserId()
+        } catch (e: Exception) {
+            return@withContext Result.failure(e)
+        }
+        if (!isCurrentUserVerifiedDeveloper()) {
+            return@withContext Result.failure(IllegalAccessException("Verified developer account required"))
+        }
+        val safeTargetUid = safeFirestoreDocId(targetUid)
+        if (safeTargetUid.isBlank() || safeTargetUid == actorUid) {
+            return@withContext Result.failure(IllegalArgumentException("Cannot ban this user"))
+        }
+        val cleanReason = reason?.trim()?.takeIf { it.isNotEmpty() }?.take(300)
+        val record = CloudBanRecord(
+            docId = safeTargetUid,
+            userId = safeTargetUid,
+            reason = cleanReason,
+            bannedByUid = actorUid,
+            bannedAtMs = System.currentTimeMillis(),
+        )
+        val docRef = bannedUsersCollection().document(safeTargetUid)
+        try {
+            docRef.set(record.toWriteMap(safeTargetUid, actorUid)).await()
+            Result.success(record)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, docRef.path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun unbanUser(targetUid: String): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            requireUserId()
+        } catch (e: Exception) {
+            return@withContext Result.failure(e)
+        }
+        if (!isCurrentUserVerifiedDeveloper()) {
+            return@withContext Result.failure(IllegalAccessException("Verified developer account required"))
+        }
+        val safeTargetUid = safeFirestoreDocId(targetUid)
+        if (safeTargetUid.isBlank()) {
+            return@withContext Result.failure(IllegalArgumentException("Invalid target UID"))
+        }
+        val docRef = bannedUsersCollection().document(safeTargetUid)
+        try {
+            docRef.delete().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, docRef.path)
+            Result.failure(e)
+        }
+    }
+
+    private suspend fun deleteDocRefsInBatches(refs: List<com.google.firebase.firestore.DocumentReference>) {
+        if (refs.isEmpty()) return
+        for (chunk in refs.chunked(400)) {
+            val batch = db.batch()
+            chunk.forEach { batch.delete(it) }
+            batch.commit().await()
+        }
+    }
+
+    suspend fun deleteDeveloperUserFromServer(targetUid: String): Result<Unit> = withContext(Dispatchers.IO) {
+        val actorUid = try {
+            requireUserId()
+        } catch (e: Exception) {
+            return@withContext Result.failure(e)
+        }
+        if (!isCurrentUserVerifiedDeveloper()) {
+            return@withContext Result.failure(IllegalAccessException("Verified developer account required"))
+        }
+        val safeUid = safeFirestoreDocId(targetUid)
+        if (safeUid.isBlank() || safeUid == actorUid) {
+            return@withContext Result.failure(IllegalArgumentException("Cannot delete this user"))
+        }
+        try {
+            val userRef = userDocRef(safeUid)
+            val userSnap = runCatching { userRef.get().await() }.getOrNull()
+            val storedHandle = userSnap?.getString("username")?.let(::normalizeUsernameHandle)
+                ?.takeIf(::isValidUsernameHandle)
+
+            val playlistsSnap = playlistsCollection(safeUid).get().await()
+            val allRefsToDelete = ArrayList<com.google.firebase.firestore.DocumentReference>()
+
+            for (plDoc in playlistsSnap.documents) {
+                val itemsSnap = plDoc.reference.collection("items").get().await()
+                itemsSnap.documents.forEach { allRefsToDelete += it.reference }
+                allRefsToDelete += plDoc.reference
+            }
+            tracksCollection(safeUid).get().await().documents.forEach { allRefsToDelete += it.reference }
+            friendsCollection(safeUid).get().await().documents.forEach { allRefsToDelete += it.reference }
+            artistSubscriptionsCollection(safeUid).get().await().documents.forEach { allRefsToDelete += it.reference }
+
+            val handleRefs = linkedSetOf<String>()
+            runCatching {
+                usernamesCollection().whereEqualTo("userId", safeUid).get().await()
+            }.getOrNull()?.documents?.forEach { handleRefs += it.id }
+            if (storedHandle != null) {
+                val directHandleSnap = runCatching { usernamesCollection().document(storedHandle).get().await() }.getOrNull()
+                if (directHandleSnap?.exists() == true && directHandleSnap.getString("userId") == safeUid) {
+                    handleRefs += directHandleSnap.id
+                }
+            }
+            handleRefs.forEach { handleId -> allRefsToDelete += usernamesCollection().document(handleId) }
+
+            runCatching {
+                db.collection("bug_reports").whereEqualTo("userId", safeUid).get().await()
+            }.getOrNull()?.documents?.forEach { allRefsToDelete += it.reference }
+
+            allRefsToDelete += publicProfilesCollection().document(safeUid)
+            allRefsToDelete += db.collection("cloud_metrics").document(safeUid)
+            allRefsToDelete += userRef
+
+            deleteDocRefsInBatches(allRefsToDelete)
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, "users/$safeUid")
+            Result.failure(e)
+        }
+    }
+
+    private fun buildDeveloperUserOverview(
+        profile: CloudUserProfile,
+        metrics: CloudUserMetrics?,
+        banRecord: CloudBanRecord?,
+        fallbackUid: String,
+    ): DeveloperUserOverview {
+        val uid = profile.userId.ifBlank { fallbackUid }
+        return DeveloperUserOverview(
+            userId = uid,
+            accountUid = profile.accountUid?.takeIf { it.isNotBlank() }
+                ?: com.example.data.local.SoundLapUidFormatter.format(uid),
+            displayName = profile.displayName.ifBlank { "SoundLap User" },
+            username = profile.username?.takeIf { it.isNotBlank() },
+            email = profile.email?.takeIf { it.isNotBlank() },
+            photoUrl = if (profile.avatarBlocked) null else profile.photoUrl,
+            bio = profile.bio?.takeIf { it.isNotBlank() },
+            isOnline = profile.isOnline,
+            lastActiveAtMs = profile.lastActiveAtMs,
+            currentTrackId = profile.currentTrackId?.takeIf { it.isNotBlank() },
+            currentTrackTitle = profile.currentTrackTitle?.takeIf { it.isNotBlank() },
+            currentTrackArtist = profile.currentTrackArtist?.takeIf { it.isNotBlank() },
+            currentTrackCoverUrl = profile.currentTrackCoverUrl?.takeIf { it.isNotBlank() },
+            currentTrackIsPlaying = profile.currentTrackIsPlaying,
+            currentTrackUpdatedAtMs = profile.currentTrackUpdatedAtMs,
+            storageBytes = metrics?.storageBytes?.coerceAtLeast(0L) ?: 0L,
+            tracksCount = metrics?.tracksCount?.coerceAtLeast(0) ?: 0,
+            playlistsCount = metrics?.playlistsCount?.coerceAtLeast(0) ?: 0,
+            listeningEvents = profile.parsedListeningEvents(),
+            searchHistory = profile.searchHistory.orEmpty(),
+            settings = profile.parsedSettings(),
+            profileUpdatedAtMs = profile.updatedAt?.toDate()?.time ?: profile.lastActiveAtMs,
+            isBanned = banRecord != null,
+            banReason = banRecord?.reason,
+            bannedAtMs = banRecord?.bannedAtMs ?: 0L,
+        )
+    }
+
+    suspend fun fetchDeveloperAllUsersOverview(): Result<List<DeveloperUserOverview>> =
+        withContext(Dispatchers.IO) {
+            try {
+                requireUserId()
+            } catch (e: Exception) {
+                return@withContext Result.failure(e)
+            }
+            if (!isCurrentUserVerifiedDeveloper()) {
+                return@withContext Result.failure(IllegalAccessException("Verified developer account required"))
+            }
+            try {
+                coroutineScope {
+                    val usersDeferred = async { db.collection("users").get().await() }
+                    val metricsDeferred = async {
+                        runCatching { db.collection("cloud_metrics").get().await() }.getOrNull()
+                    }
+                    val bansDeferred = async {
+                        runCatching { bannedUsersCollection().get().await() }.getOrNull()
+                    }
+                    val usersSnap = usersDeferred.await()
+                    val metricsSnap = metricsDeferred.await()
+                    val bansSnap = bansDeferred.await()
+
+                    val metricsByUid = metricsSnap
+                        ?.toObjects(CloudUserMetrics::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                        ?.associateBy { it.userId.ifBlank { it.docId } }
+                        .orEmpty()
+
+                    val bansByUid = bansSnap
+                        ?.toObjects(CloudBanRecord::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                        ?.associateBy { it.userId.ifBlank { it.docId } }
+                        .orEmpty()
+
+                    val overviews = usersSnap.documents.mapNotNull { doc ->
+                        val profile = doc.toObject(
+                            CloudUserProfile::class.java,
+                            DocumentSnapshot.ServerTimestampBehavior.ESTIMATE,
+                        ) ?: return@mapNotNull null
+                        val uid = profile.userId.ifBlank { doc.id }
+                        buildDeveloperUserOverview(
+                            profile = profile,
+                            metrics = metricsByUid[uid],
+                            banRecord = bansByUid[uid],
+                            fallbackUid = doc.id,
+                        )
+                    }.sortedWith(
+                        compareByDescending<DeveloperUserOverview> { it.isOnline }
+                            .thenByDescending { it.currentTrackIsPlaying }
+                            .thenByDescending { it.lastActiveAtMs }
+                            .thenBy { it.displayName.lowercase() },
+                    )
+                    Result.success(overviews)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                handleFirestoreError(e, OperationType.LIST, "users")
+                Result.failure(e)
+            }
+        }
+
+    suspend fun fetchDeveloperUserDetails(targetUid: String): Result<DeveloperUserFullDetails> =
+        withContext(Dispatchers.IO) {
+            try {
+                requireUserId()
+            } catch (e: Exception) {
+                return@withContext Result.failure(e)
+            }
+            if (!isCurrentUserVerifiedDeveloper()) {
+                return@withContext Result.failure(IllegalAccessException("Verified developer account required"))
+            }
+            val safeUid = safeFirestoreDocId(targetUid)
+            if (safeUid.isBlank()) {
+                return@withContext Result.failure(IllegalArgumentException("Invalid target UID"))
+            }
+            try {
+                coroutineScope {
+                    val userDeferred = async { userDocRef(safeUid).get().await() }
+                    val metricsDeferred = async {
+                        runCatching { db.collection("cloud_metrics").document(safeUid).get().await() }.getOrNull()
+                    }
+                    val banDeferred = async {
+                        runCatching { bannedUsersCollection().document(safeUid).get().await() }.getOrNull()
+                    }
+                    val tracksDeferred = async { tracksCollection(safeUid).get().await() }
+                    val playlistsDeferred = async { playlistsCollection(safeUid).get().await() }
+                    val friendsDeferred = async { friendsCollection(safeUid).get().await() }
+                    val subsDeferred = async { artistSubscriptionsCollection(safeUid).get().await() }
+
+                    val userSnap = userDeferred.await()
+                    val metricsSnap = metricsDeferred.await()
+                    val banSnap = banDeferred.await()
+                    val tracksSnap = tracksDeferred.await()
+                    val playlistsSnap = playlistsDeferred.await()
+                    val friendsSnap = friendsDeferred.await()
+                    val subsSnap = subsDeferred.await()
+
+                    val profile = userSnap.toObject(
+                        CloudUserProfile::class.java,
+                        DocumentSnapshot.ServerTimestampBehavior.ESTIMATE,
+                    ) ?: CloudUserProfile(docId = safeUid, userId = safeUid)
+                    val metric = metricsSnap?.toObject(
+                        CloudUserMetrics::class.java,
+                        DocumentSnapshot.ServerTimestampBehavior.ESTIMATE,
+                    )
+                    val banRecord = if (banSnap?.exists() == true) {
+                        banSnap.toObject(
+                            CloudBanRecord::class.java,
+                            DocumentSnapshot.ServerTimestampBehavior.ESTIMATE,
+                        )
+                    } else {
+                        null
+                    }
+                    val savedTracks = tracksSnap.toObjects(
+                        CloudSavedTrack::class.java,
+                        DocumentSnapshot.ServerTimestampBehavior.ESTIMATE,
+                    ).sortedWith(
+                        compareByDescending<CloudSavedTrack> { it.isLiked }
+                            .thenByDescending { it.playCount }
+                            .thenBy { it.title.lowercase() },
+                    )
+                    val tracksById = savedTracks.associateBy { it.trackId }
+
+                    val playlistDetails = playlistsSnap.documents.map { plDoc ->
+                        async {
+                            val playlist = plDoc.toObject(
+                                CloudUserPlaylist::class.java,
+                                DocumentSnapshot.ServerTimestampBehavior.ESTIMATE,
+                            ) ?: return@async null
+                            val itemsSnap = runCatching { plDoc.reference.collection("items").get().await() }.getOrNull()
+                            val items = itemsSnap?.toObjects(
+                                CloudPlaylistItem::class.java,
+                                DocumentSnapshot.ServerTimestampBehavior.ESTIMATE,
+                            ).orEmpty().sortedWith(
+                                compareBy<CloudPlaylistItem> { it.position }.thenBy { it.addedAtMs },
+                            )
+                            val resolvedTracks = items.map { item ->
+                                tracksById[item.trackId] ?: CloudSavedTrack(
+                                    userId = safeUid,
+                                    trackId = item.trackId,
+                                    title = item.trackId,
+                                    artist = "",
+                                )
+                            }
+                            DeveloperUserPlaylistDetails(playlist = playlist, tracks = resolvedTracks)
+                        }
+                    }.awaitAll().filterNotNull().sortedWith(
+                        compareByDescending<DeveloperUserPlaylistDetails> { it.playlist.isPinned }
+                            .thenByDescending { it.playlist.playlistCreatedAtMs },
+                    )
+
+                    val friends = friendsSnap.toObjects(
+                        CloudFriend::class.java,
+                        DocumentSnapshot.ServerTimestampBehavior.ESTIMATE,
+                    ).sortedWith(
+                        compareByDescending<CloudFriend> { it.isDeveloper }.thenBy { it.displayName.lowercase() },
+                    )
+                    val subscriptions = subsSnap.toObjects(
+                        CloudArtistSubscription::class.java,
+                        DocumentSnapshot.ServerTimestampBehavior.ESTIMATE,
+                    ).sortedByDescending { it.subscribedAtMs }
+
+                    val baseOverview = buildDeveloperUserOverview(profile, metric, banRecord, safeUid)
+                    val enrichedOverview = baseOverview.copy(
+                        tracksCount = maxOf(baseOverview.tracksCount, savedTracks.size),
+                        playlistsCount = maxOf(baseOverview.playlistsCount, playlistDetails.size),
+                    )
+                    Result.success(
+                        DeveloperUserFullDetails(
+                            overview = enrichedOverview,
+                            tracks = savedTracks,
+                            playlists = playlistDetails,
+                            friends = friends,
+                            subscriptions = subscriptions,
+                        ),
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                handleFirestoreError(e, OperationType.GET, "users/$safeUid")
+                Result.failure(e)
+            }
+        }
 }

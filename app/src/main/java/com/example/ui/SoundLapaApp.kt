@@ -8,6 +8,8 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.MutableTransitionState
@@ -89,8 +91,9 @@ import com.example.data.local.PlaylistEntity
 import com.example.data.local.TrackEntity
 import com.example.data.remote.CloudLibraryRepository
 import com.example.ui.auth.GoogleAuthManager
-import com.example.ui.auth.authStateFlow
+import com.example.ui.auth.findActivity
 import com.example.ui.components.AddToPlaylistBottomSheet
+import com.example.ui.components.ArtistCreditPickerDialog
 import com.example.ui.components.BugReportDialog
 import com.example.ui.components.EditPlaylistDialog
 import com.example.ui.components.EditTrackDialog
@@ -108,12 +111,15 @@ import com.example.ui.components.SystemUtilityTopBar
 import com.example.ui.components.TrackOptionsBottomSheet
 import com.example.ui.components.UploadTracksBottomSheet
 import com.example.ui.components.rememberSoundLapaHaptics
+import com.example.ui.components.splitArtistCredits
 import com.example.ui.i18n.LocalAppStrings
 import com.example.ui.i18n.stringsForLanguage
 import com.example.ui.screens.AboutScreen
 import com.example.ui.screens.ArtistProfileScreen
+import com.example.ui.screens.BannedAccountScreen
 import com.example.ui.screens.ChangelogHistoryScreen
 import com.example.ui.screens.DeveloperScreen
+import com.example.ui.screens.EasterEggScreen
 import com.example.ui.screens.GoogleAuthScreen
 import com.example.ui.screens.LibraryScreen
 import com.example.ui.screens.NowPlayingSheet
@@ -121,8 +127,10 @@ import com.example.ui.screens.SearchScreen
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.screens.StreamScreen
 import com.example.ui.screens.UserProfileAndFriendsScreen
+import com.example.ui.screens.isEasterEggSearchQuery
 import com.example.ui.shaders.LocalBatterySaverEnabled
 import com.example.ui.shaders.LocalDataSaverEnabled
+import com.example.ui.shaders.LocalIsMainUiVisible
 import com.example.ui.theme.LiquidRose
 import com.example.ui.theme.SoundLapaTheme
 import com.google.firebase.Firebase
@@ -174,12 +182,23 @@ fun SoundLapaApp() {
         stringsForLanguage(preAuthSettings.appLanguage)
     }
 
-    val currentUser by remember { Firebase.auth.authStateFlow() }
-        .collectAsStateWithLifecycle(initialValue = Firebase.auth.currentUser)
+    val currentUser by remember { GoogleAuthManager.observeCurrentUser() }
+        .collectAsStateWithLifecycle()
+
+    val rootLifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(rootLifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                GoogleAuthManager.refreshCurrentUser()
+            }
+        }
+        rootLifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { rootLifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     val user = currentUser
     if (user == null && !preAuthSettings.isGuestMode) {
-        val scope = rememberCoroutineScope()
+        val scope = app.appScope
         SoundLapaTheme(
             darkTheme = preAuthSettings.darkLiquidGlass,
             accentColor = Color(preAuthSettings.accentColorArgb),
@@ -199,6 +218,7 @@ fun SoundLapaApp() {
                         scope.launch { preferences.setAppLanguage(langCode) }
                     },
                     onAuthSuccess = {
+                        GoogleAuthManager.refreshCurrentUser()
                         scope.launch { preferences.setGuestMode(false) }
                     },
                     onContinueAsGuest = {
@@ -243,6 +263,7 @@ fun SoundLapaApp() {
     }
 }
 
+@OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 private fun SoundLapaAuthenticatedShell(
     viewModel: SoundLapaViewModel,
@@ -260,6 +281,7 @@ private fun SoundLapaAuthenticatedShell(
     val statsBackupState by viewModel.statsBackupState.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
+    val app = context.applicationContext as SoundLapaApplication
     val lifecycleOwner = LocalLifecycleOwner.current
     var askedNotificationPermission by remember { mutableStateOf(false) }
 
@@ -267,7 +289,9 @@ private fun SoundLapaAuthenticatedShell(
     var showDeveloperScreen by remember { mutableStateOf(false) }
     var showAboutScreen by remember { mutableStateOf(false) }
     var showSocialScreen by remember { mutableStateOf(false) }
+    var socialStandaloneProfileOnly by remember { mutableStateOf(false) }
     var showChangelogHistory by remember { mutableStateOf(false) }
+    var showEasterEggScreen by remember { mutableStateOf(false) }
     var showImportPlaylistDialog by remember { mutableStateOf(false) }
     var isPlaylistDetailOpen by remember { mutableStateOf(false) }
     var pendingScrollToLyrics by remember { mutableStateOf(false) }
@@ -275,6 +299,7 @@ private fun SoundLapaAuthenticatedShell(
     var showUploadSheet by remember { mutableStateOf(false) }
     var showQueueSheet by remember { mutableStateOf(false) }
     var optionsMenuTarget by remember { mutableStateOf<TrackOptionsMenuTarget?>(null) }
+    var pendingArtistPickerTrack by remember { mutableStateOf<TrackEntity?>(null) }
     var pendingRemovePlaylistTrack by remember { mutableStateOf<Pair<String, TrackEntity>?>(null) }
     var editingTrack by remember { mutableStateOf<TrackEntity?>(null) }
     var editingPlaylist by remember { mutableStateOf<PlaylistEntity?>(null) }
@@ -379,9 +404,19 @@ private fun SoundLapaAuthenticatedShell(
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
-                viewModel.refreshConnectivity()
-                viewModel.syncAutoUploadFolderIfEnabled()
+            when (event) {
+                Lifecycle.Event.ON_START -> {
+                    viewModel.onAppLifecycleChanged(isForeground = true)
+                }
+                Lifecycle.Event.ON_RESUME -> {
+                    viewModel.syncPlaybackOnForeground()
+                    viewModel.refreshConnectivity()
+                    viewModel.syncAutoUploadFolderIfEnabled()
+                }
+                Lifecycle.Event.ON_STOP -> {
+                    viewModel.onAppLifecycleChanged(isForeground = false)
+                }
+                else -> Unit
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -415,7 +450,41 @@ private fun SoundLapaAuthenticatedShell(
                 intensityPercent = state.settings.hapticIntensity,
             ),
         ) {
+            val activeBan = state.cloudSync.banRecord
+            if (activeBan != null && !state.cloudSync.isVerifiedDeveloper) {
+                val activityContext = remember(context) { context.findActivity() ?: context }
+                val credentialManager = remember(activityContext) { CredentialManager.create(activityContext) }
+                BannedAccountScreen(
+                    banRecord = activeBan,
+                    accountEmail = state.cloudSync.email,
+                    onSignOut = {
+                        app.appScope.launch {
+                            app.preferences.setGuestMode(false)
+                            app.preferences.setAvatarModerationBlocked(false)
+                            app.preferences.setCustomProfile(null, null, null)
+                        }
+                        if (!state.cloudSync.isGuest) {
+                            GoogleAuthManager.signOut(
+                                credentialManager = credentialManager,
+                                scope = app.appScope,
+                            )
+                        }
+                    },
+                )
+                return@CompositionLocalProvider
+            }
+
             val haptics = rememberSoundLapaHaptics()
+
+            fun handleOpenTrackArtist(track: TrackEntity) {
+                val artists = splitArtistCredits(track.artist)
+                if (artists.size > 1) {
+                    pendingArtistPickerTrack = track
+                } else {
+                    viewModel.setPlayerExpanded(false)
+                    viewModel.openArtistProfile(artists.firstOrNull() ?: track.artist, track)
+                }
+            }
 
             fun shareTrackExternal(track: TrackEntity) {
                 val shareText = buildString {
@@ -486,13 +555,28 @@ private fun SoundLapaAuthenticatedShell(
             val changelogTransition = remember { MutableTransitionState(false) }
             changelogTransition.targetState = showChangelogHistory
 
+            val easterEggTransition = remember { MutableTransitionState(false) }
+            easterEggTransition.targetState = showEasterEggScreen
+
+            val changelogCovered = false
+            val socialCovered =
+                (changelogTransition.currentState && changelogTransition.targetState && changelogTransition.isIdle)
+            val aboutCovered = socialCovered ||
+                (socialTransition.currentState && socialTransition.targetState && socialTransition.isIdle)
+            val developerCovered = aboutCovered ||
+                (aboutTransition.currentState && aboutTransition.targetState && aboutTransition.isIdle)
+            val settingsCovered = developerCovered ||
+                (developerTransition.currentState && developerTransition.targetState && developerTransition.isIdle)
+            val playerCovered = settingsCovered ||
+                (settingsTransition.currentState && settingsTransition.targetState && settingsTransition.isIdle)
             val isMainScreenCovered =
                 (!isPlayerDragging && playerTransition.currentState && playerTransition.targetState && playerTransition.isIdle) ||
                     (settingsTransition.currentState && settingsTransition.targetState && settingsTransition.isIdle) ||
                     (developerTransition.currentState && developerTransition.targetState && developerTransition.isIdle) ||
                     (aboutTransition.currentState && aboutTransition.targetState && aboutTransition.isIdle) ||
                     (socialTransition.currentState && socialTransition.targetState && socialTransition.isIdle) ||
-                    (changelogTransition.currentState && changelogTransition.targetState && changelogTransition.isIdle)
+                    (changelogTransition.currentState && changelogTransition.targetState && changelogTransition.isIdle) ||
+                    (easterEggTransition.currentState && easterEggTransition.targetState && easterEggTransition.isIdle)
 
             val coverAccentTarget = state.currentTrack?.let { Color(it.accentColorHex) } ?: MaterialTheme.colorScheme.primary
             val animatedCoverAccent by androidx.compose.animation.animateColorAsState(
@@ -507,11 +591,12 @@ private fun SoundLapaAuthenticatedShell(
                 color = MaterialTheme.colorScheme.background,
                 contentColor = MaterialTheme.colorScheme.onBackground,
             ) {
+                SharedTransitionLayout {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
                         .then(
-                            if (!isPlaylistDetailOpen) {
+                            if (!isPlaylistDetailOpen && !isMainScreenCovered) {
                                 Modifier.background(
                                     androidx.compose.ui.graphics.Brush.radialGradient(
                                         colors = listOf(
@@ -527,6 +612,7 @@ private fun SoundLapaAuthenticatedShell(
                             },
                         ),
                 ) {
+                CompositionLocalProvider(LocalIsMainUiVisible provides !isMainScreenCovered) {
                 BoxWithConstraints(
                 modifier = Modifier
                     .fillMaxSize()
@@ -580,6 +666,7 @@ private fun SoundLapaAuthenticatedShell(
                                     },
                                     onFriendsClick = {
                                         haptics.tick()
+                                        socialStandaloneProfileOnly = false
                                         viewModel.clearInspectedPublicProfile()
                                         viewModel.loadFriends()
                                         showSocialScreen = true
@@ -675,7 +762,13 @@ private fun SoundLapaAuthenticatedShell(
                                     SearchScreen(
                                         state = state,
                                         onQueryChange = { viewModel.updateSearchQuery(it) },
-                                        onSubmitSearch = viewModel::submitSearchQuery,
+                                        onSubmitSearch = { submitted ->
+                                            if (isEasterEggSearchQuery(submitted)) {
+                                                showEasterEggScreen = true
+                                            } else {
+                                                viewModel.submitSearchQuery(submitted)
+                                            }
+                                        },
                                         onClearQuery = { viewModel.updateSearchQuery("") },
                                         onRemoveHistoryItem = viewModel::removeSearchHistoryItem,
                                         onClearHistory = viewModel::clearSearchHistory,
@@ -838,16 +931,8 @@ private fun SoundLapaAuthenticatedShell(
                         ) {
                             AnimatedVisibility(
                                 visible = !playerTransition.targetState && !isMainScreenCovered && state.currentTrack != null,
-                                enter = fadeIn(tween(200)) + scaleIn(
-                                    initialScale = 0.94f,
-                                    transformOrigin = TransformOrigin(0.5f, 1f),
-                                    animationSpec = tween(240, easing = SilkyEaseOut),
-                                ),
-                                exit = fadeOut(tween(150)) + scaleOut(
-                                    targetScale = 1.04f,
-                                    transformOrigin = TransformOrigin(0.5f, 1f),
-                                    animationSpec = tween(180),
-                                ),
+                                enter = fadeIn(tween(220)),
+                                exit = fadeOut(tween(180)),
                             ) {
                                 FloatingMiniPlayer(
                                     track = state.currentTrack,
@@ -880,6 +965,8 @@ private fun SoundLapaAuthenticatedShell(
                                         haptics.tick()
                                         viewModel.setPlayerExpanded(true)
                                     },
+                                    sharedTransitionScope = this@SharedTransitionLayout,
+                                    animatedVisibilityScope = this@AnimatedVisibility,
                                     modifier = Modifier.padding(bottom = if (useRail) 14.dp else 4.dp),
                                 )
                             }
@@ -894,27 +981,15 @@ private fun SoundLapaAuthenticatedShell(
                     }
                 }
             }
+                }
 
-            // Full-Screen Now Playing Sheet with smooth mini-player morph transition
+            // Full-Screen Now Playing Sheet with continuous shared transition morph
             AnimatedVisibility(
                 visibleState = playerTransition,
-                enter = slideInVertically(
-                    initialOffsetY = { (it * 0.28f).toInt() },
-                    animationSpec = tween(320, easing = SilkyEaseOut),
-                ) + scaleIn(
-                    initialScale = 0.88f,
-                    transformOrigin = TransformOrigin(0.5f, 0.92f),
-                    animationSpec = tween(320, easing = SilkyEaseOut),
-                ) + fadeIn(animationSpec = tween(200)),
-                exit = slideOutVertically(
-                    targetOffsetY = { (it * 0.34f).toInt() },
-                    animationSpec = tween(260, easing = FastOutSlowInEasing),
-                ) + scaleOut(
-                    targetScale = 0.90f,
-                    transformOrigin = TransformOrigin(0.5f, 0.92f),
-                    animationSpec = tween(260, easing = FastOutSlowInEasing),
-                ) + fadeOut(animationSpec = tween(170)),
+                enter = fadeIn(animationSpec = tween(220)),
+                exit = fadeOut(animationSpec = tween(190)),
             ) {
+                CompositionLocalProvider(LocalIsMainUiVisible provides !playerCovered) {
                 state.currentTrack?.let { track ->
                     val isInPlaylist = remember(state.playlists, track.id) {
                         state.playlists.any { pl ->
@@ -970,11 +1045,14 @@ private fun SoundLapaAuthenticatedShell(
                         onAddToPlaylist = { playlistPickerTrack = track },
                         onOpenQueue = { showQueueSheet = true },
                         onShareTrack = { shareTrackExternal(track) },
-                        onOpenArtistProfile = {
-                            viewModel.setPlayerExpanded(false)
-                            viewModel.openArtistProfile(track.artist, track)
+                        onOpenArtistProfile = { handleOpenTrackArtist(track) },
+                        sharedTransitionScope = this@SharedTransitionLayout,
+                        animatedVisibilityScope = this@AnimatedVisibility,
+                        modifier = Modifier.drawWithContent {
+                            if (!playerCovered) drawContent()
                         },
                     )
+                }
                 }
             }
 
@@ -990,13 +1068,16 @@ private fun SoundLapaAuthenticatedShell(
                     animationSpec = tween(260, easing = SilkyEaseOut),
                 ) + fadeOut(animationSpec = tween(180, easing = FastOutSlowInEasing)),
             ) {
-                val settingsScope = rememberCoroutineScope()
-                val credentialManager = remember(context) { CredentialManager.create(context) }
-                val appPrefs = (context.applicationContext as SoundLapaApplication).preferences
+                val appPrefs = app.preferences
+                val activityContext = remember(context) { context.findActivity() ?: context }
+                val credentialManager = remember(activityContext) { CredentialManager.create(activityContext) }
                 var isSigningInGoogleFromGuest by remember { mutableStateOf(false) }
                 var guestGoogleSignInError by remember { mutableStateOf<String?>(null) }
                 SettingsScreen(
                     state = state,
+                    modifier = Modifier.drawWithContent {
+                        if (!settingsCovered) drawContent()
+                    },
                     onClose = {
                         viewModel.clearProfileStatusMessage()
                         viewModel.clearCacheMessage()
@@ -1026,7 +1107,8 @@ private fun SoundLapaAuthenticatedShell(
                         showDeveloperScreen = false
                         showSettingsSheet = false
                         showSocialScreen = false
-                        settingsScope.launch {
+                        socialStandaloneProfileOnly = false
+                        app.appScope.launch {
                             appPrefs.setGuestMode(false)
                             appPrefs.setAvatarModerationBlocked(false)
                             appPrefs.setCustomProfile(null, null, null)
@@ -1034,7 +1116,7 @@ private fun SoundLapaAuthenticatedShell(
                         if (!state.cloudSync.isGuest) {
                             GoogleAuthManager.signOut(
                                 credentialManager = credentialManager,
-                                scope = settingsScope,
+                                scope = app.appScope,
                             )
                         }
                     },
@@ -1043,23 +1125,25 @@ private fun SoundLapaAuthenticatedShell(
                             isSigningInGoogleFromGuest = true
                             guestGoogleSignInError = null
                             GoogleAuthManager.onGoogleSignInClicked(
-                                context = context,
+                                context = activityContext,
                                 credentialManager = credentialManager,
                                 onAuthSuccess = {
-                                    settingsScope.launch {
+                                    app.appScope.launch {
                                         appPrefs.setGuestMode(false)
                                     }
+                                    GoogleAuthManager.refreshCurrentUser()
                                     isSigningInGoogleFromGuest = false
                                     guestGoogleSignInError = null
                                     showDeveloperScreen = false
                                     showSettingsSheet = false
                                     showSocialScreen = false
+                                    socialStandaloneProfileOnly = false
                                 },
                                 onAuthError = { msg ->
                                     isSigningInGoogleFromGuest = false
                                     guestGoogleSignInError = msg
                                 },
-                                scope = settingsScope,
+                                scope = app.appScope,
                                 onAuthCancelled = {
                                     isSigningInGoogleFromGuest = false
                                 },
@@ -1071,6 +1155,7 @@ private fun SoundLapaAuthenticatedShell(
                     onUpdateProfile = viewModel::updateAccountProfile,
                     onClearProfileStatus = viewModel::clearProfileStatusMessage,
                     onOpenFriendsScreen = {
+                        socialStandaloneProfileOnly = false
                         viewModel.clearInspectedPublicProfile()
                         viewModel.loadFriends()
                         showSocialScreen = true
@@ -1102,10 +1187,16 @@ private fun SoundLapaAuthenticatedShell(
                 DeveloperScreen(
                     state = state,
                     onClose = { showDeveloperScreen = false },
-                    onUnlockWithPassword = viewModel::unlockDeveloperSection,
                     onUnlockWithBiometrics = viewModel::unlockDeveloperWithBiometrics,
                     onLock = viewModel::lockDeveloperSection,
                     onRefreshDashboard = viewModel::refreshDeveloperDashboard,
+                    onRefreshUsers = viewModel::refreshDeveloperUsers,
+                    onSelectUser = viewModel::inspectDeveloperUser,
+                    onCloseUserDetails = viewModel::closeDeveloperUserDetails,
+                    onBanUser = viewModel::banDeveloperUser,
+                    onUnbanUser = viewModel::unbanDeveloperUser,
+                    onDeleteUserFromServer = viewModel::deleteDeveloperUserFromServer,
+                    onClearUserActionMessage = viewModel::clearDeveloperUserActionMessage,
                     onDeleteReport = viewModel::deleteDeveloperBugReport,
                 )
             }
@@ -1126,8 +1217,12 @@ private fun SoundLapaAuthenticatedShell(
                     onClose = { showAboutScreen = false },
                     onOpenChangelogHistory = { showChangelogHistory = true },
                     onOpenCreatorProfile = {
+                        socialStandaloneProfileOnly = true
                         viewModel.openCreatorProfile()
                         showSocialScreen = true
+                    },
+                    modifier = Modifier.drawWithContent {
+                        if (!aboutCovered) drawContent()
                     },
                 )
             }
@@ -1159,8 +1254,10 @@ private fun SoundLapaAuthenticatedShell(
                     fallbackHistory = state.settings.listeningHistory,
                     allTracks = state.tracks,
                     accent = MaterialTheme.colorScheme.primary,
+                    isStandaloneProfileInspection = socialStandaloneProfileOnly,
                     onBack = {
                         viewModel.clearInspectedPublicProfile()
+                        socialStandaloneProfileOnly = false
                         showSocialScreen = false
                     },
                     onClearInspectedProfile = viewModel::clearInspectedPublicProfile,
@@ -1177,12 +1274,32 @@ private fun SoundLapaAuthenticatedShell(
                         )
                     },
                     onSignInRequest = {
-                        showSocialScreen = false
-                        showSettingsSheet = true
+                        val activityCtx = context.findActivity() ?: context
+                        val cm = CredentialManager.create(activityCtx)
+                        GoogleAuthManager.onGoogleSignInClicked(
+                            context = activityCtx,
+                            credentialManager = cm,
+                            onAuthSuccess = {
+                                app.appScope.launch {
+                                    app.preferences.setGuestMode(false)
+                                }
+                                GoogleAuthManager.refreshCurrentUser()
+                                socialStandaloneProfileOnly = false
+                            },
+                            onAuthError = { msg ->
+                                Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                                showSocialScreen = false
+                                showSettingsSheet = true
+                            },
+                            scope = app.appScope,
+                        )
                     },
                     statsBackupState = statsBackupState,
                     onRestoreStatsFromUri = viewModel::restoreListeningStatsFromUri,
                     onClearStatsRestoreStatus = viewModel::clearStatsRestoreStatus,
+                    modifier = Modifier.drawWithContent {
+                        if (!socialCovered) drawContent()
+                    },
                 )
             }
 
@@ -1201,6 +1318,9 @@ private fun SoundLapaAuthenticatedShell(
                 ChangelogHistoryScreen(
                     accent = MaterialTheme.colorScheme.primary,
                     onBack = { showChangelogHistory = false },
+                    modifier = Modifier.drawWithContent {
+                        if (!changelogCovered) drawContent()
+                    },
                 )
             }
 
@@ -1212,6 +1332,23 @@ private fun SoundLapaAuthenticatedShell(
                 StartupLoadingOverlay(
                     loadedCoversCount = loadedCoversCount,
                     totalCoversCount = totalCoversCount,
+                )
+            }
+
+            AnimatedVisibility(
+                visibleState = easterEggTransition,
+                enter = slideInHorizontally(
+                    initialOffsetX = { it },
+                    animationSpec = tween(310, easing = SilkyEaseOut),
+                ) + fadeIn(animationSpec = tween(200, easing = FastOutSlowInEasing)),
+                exit = slideOutHorizontally(
+                    targetOffsetX = { it },
+                    animationSpec = tween(260, easing = SilkyEaseOut),
+                ) + fadeOut(animationSpec = tween(180, easing = FastOutSlowInEasing)),
+            ) {
+                EasterEggScreen(
+                    accent = MaterialTheme.colorScheme.primary,
+                    onBack = { showEasterEggScreen = false },
                 )
             }
 
@@ -1235,6 +1372,7 @@ private fun SoundLapaAuthenticatedShell(
                 )
             }
                 }
+                }
             }
 
         // Bottom Sheets & Dialogs
@@ -1249,8 +1387,7 @@ private fun SoundLapaAuthenticatedShell(
                     { pendingDeleteTrack = track }
                 } else null,
                 onOpenArtistProfile = {
-                    viewModel.setPlayerExpanded(false)
-                    viewModel.openArtistProfile(track.artist, track)
+                    handleOpenTrackArtist(track)
                 },
                 onPlayNextClick = {
                     viewModel.playNextInQueue(track)
@@ -1269,10 +1406,7 @@ private fun SoundLapaAuthenticatedShell(
                     ).show()
                 },
                 onOpenAlbumClick = if (!track.albumTitle.isNullOrBlank()) {
-                    {
-                        viewModel.setPlayerExpanded(false)
-                        viewModel.openArtistProfile(track.artist, track)
-                    }
+                    { handleOpenTrackArtist(track) }
                 } else null,
                 onLyricsClick = {
                     ensureNotificationPermissionOnce()
@@ -1542,6 +1676,22 @@ private fun SoundLapaAuthenticatedShell(
                     viewModel.clearBugReportStatus()
                     showBugReportDialog = false
                 },
+            )
+        }
+
+        pendingArtistPickerTrack?.let { targetTrack ->
+            val artists = remember(targetTrack.artist) {
+                splitArtistCredits(targetTrack.artist)
+            }
+            ArtistCreditPickerDialog(
+                artists = artists,
+                accent = MaterialTheme.colorScheme.primary,
+                onSelectArtist = { selectedArtist ->
+                    pendingArtistPickerTrack = null
+                    viewModel.setPlayerExpanded(false)
+                    viewModel.openArtistProfile(selectedArtist, targetTrack)
+                },
+                onDismiss = { pendingArtistPickerTrack = null },
             )
         }
         }

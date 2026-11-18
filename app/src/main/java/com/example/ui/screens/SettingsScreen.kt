@@ -9,6 +9,14 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -500,27 +508,34 @@ fun SettingsScreen(
                                     ) {
                                         if (accountLabel.isNotBlank()) {
                                             Text(
-                                                text = strings.settingsCloudSignedInAs(accountLabel),
+                                                text = strings.social.settingsSignedInAsCaption,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                maxLines = 1,
+                                            )
+                                            Text(
+                                                text = accountLabel,
                                                 style = MaterialTheme.typography.titleSmall,
                                                 fontWeight = FontWeight.Bold,
                                                 color = MaterialTheme.colorScheme.onSurface,
-                                                maxLines = 1,
+                                                maxLines = 2,
                                                 overflow = TextOverflow.Ellipsis,
                                             )
                                         }
                                         val handle = state.cloudSync.username?.takeIf { it.isNotBlank() }
                                         if (handle != null || state.cloudSync.isVerifiedDeveloper) {
-                                            Row(
-                                                verticalAlignment = Alignment.CenterVertically,
+                                            FlowRow(
+                                                verticalArrangement = Arrangement.spacedBy(4.dp),
                                                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                                             ) {
                                                 handle?.let { h ->
                                                     Text(
-                                                        text = "@$h",
+                                                        text = "${strings.social.settingsUsernamePrefixLabel}: @$h",
                                                         style = MaterialTheme.typography.labelMedium,
                                                         fontWeight = FontWeight.SemiBold,
                                                         color = accent,
                                                         maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis,
                                                     )
                                                 }
                                                 if (state.cloudSync.isVerifiedDeveloper) {
@@ -718,9 +733,24 @@ fun SettingsScreen(
                                     )
                                 }
 
-                                AnimatedVisibility(visible = isProfileEditorExpanded) {
+                                AnimatedVisibility(
+                                    visible = isProfileEditorExpanded,
+                                    enter = expandVertically(
+                                        animationSpec = spring(dampingRatio = 0.85f, stiffness = Spring.StiffnessMediumLow),
+                                    ) + fadeIn(tween(220)),
+                                    exit = shrinkVertically(
+                                        animationSpec = spring(dampingRatio = 0.9f, stiffness = Spring.StiffnessMedium),
+                                    ) + fadeOut(tween(160)),
+                                ) {
                                     Column(
-                                        modifier = Modifier.fillMaxWidth(),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .animateContentSize(
+                                                animationSpec = spring(
+                                                    dampingRatio = 0.85f,
+                                                    stiffness = Spring.StiffnessMediumLow,
+                                                ),
+                                            ),
                                         verticalArrangement = Arrangement.spacedBy(12.dp),
                                     ) {
                                         if (state.cloudSync.avatarBlocked) {
@@ -1912,18 +1942,12 @@ fun SettingsScreen(
                                 }
                                 Column(
                                     modifier = Modifier.weight(1f),
-                                    verticalArrangement = Arrangement.spacedBy(2.dp),
                                 ) {
                                     Text(
                                         text = strings.settingsDeveloperSection,
                                         style = MaterialTheme.typography.titleMedium,
                                         fontWeight = FontWeight.Bold,
                                         color = MaterialTheme.colorScheme.onSurface,
-                                    )
-                                    Text(
-                                        text = strings.settingsDeveloperEntrySubtitle,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
                                 }
                                 Icon(

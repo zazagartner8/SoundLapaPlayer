@@ -1,6 +1,6 @@
 {
-  "summary":  "Подробный архитектурный и UX-план обновления SoundLap v3.4: плеер, синхронизация клипов, мультиплатформенный поиск текстов без Genius, точный подбор треков, навигация в стиле Telegram, библиотека с закреплениями и сортировкой, неубиваемая статистика, HEX-темизация и оптимизация производительности.",
-  "updatedAt":  "2026-11-16T16:10:59.659203791Z",
-  "requestFeedback":  true,
-  "userFacing":  true
+  "summary": "Architecture and implementation plan covering UI copy/layout fixes, reliable TextureView top banner, developer server-side user deletion & ban enforcement with appeal/ban screen, Search Easter Egg screen, multi-artist selection dialog, true SharedTransition morphing between MiniPlayer and Full Player, and silky animations across the app.",
+  "updatedAt": "2026-11-17T23:57:02.475067678Z",
+  "requestFeedback": true,
+  "userFacing": true
 }

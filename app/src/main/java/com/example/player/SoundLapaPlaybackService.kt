@@ -1,5 +1,6 @@
 package com.example.player
 
+import android.annotation.SuppressLint
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
@@ -7,14 +8,17 @@ import android.media.AudioAttributes as PlatformAudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.net.Uri
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.os.SystemClock
 import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Timeline
 import androidx.media3.common.util.UnstableApi
@@ -35,18 +39,23 @@ import androidx.media3.exoplayer.upstream.Allocator
 import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
 import androidx.media3.extractor.DefaultExtractorsFactory
+import androidx.media3.session.DefaultMediaNotificationProvider
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import com.example.MainActivity
+import com.example.R
 import com.example.data.local.AudioFocusMode
 import com.example.data.local.SoundLapaDao
 import com.example.data.local.SoundLapaDatabase
 import com.example.data.local.SoundLapaPreferences
 import com.example.data.remote.FullStreamResolver
 import com.example.data.remote.ResolvedAudioStream
+import com.example.data.remote.isNetworkCurrentlyAvailable
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import java.io.IOException
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -60,6 +69,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.PI
 import kotlin.math.cos
+import kotlin.math.min
 import kotlin.math.sin
 
 enum class AudioFocusUiStatus {
@@ -79,16 +89,29 @@ class SoundLapaPlaybackService : MediaSessionService() {
     private var standbyPlayer: ExoPlayer? = null
     private var sharedAudioAttributes: AudioAttributes? = null
     private var sharedDao: SoundLapaDao? = null
+    private var sharedPrefs: SoundLapaPreferences? = null
+
     private var crossfadeJob: Job? = null
+    private var supervisorJob: Job? = null
+    private var serviceRecoveryJob: Job? = null
     private var crossfadeGeneration: Long = 0L
-    private var isReplacingCrossfade = false
     private var isTransitioningSwap = false
+    private var autoCrossfadeTriggeredTrackId: String? = null
+    private var lastPrefetchedTrackId: String? = null
+    private val serviceRetryCounts = ConcurrentHashMap<String, Int>()
+
     private var currentFocusMode: AudioFocusMode = AudioFocusMode.PAUSE
+    private var smoothTransitionEnabled: Boolean = true
+    private var smoothTransitionDurationSec: Int = 3
     private var audioManager: AudioManager? = null
     private var appAudioFocusRequest: AudioFocusRequest? = null
     private var appAudioFocusModeBuilt: AudioFocusMode? = null
     private var isDuckedByFocus: Boolean = false
     private var pausedByFocusLoss: Boolean = false
+
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
+    private val activeNetworkResolutions = AtomicInteger(0)
 
     private val appAudioFocusListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
         when (currentFocusMode) {
@@ -122,6 +145,7 @@ class SoundLapaPlaybackService : MediaSessionService() {
                         pausedByFocusLoss = false
                         activePlayer?.pause()
                         _audioFocusStatus.value = AudioFocusUiStatus.IDLE
+                        refreshWakeLocks()
                     }
                 }
             }
@@ -144,6 +168,7 @@ class SoundLapaPlaybackService : MediaSessionService() {
                         } else {
                             _audioFocusStatus.value = AudioFocusUiStatus.IDLE
                         }
+                        refreshWakeLocks()
                     }
                     AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
                     AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK,
@@ -156,6 +181,7 @@ class SoundLapaPlaybackService : MediaSessionService() {
                             player.pause()
                         }
                         _audioFocusStatus.value = AudioFocusUiStatus.TRANSIENT_LOSS
+                        refreshWakeLocks()
                     }
                     AudioManager.AUDIOFOCUS_LOSS -> {
                         isDuckedByFocus = false
@@ -163,6 +189,7 @@ class SoundLapaPlaybackService : MediaSessionService() {
                         cancelCrossfade(restorePrimaryVolume = true)
                         activePlayer?.pause()
                         _audioFocusStatus.value = AudioFocusUiStatus.IDLE
+                        refreshWakeLocks()
                     }
                 }
             }
@@ -174,14 +201,32 @@ class SoundLapaPlaybackService : MediaSessionService() {
             activePlayer?.let { updateAudioFocusTelemetry(it, playbackSuppressionReason) }
         }
 
+        override fun onPlaybackStateChanged(playbackState: Int) {
+            val player = activePlayer ?: return
+            if (playbackState == Player.STATE_READY) {
+                player.currentMediaItem?.mediaId?.let { serviceRetryCounts.remove(it) }
+                prefetchUpcomingForActiveDeck(player)
+            }
+            if (playbackState == Player.STATE_IDLE || playbackState == Player.STATE_ENDED) {
+                cancelCrossfade(restorePrimaryVolume = true)
+            }
+            updateAudioFocusTelemetry(player, player.playbackSuppressionReason)
+            refreshWakeLocks()
+            ensureSupervisorState(player)
+        }
+
         override fun onIsPlayingChanged(isPlaying: Boolean) {
+            val player = activePlayer ?: return
             if (isPlaying && currentFocusMode != AudioFocusMode.MIX) {
                 ensureAppAudioFocusRequested()
             }
-            activePlayer?.let { updateAudioFocusTelemetry(it, it.playbackSuppressionReason) }
+            updateAudioFocusTelemetry(player, player.playbackSuppressionReason)
+            refreshWakeLocks()
+            ensureSupervisorState(player)
         }
 
         override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+            val player = activePlayer ?: return
             if (playWhenReady && currentFocusMode != AudioFocusMode.MIX) {
                 ensureAppAudioFocusRequested()
             }
@@ -191,7 +236,71 @@ class SoundLapaPlaybackService : MediaSessionService() {
             if (!isTransitioningSwap && !playWhenReady && crossfadeJob?.isActive == true) {
                 cancelCrossfade(restorePrimaryVolume = true)
             }
-            activePlayer?.let { updateAudioFocusTelemetry(it, it.playbackSuppressionReason) }
+            if (!playWhenReady) {
+                serviceRecoveryJob?.cancel()
+            }
+            updateAudioFocusTelemetry(player, player.playbackSuppressionReason)
+            refreshWakeLocks()
+            ensureSupervisorState(player)
+        }
+
+        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            val player = activePlayer ?: return
+            val id = mediaItem?.mediaId
+            if (!isTransitioningSwap && crossfadeJob?.isActive != true) {
+                silenceStandbyDecksSync(exceptDeck = player)
+                if (!isDuckedByFocus) {
+                    player.volume = 1f
+                }
+            }
+            if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED ||
+                reason == Player.MEDIA_ITEM_TRANSITION_REASON_SEEK
+            ) {
+                autoCrossfadeTriggeredTrackId = null
+            }
+            id?.let { serviceRetryCounts.remove(it) }
+            prefetchUpcomingForActiveDeck(player)
+            refreshWakeLocks()
+        }
+
+        override fun onPlayerError(error: PlaybackException) {
+            val player = activePlayer ?: return
+            val currentMedia = player.currentMediaItem ?: return
+            val mediaId = currentMedia.mediaId
+            val rawUri = currentMedia.localConfiguration?.uri?.toString()
+            val sourceUriExtra = currentMedia.mediaMetadata.extras?.getString("source_uri")
+
+            FullStreamResolver.invalidateCachedStream(rawUri)
+            FullStreamResolver.invalidateCachedStream(sourceUriExtra)
+
+            if (!isNetworkCurrentlyAvailable(this@SoundLapaPlaybackService)) {
+                refreshWakeLocks()
+                return
+            }
+
+            val attempts = serviceRetryCounts[mediaId] ?: 0
+            if (attempts < 4 && player.mediaItemCount > 0) {
+                val nextAttempt = attempts + 1
+                serviceRetryCounts[mediaId] = nextAttempt
+                val resumePos = player.currentPosition.coerceAtLeast(0L)
+                val idx = player.currentMediaItemIndex.coerceIn(0, player.mediaItemCount - 1)
+                cancelCrossfade(restorePrimaryVolume = true)
+                serviceRecoveryJob?.cancel()
+                serviceRecoveryJob = serviceScope.launch {
+                    refreshWakeLocks()
+                    delay(350L * nextAttempt)
+                    val target = activePlayer ?: return@launch
+                    if (target.mediaItemCount > 0 && target.currentMediaItem?.mediaId == mediaId) {
+                        target.seekTo(idx, resumePos)
+                        target.playWhenReady = true
+                        target.prepare()
+                        target.play()
+                    }
+                    refreshWakeLocks()
+                }
+            } else {
+                refreshWakeLocks()
+            }
         }
     }
 
@@ -200,9 +309,24 @@ class SoundLapaPlaybackService : MediaSessionService() {
         super.onCreate()
         activeInstance = this
         audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
-        currentFocusMode = runCatching {
-            SoundLapaPreferences(this).currentSettings().audioFocusMode
-        }.getOrDefault(AudioFocusMode.PAUSE)
+        initWakeLocks()
+
+        val prefs = SoundLapaPreferences(this).also { sharedPrefs = it }
+        val initialSettings = runCatching { prefs.currentSettings() }.getOrNull()
+        currentFocusMode = initialSettings?.audioFocusMode ?: AudioFocusMode.PAUSE
+        smoothTransitionEnabled = initialSettings?.smoothTransitionEnabled ?: true
+        smoothTransitionDurationSec = (initialSettings?.smoothTransitionDurationSec ?: 3).coerceIn(1, 10)
+
+        serviceScope.launch {
+            prefs.settings.collect { settings ->
+                currentFocusMode = settings.audioFocusMode
+                smoothTransitionEnabled = settings.smoothTransitionEnabled
+                smoothTransitionDurationSec = settings.smoothTransitionDurationSec.coerceIn(1, 10)
+                if (!smoothTransitionEnabled && crossfadeJob?.isActive == true) {
+                    cancelCrossfade(restorePrimaryVolume = true)
+                }
+            }
+        }
 
         val audioAttributes = AudioAttributes.Builder()
             .setUsage(C.USAGE_MEDIA)
@@ -222,6 +346,13 @@ class SoundLapaPlaybackService : MediaSessionService() {
         deckB = null
         activePlayer = playerA
         standbyPlayer = null
+
+        val notificationProvider = DefaultMediaNotificationProvider.Builder(this)
+            .build()
+            .apply {
+                setSmallIcon(R.drawable.ic_notification_music)
+            }
+        setMediaNotificationProvider(notificationProvider)
 
         val launchIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -255,6 +386,240 @@ class SoundLapaPlaybackService : MediaSessionService() {
             .build()
     }
 
+    private fun initWakeLocks() {
+        runCatching {
+            val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+            wakeLock = pm?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "SoundLap::PlaybackWakeLock")?.apply {
+                setReferenceCounted(false)
+            }
+        }
+        runCatching {
+            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            val wifiMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+            } else {
+                @Suppress("DEPRECATION")
+                WifiManager.WIFI_MODE_FULL_HIGH_PERF
+            }
+            wifiLock = wm?.createWifiLock(wifiMode, "SoundLap::PlaybackWifiLock")?.apply {
+                setReferenceCounted(false)
+            }
+        }
+    }
+
+    @SuppressLint("WakelockTimeout")
+    private fun refreshWakeLocks() {
+        val player = activePlayer
+        val needActiveLocks = (player != null &&
+            (player.isPlaying ||
+                (player.playWhenReady && player.playbackState == Player.STATE_BUFFERING))) ||
+            crossfadeJob?.isActive == true ||
+            serviceRecoveryJob?.isActive == true ||
+            activeNetworkResolutions.get() > 0
+
+        if (needActiveLocks) {
+            runCatching {
+                val wl = wakeLock
+                if (wl != null && !wl.isHeld) {
+                    wl.acquire(10 * 60 * 1000L)
+                }
+            }
+            runCatching {
+                val wfl = wifiLock
+                if (wfl != null && !wfl.isHeld) {
+                    wfl.acquire()
+                }
+            }
+        } else {
+            runCatching {
+                val wl = wakeLock
+                if (wl != null && wl.isHeld) {
+                    wl.release()
+                }
+            }
+            runCatching {
+                val wfl = wifiLock
+                if (wfl != null && wfl.isHeld) {
+                    wfl.release()
+                }
+            }
+        }
+    }
+
+    private fun ensureSupervisorState(player: Player) {
+        val shouldRun = player.playWhenReady || player.isPlaying || crossfadeJob?.isActive == true
+        if (!shouldRun) {
+            supervisorJob?.cancel()
+            supervisorJob = null
+            return
+        }
+        if (supervisorJob?.isActive == true) return
+        supervisorJob = serviceScope.launch {
+            var stalledSinceMs = 0L
+            var lastObservedBufferedPos = -1L
+            var lastObservedTrackId: String? = null
+            while (isActive) {
+                val current = activePlayer
+                if (current == null || (!current.playWhenReady && !current.isPlaying && crossfadeJob?.isActive != true)) {
+                    break
+                }
+                refreshWakeLocks()
+
+                val trackId = current.currentMediaItem?.mediaId
+                val state = current.playbackState
+                val now = SystemClock.elapsedRealtime()
+
+                // 1. Background buffering stall detector & auto-recovery
+                if (current.playWhenReady && state == Player.STATE_BUFFERING && !current.isPlaying) {
+                    val buf = current.bufferedPosition
+                    if (trackId != lastObservedTrackId || buf > lastObservedBufferedPos + 1500L) {
+                        lastObservedTrackId = trackId
+                        lastObservedBufferedPos = buf
+                        stalledSinceMs = now
+                    } else if (stalledSinceMs > 0L && now - stalledSinceMs > 16_000L) {
+                        stalledSinceMs = now
+                        recoverStalledStreamInBackground(current)
+                    }
+                } else {
+                    stalledSinceMs = 0L
+                    lastObservedBufferedPos = current.bufferedPosition
+                    lastObservedTrackId = trackId
+                }
+
+                // 2. Background next-track pre-resolve & service-hosted end-of-track auto-crossfade
+                val duration = current.duration
+                val pos = current.currentPosition.coerceAtLeast(0L)
+                if (current.isPlaying &&
+                    state == Player.STATE_READY &&
+                    duration > 0L &&
+                    trackId != null
+                ) {
+                    val remaining = (duration - pos).coerceAtLeast(0L)
+                    if (remaining <= 16_000L) {
+                        prefetchUpcomingForActiveDeck(current)
+                    }
+                    if (smoothTransitionEnabled &&
+                        crossfadeJob?.isActive != true &&
+                        autoCrossfadeTriggeredTrackId != trackId &&
+                        current.hasNextMediaItem() &&
+                        current.repeatMode != Player.REPEAT_MODE_ONE &&
+                        duration > 20_000L &&
+                        pos >= 4_000L
+                    ) {
+                        val configuredFadeMs = (smoothTransitionDurationSec * 1000L).coerceIn(1000L, 10_000L)
+                        val effectiveFadeMs = min(configuredFadeMs, (duration / 2L).coerceAtLeast(800L))
+                        if (remaining in 450L..(effectiveFadeMs + 2_200L)) {
+                            val nextIdx = current.nextMediaItemIndex
+                            val count = current.mediaItemCount
+                            if (nextIdx in 0 until count) {
+                                val items = List(count) { idx -> current.getMediaItemAt(idx) }
+                                if (items[nextIdx].mediaId != trackId) {
+                                    autoCrossfadeTriggeredTrackId = trackId
+                                    startDualDeckCrossfade(
+                                        mediaItems = items,
+                                        targetIndex = nextIdx,
+                                        startPositionMs = 0L,
+                                        fadeDurationMs = effectiveFadeMs,
+                                        repeatMode = current.repeatMode,
+                                        shuffleEnabled = current.shuffleModeEnabled,
+                                        maxLeadWaitMs = 2_400L,
+                                        fallbackApplyOnActive = {
+                                            activePlayer?.volume = 1f
+                                        },
+                                        onDeckActivated = { _, _ -> },
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+                delay(350L)
+            }
+            supervisorJob = null
+            refreshWakeLocks()
+        }
+    }
+
+    private fun recoverStalledStreamInBackground(player: ExoPlayer) {
+        if (!isNetworkCurrentlyAvailable(this)) return
+        val media = player.currentMediaItem ?: return
+        val mediaId = media.mediaId
+        val attempts = serviceRetryCounts[mediaId] ?: 0
+        if (attempts >= 4) return
+        serviceRetryCounts[mediaId] = attempts + 1
+
+        val rawUri = media.localConfiguration?.uri?.toString()
+        val sourceUri = media.mediaMetadata.extras?.getString("source_uri")
+        FullStreamResolver.invalidateCachedStream(rawUri)
+        FullStreamResolver.invalidateCachedStream(sourceUri)
+
+        val resumePos = player.currentPosition.coerceAtLeast(0L)
+        val idx = player.currentMediaItemIndex.coerceIn(0, (player.mediaItemCount - 1).coerceAtLeast(0))
+        serviceScope.launch {
+            refreshWakeLocks()
+            if (player === activePlayer && player.mediaItemCount > 0) {
+                player.seekTo(idx, resumePos)
+                player.playWhenReady = true
+                player.prepare()
+                player.play()
+            }
+        }
+    }
+
+    private fun prefetchUpcomingForActiveDeck(player: Player) {
+        val dao = sharedDao ?: return
+        val count = player.mediaItemCount
+        if (count <= 0) return
+
+        fun triggerPrefetchAt(index: Int, markPrimary: Boolean) {
+            if (index !in 0 until count) return
+            val item = player.getMediaItemAt(index)
+            val id = item.mediaId
+            if (markPrimary && id.isNotBlank() && id == lastPrefetchedTrackId) return
+            if (markPrimary) lastPrefetchedTrackId = id
+
+            val rawUri = (item.localConfiguration?.uri ?: item.requestMetadata.mediaUri)?.toString().orEmpty()
+            if (rawUri.isBlank() || rawUri.startsWith("content://") || rawUri.startsWith("file://")) return
+            if (FullStreamResolver.peekCachedOrDirectStreamSync(rawUri) != null) return
+
+            val title = item.mediaMetadata.title?.toString()
+            val artist = item.mediaMetadata.artist?.toString()
+            val sourceUri = item.mediaMetadata.extras?.getString("source_uri")
+            val durationMs = item.mediaMetadata.extras?.getLong("duration_ms", 0L) ?: 0L
+
+            serviceScope.launch(Dispatchers.IO) {
+                activeNetworkResolutions.incrementAndGet()
+                serviceScope.launch(Dispatchers.Main.immediate) { refreshWakeLocks() }
+                try {
+                    FullStreamResolver.resolveAudioStreamForUri(
+                        rawUri = rawUri,
+                        fallbackTitle = title,
+                        fallbackArtist = artist,
+                        trackId = id.takeIf { it.isNotBlank() },
+                        originalSourceUri = sourceUri,
+                        dao = dao,
+                        expectedDurationMs = durationMs,
+                    )
+                } finally {
+                    activeNetworkResolutions.decrementAndGet()
+                    serviceScope.launch(Dispatchers.Main.immediate) { refreshWakeLocks() }
+                }
+            }
+        }
+
+        val nextIdx = player.nextMediaItemIndex
+        if (nextIdx != C.INDEX_UNSET) {
+            triggerPrefetchAt(nextIdx, markPrimary = true)
+            if (nextIdx + 1 in 0 until count) {
+                triggerPrefetchAt(nextIdx + 1, markPrimary = false)
+            }
+        }
+        val prevIdx = player.previousMediaItemIndex
+        if (prevIdx != C.INDEX_UNSET) {
+            triggerPrefetchAt(prevIdx, markPrimary = false)
+        }
+    }
+
     @OptIn(UnstableApi::class)
     private fun buildDeckPlayer(handleAudioFocus: Boolean): ExoPlayer {
         val dao = sharedDao ?: SoundLapaDatabase.getInstance(this).soundLapaDao().also { sharedDao = it }
@@ -265,10 +630,10 @@ class SoundLapaPlaybackService : MediaSessionService() {
 
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                /* minBufferMs = */ 10_000,
-                /* maxBufferMs = */ 40_000,
-                /* bufferForPlaybackMs = */ 200,
-                /* bufferForPlaybackAfterRebufferMs = */ 600,
+                /* minBufferMs = */ 20_000,
+                /* maxBufferMs = */ 60_000,
+                /* bufferForPlaybackMs = */ 350,
+                /* bufferForPlaybackAfterRebufferMs = */ 1_000,
             )
             .setPrioritizeTimeOverSizeThresholds(true)
             .build()
@@ -280,18 +645,26 @@ class SoundLapaPlaybackService : MediaSessionService() {
             dao = dao,
             resolveScope = serviceScope,
             extractorsFactory = extractorsFactory,
+            onResolutionStateChanged = { delta ->
+                if (delta > 0) {
+                    activeNetworkResolutions.incrementAndGet()
+                } else {
+                    activeNetworkResolutions.updateAndGet { cur -> (cur - 1).coerceAtLeast(0) }
+                }
+                serviceScope.launch(Dispatchers.Main.immediate) { refreshWakeLocks() }
+            },
         ).apply {
             setLoadErrorHandlingPolicy(
-                object : DefaultLoadErrorHandlingPolicy(4) {
+                object : DefaultLoadErrorHandlingPolicy(6) {
                     override fun getRetryDelayMsFor(loadErrorInfo: LoadErrorHandlingPolicy.LoadErrorInfo): Long {
                         val cause = loadErrorInfo.exception
                         if (cause is HttpDataSource.InvalidResponseCodeException &&
                             (cause.responseCode == 403 || cause.responseCode == 410 || cause.responseCode == 404)
                         ) {
-                            // Fail immediately on expired signed CDN URLs so PlaybackController re-resolves cleanly
+                            // Fail fast on expired signed CDN URLs so service error recovery re-resolves cleanly
                             return C.TIME_UNSET
                         }
-                        return super.getRetryDelayMsFor(loadErrorInfo)
+                        return super.getRetryDelayMsFor(loadErrorInfo).coerceAtMost(4_000L)
                     }
                 },
             )
@@ -323,6 +696,40 @@ class SoundLapaPlaybackService : MediaSessionService() {
         return created
     }
 
+    /**
+     * Synchronously stops, mutes, and clears every deck other than [exceptDeck] so two tracks
+     * can never overlap or echo at playback start.
+     */
+    private fun silenceStandbyDecksSync(exceptDeck: ExoPlayer? = activePlayer) {
+        listOfNotNull(deckA, deckB).forEach { deck ->
+            if (deck !== exceptDeck) {
+                runCatching {
+                    deck.removeListener(activePlayerListener)
+                    deck.volume = 0f
+                    deck.playWhenReady = false
+                    deck.pause()
+                    deck.stop()
+                    deck.clearMediaItems()
+                    deck.volume = 1f
+                }
+            }
+        }
+    }
+
+    private fun prepareCleanSingleDeckStartSync() {
+        crossfadeGeneration++
+        isTransitioningSwap = false
+        autoCrossfadeTriggeredTrackId = null
+        crossfadeJob?.cancel()
+        crossfadeJob = null
+        silenceStandbyDecksSync(exceptDeck = activePlayer)
+        activePlayer?.let { active ->
+            active.volume = if (isDuckedByFocus && currentFocusMode == AudioFocusMode.DUCK) 0.25f else 1f
+        }
+        refreshWakeLocks()
+    }
+
+    @OptIn(UnstableApi::class)
     private fun startDualDeckCrossfade(
         mediaItems: List<MediaItem>,
         targetIndex: Int,
@@ -337,30 +744,32 @@ class SoundLapaPlaybackService : MediaSessionService() {
         val outgoing = activePlayer
         val incoming = standbyPlayer ?: ensureStandbyPlayer()
         val attrs = sharedAudioAttributes
-        if (outgoing == null || attrs == null || targetIndex !in mediaItems.indices) {
+        val expectedIncomingId = mediaItems.getOrNull(targetIndex)?.mediaId
+        val outgoingId = outgoing?.currentMediaItem?.mediaId
+        if (outgoing == null ||
+            attrs == null ||
+            targetIndex !in mediaItems.indices ||
+            outgoing === incoming ||
+            (outgoingId != null && outgoingId == expectedIncomingId)
+        ) {
             fallbackApplyOnActive()
             return
         }
 
-        isReplacingCrossfade = true
-        crossfadeJob?.cancel()
-        isReplacingCrossfade = false
         val myGeneration = ++crossfadeGeneration
-
-        runCatching {
-            incoming.stop()
-            incoming.clearMediaItems()
-        }
+        crossfadeJob?.cancel()
+        isTransitioningSwap = false
+        silenceStandbyDecksSync(exceptDeck = outgoing)
 
         val safeFadeMs = fadeDurationMs.coerceIn(500L, 10_000L)
         val startOutVol = outgoing.volume.coerceIn(0.05f, 1f)
         val safeStart = startPositionMs.coerceAtLeast(0L)
-        val expectedIncomingId = mediaItems[targetIndex].mediaId
 
         crossfadeJob = serviceScope.launch {
             var swapped = false
+            refreshWakeLocks()
             try {
-                // 1. Prepare incoming track silently on standby deck while outgoing continues untouched
+                // 1. Prepare incoming track silently on standby deck while outgoing finishes cleanly
                 incoming.volume = 0f
                 incoming.playWhenReady = false
                 incoming.repeatMode = repeatMode
@@ -371,6 +780,7 @@ class SoundLapaPlaybackService : MediaSessionService() {
                 var waitedReadyMs = 0L
                 val maxPrepareWaitMs = 9_000L
                 while (isActive &&
+                    myGeneration == crossfadeGeneration &&
                     incoming.playerError == null &&
                     incoming.playbackState != Player.STATE_READY &&
                     incoming.playbackState != Player.STATE_ENDED &&
@@ -387,15 +797,10 @@ class SoundLapaPlaybackService : MediaSessionService() {
                     waitedReadyMs += 16L
                 }
 
-                if (!isActive) return@launch
+                if (!isActive || myGeneration != crossfadeGeneration) return@launch
 
                 if (incoming.playbackState != Player.STATE_READY) {
-                    // Fallback: incoming could not buffer before deadline; let active deck handle directly
-                    runCatching {
-                        incoming.stop()
-                        incoming.clearMediaItems()
-                        incoming.volume = 1f
-                    }
+                    silenceStandbyDecksSync(exceptDeck = outgoing)
                     outgoing.volume = 1f
                     fallbackApplyOnActive()
                     return@launch
@@ -405,6 +810,7 @@ class SoundLapaPlaybackService : MediaSessionService() {
                 if (maxLeadWaitMs > 0L) {
                     var leadElapsed = 0L
                     while (isActive &&
+                        myGeneration == crossfadeGeneration &&
                         outgoing.isPlaying &&
                         outgoing.playbackState == Player.STATE_READY &&
                         leadElapsed < maxLeadWaitMs
@@ -418,29 +824,30 @@ class SoundLapaPlaybackService : MediaSessionService() {
                     }
                 }
 
-                if (!isActive || !outgoing.isPlaying || outgoing.playbackState == Player.STATE_ENDED) {
-                    runCatching {
-                        incoming.stop()
-                        incoming.clearMediaItems()
-                        incoming.volume = 1f
-                    }
+                if (!isActive ||
+                    myGeneration != crossfadeGeneration ||
+                    !outgoing.isPlaying ||
+                    outgoing.playbackState == Player.STATE_ENDED
+                ) {
+                    silenceStandbyDecksSync(exceptDeck = outgoing)
                     outgoing.volume = 1f
                     fallbackApplyOnActive()
                     return@launch
                 }
 
-                // 3. Start incoming track at zero volume and prime audio decoder before session swap
+                // 3. Start incoming track at zero volume before deck bridge swap
                 incoming.volume = 0f
                 incoming.playWhenReady = true
                 incoming.play()
 
                 var primeWaitMs = 0L
-                while (isActive && !incoming.isPlaying && primeWaitMs < 140L) {
+                while (isActive && myGeneration == crossfadeGeneration && !incoming.isPlaying && primeWaitMs < 120L) {
                     delay(16L)
                     primeWaitMs += 16L
                 }
+                if (!isActive || myGeneration != crossfadeGeneration) return@launch
 
-                // 4. Swap active deck cleanly on MediaSession without interrupting outgoing playback
+                // 4. Switch active deck on MediaSession once incoming deck is already READY and playing
                 isTransitioningSwap = true
                 outgoing.removeListener(activePlayerListener)
                 outgoing.setAudioAttributes(attrs, /* handleAudioFocus = */ false)
@@ -452,6 +859,7 @@ class SoundLapaPlaybackService : MediaSessionService() {
                 swapped = true
                 isTransitioningSwap = false
 
+                onActiveDeckSwapped?.invoke(incoming.currentMediaItem?.mediaId ?: expectedIncomingId)
                 onDeckActivated(expectedIncomingId, true)
 
                 val outgoingTotalDur = outgoing.duration
@@ -462,10 +870,10 @@ class SoundLapaPlaybackService : MediaSessionService() {
                     safeFadeMs
                 }
 
-                // 5. Equal-power cubic smoothstep crossfade (no volume dip, no abrupt jump)
+                // 5. Equal-power cubic smoothstep crossfade
                 var fadeElapsedMs = 0L
                 var lastTickMs = SystemClock.elapsedRealtime()
-                while (isActive) {
+                while (isActive && myGeneration == crossfadeGeneration) {
                     val now = SystemClock.elapsedRealtime()
                     val dt = (now - lastTickMs).coerceIn(0L, 48L)
                     lastTickMs = now
@@ -490,41 +898,44 @@ class SoundLapaPlaybackService : MediaSessionService() {
                     if (t >= 1f) break
                     delay(16L)
                 }
-                incoming.volume = 1f
-            } finally {
+
                 if (myGeneration == crossfadeGeneration) {
-                    isTransitioningSwap = false
-                    if (!isReplacingCrossfade) {
-                        activePlayer?.volume = 1f
+                    incoming.volume = if (isDuckedByFocus && currentFocusMode == AudioFocusMode.DUCK) 0.25f else 1f
+                    silenceStandbyDecksSync(exceptDeck = activePlayer)
+                }
+            } finally {
+                isTransitioningSwap = false
+                if (myGeneration == crossfadeGeneration) {
+                    activePlayer?.volume = if (isDuckedByFocus && currentFocusMode == AudioFocusMode.DUCK) 0.25f else 1f
+                    val nonActive = if (swapped) outgoing else incoming
+                    if (nonActive !== activePlayer) {
+                        silenceStandbyDecksSync(exceptDeck = activePlayer)
                     }
-                    val deckToReset = if (swapped) outgoing else incoming
-                    if (deckToReset !== activePlayer) {
-                        runCatching {
-                            deckToReset.stop()
-                            deckToReset.clearMediaItems()
-                            deckToReset.volume = 1f
-                        }
+                } else if (!swapped && incoming !== activePlayer) {
+                    runCatching {
+                        incoming.volume = 0f
+                        incoming.playWhenReady = false
+                        incoming.pause()
+                        incoming.stop()
+                        incoming.clearMediaItems()
+                        incoming.volume = 1f
                     }
                 }
+                refreshWakeLocks()
             }
         }
     }
 
     private fun cancelCrossfade(restorePrimaryVolume: Boolean) {
-        isReplacingCrossfade = false
+        crossfadeGeneration++
         isTransitioningSwap = false
         crossfadeJob?.cancel()
         crossfadeJob = null
-        standbyPlayer?.let { standby ->
-            runCatching {
-                standby.stop()
-                standby.clearMediaItems()
-                standby.volume = 1f
-            }
-        }
+        silenceStandbyDecksSync(exceptDeck = activePlayer)
         if (restorePrimaryVolume) {
             activePlayer?.volume = if (isDuckedByFocus && currentFocusMode == AudioFocusMode.DUCK) 0.25f else 1f
         }
+        refreshWakeLocks()
     }
 
     private fun ensureAppAudioFocusRequested() {
@@ -626,7 +1037,12 @@ class SoundLapaPlaybackService : MediaSessionService() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         val player = mediaSession?.player
-        if (player == null || !player.playWhenReady || player.mediaItemCount == 0) {
+        // Keep the player notification alive in the shade even while paused; only tear down on
+        // explicit stop (STATE_IDLE / empty queue) or when the user swipes the paused notification.
+        val hasActiveMedia = player != null &&
+            player.mediaItemCount > 0 &&
+            player.playbackState != Player.STATE_IDLE
+        if (!hasActiveMedia) {
             stopSelf()
         }
     }
@@ -637,6 +1053,12 @@ class SoundLapaPlaybackService : MediaSessionService() {
         }
         abandonAppAudioFocus()
         cancelCrossfade(restorePrimaryVolume = true)
+        supervisorJob?.cancel()
+        supervisorJob = null
+        serviceRecoveryJob?.cancel()
+        serviceRecoveryJob = null
+        activeNetworkResolutions.set(0)
+        refreshWakeLocks()
         serviceScope.cancel()
         deckA?.removeListener(activePlayerListener)
         deckB?.removeListener(activePlayerListener)
@@ -656,8 +1078,15 @@ class SoundLapaPlaybackService : MediaSessionService() {
         @Volatile
         private var activeInstance: SoundLapaPlaybackService? = null
 
+        @Volatile
+        var onActiveDeckSwapped: ((String?) -> Unit)? = null
+
         private val _audioFocusStatus = MutableStateFlow(AudioFocusUiStatus.IDLE)
         val audioFocusStatus: StateFlow<AudioFocusUiStatus> = _audioFocusStatus.asStateFlow()
+
+        fun prepareCleanSingleDeckStart() {
+            activeInstance?.prepareCleanSingleDeckStartSync()
+        }
 
         fun performDualDeckCrossfade(
             mediaItems: List<MediaItem>,
@@ -704,6 +1133,7 @@ private class SoundLapaMediaSourceFactory(
     private val dao: SoundLapaDao,
     private val resolveScope: CoroutineScope,
     private val extractorsFactory: DefaultExtractorsFactory,
+    private val onResolutionStateChanged: (Int) -> Unit,
 ) : MediaSource.Factory {
 
     private var drmProvider: DrmSessionManagerProvider? = null
@@ -755,6 +1185,7 @@ private class SoundLapaMediaSourceFactory(
             extractorsFactory = extractorsFactory,
             drmProvider = drmProvider,
             loadErrorPolicy = loadErrorPolicy,
+            onResolutionStateChanged = onResolutionStateChanged,
         )
     }
 }
@@ -768,6 +1199,7 @@ private class ResolvingCompositeMediaSource(
     private val extractorsFactory: DefaultExtractorsFactory,
     private val drmProvider: DrmSessionManagerProvider?,
     private val loadErrorPolicy: LoadErrorHandlingPolicy?,
+    private val onResolutionStateChanged: (Int) -> Unit,
 ) : CompositeMediaSource<Int>() {
 
     @Volatile
@@ -798,18 +1230,31 @@ private class ResolvingCompositeMediaSource(
         val expectedDurationMs = initialMediaItem.mediaMetadata.extras?.getLong("duration_ms", 0L) ?: 0L
 
         resolveJob?.cancel()
+        val fastCached = FullStreamResolver.peekCachedOrDirectStreamSync(rawUri)
+        if (fastCached != null) {
+            val childSource = buildChildMediaSource(fastCached)
+            childMediaSource = childSource
+            prepareChildSource(0, childSource)
+            return
+        }
+
         resolveJob = resolveScope.launch(Dispatchers.IO) {
-            val resolved = runCatching {
-                FullStreamResolver.resolveAudioStreamForUri(
-                    rawUri = rawUri,
-                    fallbackTitle = title,
-                    fallbackArtist = artist,
-                    trackId = trackId,
-                    originalSourceUri = originalSourceUri,
-                    dao = dao,
-                    expectedDurationMs = expectedDurationMs,
-                )
-            }.getOrNull()
+            onResolutionStateChanged(+1)
+            val resolved = try {
+                runCatching {
+                    FullStreamResolver.resolveAudioStreamForUri(
+                        rawUri = rawUri,
+                        fallbackTitle = title,
+                        fallbackArtist = artist,
+                        trackId = trackId,
+                        originalSourceUri = originalSourceUri,
+                        dao = dao,
+                        expectedDurationMs = expectedDurationMs,
+                    )
+                }.getOrNull()
+            } finally {
+                onResolutionStateChanged(-1)
+            }
 
             if (!isActive || released || !playbackLooper.thread.isAlive) {
                 return@launch

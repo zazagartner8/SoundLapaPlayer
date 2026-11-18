@@ -1240,9 +1240,41 @@ object FullStreamResolver {
         return resolved
     }
 
+    fun peekCachedOrDirectStreamSync(rawUri: String): ResolvedAudioStream? {
+        if (rawUri.isBlank()) return null
+        if (rawUri.startsWith("file://") || rawUri.startsWith("/")) {
+            val localFile = runCatching {
+                if (rawUri.startsWith("file://")) File(Uri.parse(rawUri).path.orEmpty()) else File(rawUri)
+            }.getOrNull()
+            if (localFile != null && isLikelyPlayableLocalFile(localFile)) {
+                val ext = localFile.extension.lowercase().ifBlank { "mp3" }
+                return ResolvedAudioStream(
+                    directUrl = rawUri,
+                    canonicalPageUrl = rawUri,
+                    durationMs = 0L,
+                    extension = ext,
+                    isHls = false,
+                    headers = emptyMap(),
+                )
+            }
+            return null
+        }
+        if (rawUri.startsWith("content://") || rawUri.startsWith("android.resource://")) {
+            return ResolvedAudioStream(
+                directUrl = rawUri,
+                canonicalPageUrl = rawUri,
+                durationMs = 0L,
+                extension = "mp3",
+                isHls = false,
+                headers = emptyMap(),
+            )
+        }
+        return getFreshCachedStream(rawUri)
+    }
+
     fun prefetchTracks(tracks: List<TrackEntity>, dao: SoundLapaDao? = null) {
         if (isDataSaverEnabled || isBatterySaverEnabled || tracks.isEmpty()) return
-        tracks.take(2).forEach { track ->
+        tracks.take(3).forEach { track ->
             val uri = if (isShortPreviewTrack(track)) {
                 buildLegacyUpgradeUri(track)
             } else {

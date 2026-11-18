@@ -58,6 +58,7 @@ import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
@@ -307,17 +308,24 @@ fun AvatarCropDialog(
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     OutlinedButton(
                         onClick = onDismiss,
                         shape = RoundedCornerShape(16.dp),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp),
                         modifier = Modifier
-                            .weight(1f)
+                            .weight(0.82f)
                             .height(48.dp)
                             .testTag("avatar_crop_cancel_button"),
                     ) {
-                        Text(strings.cancel, maxLines = 1)
+                        Text(
+                            text = strings.cancel,
+                            style = MaterialTheme.typography.labelLarge,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                     }
                     Button(
                         onClick = {
@@ -341,18 +349,25 @@ fun AvatarCropDialog(
                         enabled = bmp != null && !isLoading,
                         shape = RoundedCornerShape(16.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = accent),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp),
                         modifier = Modifier
-                            .weight(1.3f)
+                            .weight(1.75f)
                             .height(48.dp)
                             .testTag("avatar_crop_confirm_button"),
                     ) {
                         Icon(
                             imageVector = Icons.Rounded.Check,
                             contentDescription = null,
-                            modifier = Modifier.size(18.dp),
+                            modifier = Modifier.size(16.dp),
                         )
-                        Spacer(Modifier.width(6.dp))
-                        Text(strings.playerV33.cropAvatarApplyButton, maxLines = 1)
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            text = strings.playerV33.cropAvatarApplyButton,
+                            style = MaterialTheme.typography.labelMedium,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                     }
                 }
             }

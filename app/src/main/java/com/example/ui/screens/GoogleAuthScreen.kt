@@ -67,6 +67,7 @@ import androidx.compose.ui.unit.sp
 import androidx.credentials.CredentialManager
 import com.example.R
 import com.example.ui.auth.GoogleAuthManager
+import com.example.ui.auth.findActivity
 import com.example.ui.components.CountryFlagIcon
 import com.example.ui.components.GoogleGLogoIcon
 import com.example.ui.components.rememberSoundLapaHaptics
@@ -87,7 +88,8 @@ fun GoogleAuthScreen(
     val strings = LocalAppStrings.current
     val haptics = rememberSoundLapaHaptics()
     val scope = rememberCoroutineScope()
-    val credentialManager = remember(context) { CredentialManager.create(context) }
+    val activityContext = remember(context) { context.findActivity() ?: context }
+    val credentialManager = remember(activityContext) { CredentialManager.create(activityContext) }
 
     var isSigningIn by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }

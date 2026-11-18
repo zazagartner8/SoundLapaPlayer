@@ -58,7 +58,10 @@ import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.BlurredEdgeTreatment
@@ -77,6 +80,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import coil.compose.AsyncImage
 import coil.compose.SubcomposeAsyncImage
 import coil.request.ImageRequest
 import com.example.data.local.TrackEntity
@@ -86,6 +90,7 @@ import com.example.ui.components.TrackRowItem
 import com.example.ui.components.rememberSoundLapaHaptics
 import com.example.ui.i18n.LocalAppStrings
 import com.example.ui.shaders.LocalBatterySaverEnabled
+import com.example.ui.shaders.LocalIsMainUiVisible
 import com.example.ui.shaders.rememberIsAppForeground
 import kotlin.math.PI
 import kotlin.math.cos
@@ -130,8 +135,18 @@ fun ArtistProfileScreen(
     val density = LocalDensity.current
     val collapseRangePx = remember(density) { with(density) { 260.dp.toPx() } }
     val itemZeroPx = remember(density) { with(density) { 80.dp.toPx() } }
-    val scrollOffsetPx by remember {
+    val showBanner by remember(collapseRangePx, itemZeroPx) {
         derivedStateOf {
+            val offset = when {
+                listState.firstVisibleItemIndex == 0 -> listState.firstVisibleItemScrollOffset.toFloat()
+                listState.firstVisibleItemIndex == 1 -> itemZeroPx + listState.firstVisibleItemScrollOffset.toFloat()
+                else -> collapseRangePx
+            }
+            (offset / collapseRangePx).coerceIn(0f, 1f) < 0.99f
+        }
+    }
+    val scrollOffsetProvider = remember(listState, collapseRangePx, itemZeroPx) {
+        {
             when {
                 listState.firstVisibleItemIndex == 0 -> listState.firstVisibleItemScrollOffset.toFloat()
                 listState.firstVisibleItemIndex == 1 -> itemZeroPx + listState.firstVisibleItemScrollOffset.toFloat()
@@ -139,9 +154,23 @@ fun ArtistProfileScreen(
             }
         }
     }
-    val bannerCollapseFraction by remember {
-        derivedStateOf { (scrollOffsetPx / collapseRangePx).coerceIn(0f, 1f) }
+    val collapseFractionProvider = remember(listState, collapseRangePx, itemZeroPx) {
+        {
+            val offset = when {
+                listState.firstVisibleItemIndex == 0 -> listState.firstVisibleItemScrollOffset.toFloat()
+                listState.firstVisibleItemIndex == 1 -> itemZeroPx + listState.firstVisibleItemScrollOffset.toFloat()
+                else -> collapseRangePx
+            }
+            (offset / collapseRangePx).coerceIn(0f, 1f)
+        }
     }
+    val currentOnPlayTrack by rememberUpdatedState(onPlayTrack)
+    val currentOnToggleLike by rememberUpdatedState(onToggleLike)
+    val currentOnOpenTrackOptions by rememberUpdatedState(onOpenTrackOptions)
+    val currentOnOpenAlbum by rememberUpdatedState(onOpenAlbum)
+    val currentOnPlayAlbum by rememberUpdatedState(onPlayAlbum)
+    val latestArtistTracks by rememberUpdatedState(state.tracks)
+    val latestAlbumTracks by rememberUpdatedState(state.selectedAlbumTracks)
 
     Box(
         modifier = modifier
@@ -155,14 +184,15 @@ fun ArtistProfileScreen(
             .testTag("artist_profile_screen"),
         contentAlignment = Alignment.TopCenter,
     ) {
-        if (bannerCollapseFraction < 0.99f) {
+        if (showBanner) {
             ArtistShimmeringBanner(
                 avatarUrl = state.avatarUrl,
                 heroAccent = heroAccent,
                 heroSecondary = heroSecondary,
                 backgroundColor = backgroundColor,
-                collapseFraction = bannerCollapseFraction,
-                scrollOffsetPx = scrollOffsetPx,
+                collapseFractionProvider = collapseFractionProvider,
+                scrollOffsetProvider = scrollOffsetProvider,
+                isFastScrollingProvider = { listState.isScrollInProgress },
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(340.dp)
@@ -422,14 +452,18 @@ fun ArtistProfileScreen(
                                 key = { it.id },
                                 contentType = { "artist_album" },
                             ) { album ->
+                                val latestAlbum by rememberUpdatedState(album)
+                                val onAlbumClick = remember(album.id) {
+                                    {
+                                        haptics.tick()
+                                        currentOnOpenAlbum(latestAlbum)
+                                    }
+                                }
                                 ArtistAlbumCard(
                                     album = album,
                                     accent = heroAccent,
                                     secondary = heroSecondary,
-                                    onClick = {
-                                        haptics.tick()
-                                        onOpenAlbum(album)
-                                    },
+                                    onClick = onAlbumClick,
                                 )
                             }
                         }
@@ -437,7 +471,7 @@ fun ArtistProfileScreen(
                 }
             }
 
-            item(key = "artist_tracks_header") {
+            item(key = "artist_tracks_header", contentType = "section_header") {
                 Text(
                     text = strings.artistTracksTitle,
                     style = MaterialTheme.typography.titleLarge,
@@ -447,7 +481,7 @@ fun ArtistProfileScreen(
             }
 
             if (state.tracks.isEmpty() && !state.isLoading) {
-                item(key = "artist_empty_tracks") {
+                item(key = "artist_empty_tracks", contentType = "empty_notice") {
                     Surface(
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(22.dp),
@@ -469,22 +503,32 @@ fun ArtistProfileScreen(
                     contentType = { "artist_track" },
                 ) { track ->
                     val isCurrent = currentTrackId == track.id
+                    val latestTrack by rememberUpdatedState(track)
+                    val onPlayClick = remember(track.id) {
+                        {
+                            haptics.tap()
+                            currentOnPlayTrack(latestTrack, latestArtistTracks)
+                        }
+                    }
+                    val onLikeClick = remember(track.id) {
+                        {
+                            haptics.confirm()
+                            currentOnToggleLike(latestTrack)
+                        }
+                    }
+                    val onMoreClick = remember(track.id) {
+                        {
+                            haptics.tick()
+                            currentOnOpenTrackOptions(latestTrack)
+                        }
+                    }
                     TrackRowItem(
                         track = track,
                         isCurrentTrack = isCurrent,
                         isPlaying = isCurrent && isPlaying,
-                        onPlayClick = {
-                            haptics.tap()
-                            onPlayTrack(track, state.tracks)
-                        },
-                        onLikeClick = {
-                            haptics.confirm()
-                            onToggleLike(track)
-                        },
-                        onMoreClick = {
-                            haptics.tick()
-                            onOpenTrackOptions(track)
-                        },
+                        onPlayClick = onPlayClick,
+                        onLikeClick = onLikeClick,
+                        onMoreClick = onMoreClick,
                     )
                 }
             }
@@ -597,22 +641,32 @@ fun ArtistProfileScreen(
                                 contentType = { "artist_album_track" },
                             ) { track ->
                                 val isCurrent = currentTrackId == track.id
+                                val latestTrack by rememberUpdatedState(track)
+                                val onPlayClick = remember(track.id) {
+                                    {
+                                        haptics.tap()
+                                        currentOnPlayAlbum(latestAlbumTracks, latestTrack)
+                                    }
+                                }
+                                val onLikeClick = remember(track.id) {
+                                    {
+                                        haptics.confirm()
+                                        currentOnToggleLike(latestTrack)
+                                    }
+                                }
+                                val onMoreClick = remember(track.id) {
+                                    {
+                                        haptics.tick()
+                                        currentOnOpenTrackOptions(latestTrack)
+                                    }
+                                }
                                 TrackRowItem(
                                     track = track,
                                     isCurrentTrack = isCurrent,
                                     isPlaying = isCurrent && isPlaying,
-                                    onPlayClick = {
-                                        haptics.tap()
-                                        onPlayAlbum(state.selectedAlbumTracks, track)
-                                    },
-                                    onLikeClick = {
-                                        haptics.confirm()
-                                        onToggleLike(track)
-                                    },
-                                    onMoreClick = {
-                                        haptics.tick()
-                                        onOpenTrackOptions(track)
-                                    },
+                                    onPlayClick = onPlayClick,
+                                    onLikeClick = onLikeClick,
+                                    onMoreClick = onMoreClick,
                                 )
                             }
                         }
@@ -631,14 +685,20 @@ private fun ArtistShimmeringBanner(
     heroAccent: Color,
     heroSecondary: Color,
     backgroundColor: Color,
-    collapseFraction: Float,
-    scrollOffsetPx: Float,
+    collapseFractionProvider: () -> Float,
+    scrollOffsetProvider: () -> Float,
+    isFastScrollingProvider: () -> Boolean,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
     val isForeground = rememberIsAppForeground()
+    val isUiVisible = LocalIsMainUiVisible.current
     val batterySaver = LocalBatterySaverEnabled.current
-    val phase = if (!batterySaver && isForeground && collapseFraction < 0.99f) {
+    val isFastScrolling by remember(isFastScrollingProvider) {
+        derivedStateOf { isFastScrollingProvider() }
+    }
+    var lastPhase by remember { mutableFloatStateOf(0f) }
+    val phase = if (!batterySaver && isForeground && isUiVisible && !isFastScrolling) {
         val infiniteTransition = rememberInfiniteTransition(label = "artistBannerShimmer")
         val animatedPhase by infiniteTransition.animateFloat(
             initialValue = 0f,
@@ -649,12 +709,12 @@ private fun ArtistShimmeringBanner(
             ),
             label = "artistBannerPhase",
         )
+        lastPhase = animatedPhase
         animatedPhase
     } else {
-        0f
+        lastPhase
     }
 
-    val visibleAlpha = (1f - collapseFraction).coerceIn(0f, 1f)
     val bottomFadeScrim = remember(backgroundColor) {
         Brush.verticalGradient(
             colors = listOf(
@@ -668,9 +728,10 @@ private fun ArtistShimmeringBanner(
     Box(
         modifier = modifier
             .graphicsLayer {
-                alpha = visibleAlpha
-                translationY = -scrollOffsetPx * 0.42f
-                scaleY = 1f - collapseFraction * 0.10f
+                val cf = collapseFractionProvider()
+                alpha = (1f - cf).coerceIn(0f, 1f)
+                translationY = -scrollOffsetProvider() * 0.42f
+                scaleY = 1f - cf * 0.10f
             }
             .clip(RoundedCornerShape(0.dp))
             .testTag("artist_shimmering_banner"),
@@ -698,12 +759,12 @@ private fun ArtistShimmeringBanner(
                         )
                     },
             ) {
-                SubcomposeAsyncImage(
+                AsyncImage(
                     model = ImageRequest.Builder(context)
                         .data(avatarUrl)
                         .allowHardware(true)
-                        .crossfade(true)
-                        .size(320)
+                        .crossfade(false)
+                        .size(140)
                         .build(),
                     contentDescription = null,
                     contentScale = ContentScale.Crop,

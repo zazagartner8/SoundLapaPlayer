@@ -256,33 +256,15 @@ class CloudLibraryRepositoryRuleTest : FirestoreEmulatorTestBase() {
             ).getOrThrow()
         }
 
-        val wrongPassRes = withTimeout(DEFAULT_TIMEOUT_MS) {
-            repo.fetchDeveloperBugReports("wrongpass")
+        val nonDevFetchRes = withTimeout(DEFAULT_TIMEOUT_MS) {
+            repo.fetchDeveloperBugReports()
         }
-        assertTrue(wrongPassRes.isFailure)
+        assertTrue(nonDevFetchRes.isFailure)
 
-        val reports = withTimeout(DEFAULT_TIMEOUT_MS) {
-            repo.fetchDeveloperBugReports(DEVELOPER_REPORTS_PASSWORD).getOrThrow()
+        val nonDevDeleteRes = withTimeout(DEFAULT_TIMEOUT_MS) {
+            repo.deleteDeveloperBugReport(reportId)
         }
-        val matched = reports.find { it.reportId == reportId }
-        assertNotNull(matched)
-        assertEquals("Alice DJ", matched?.reporterName)
-        assertEquals("Crossfade glitch at 0:03", matched?.message)
-
-        val wrongDeleteRes = withTimeout(DEFAULT_TIMEOUT_MS) {
-            repo.deleteDeveloperBugReport(matched!!.docId.ifBlank { reportId }, "wrongpass")
-        }
-        assertTrue(wrongDeleteRes.isFailure)
-
-        val deleteRes = withTimeout(DEFAULT_TIMEOUT_MS) {
-            repo.deleteDeveloperBugReport(matched!!.docId.ifBlank { reportId }, DEVELOPER_REPORTS_PASSWORD)
-        }
-        assertTrue(deleteRes.isSuccess)
-
-        val afterDelete = withTimeout(DEFAULT_TIMEOUT_MS) {
-            repo.fetchDeveloperBugReports(DEVELOPER_REPORTS_PASSWORD).getOrThrow()
-        }
-        assertTrue(afterDelete.none { it.reportId == reportId })
+        assertTrue(nonDevDeleteRes.isFailure)
     }
 
     @Test
@@ -353,20 +335,51 @@ class CloudLibraryRepositoryRuleTest : FirestoreEmulatorTestBase() {
         }
 
         val denied = withTimeout(DEFAULT_TIMEOUT_MS) {
-            repo.fetchDeveloperCloudStorageStats("wrong_password")
+            repo.fetchDeveloperCloudStorageStats()
         }
         assertTrue(denied.isFailure)
-
-        val stats = withTimeout(DEFAULT_TIMEOUT_MS) {
-            repo.fetchDeveloperCloudStorageStats(DEVELOPER_REPORTS_PASSWORD).getOrThrow()
-        }
-        assertTrue(stats.isCloudLive)
-        assertTrue(stats.activeUsersCount >= 1)
-        assertTrue(stats.usedBytes >= 4_250_000L)
-        assertTrue(stats.totalTracks >= 12)
-        assertTrue(stats.totalPlaylists >= 3)
-        assertEquals(DEFAULT_CLOUD_QUOTA_BYTES, stats.quotaBytes)
         assertTrue(uid.isNotBlank())
+    }
+
+    @Test
+    fun presenceNowPlayingWritesOwnProfileWhileUserInspectorRejectsNonDeveloper() = runBlocking {
+        val uid = signInTestUser(ALICE_EMAIL)
+        val repo = CloudLibraryRepository(firestore, auth)
+
+        withTimeout(DEFAULT_TIMEOUT_MS) {
+            repo.upsertUserProfile(
+                displayName = "Alice Presence",
+                email = ALICE_EMAIL,
+                photoUrl = null,
+            ).getOrThrow()
+
+            repo.updateUserPresenceAndNowPlaying(
+                isOnline = true,
+                trackId = "track_live_1",
+                trackTitle = "Neon Skyline",
+                trackArtist = "Synthwave Duo",
+                trackCoverUrl = "https://example.com/cover.jpg",
+                isPlaying = true,
+            ).getOrThrow()
+        }
+
+        val reloaded = withTimeout(DEFAULT_TIMEOUT_MS) { repo.getUserProfile().getOrThrow() }
+        assertNotNull(reloaded)
+        assertTrue(reloaded?.isOnline == true)
+        assertEquals("track_live_1", reloaded?.currentTrackId)
+        assertEquals("Neon Skyline", reloaded?.currentTrackTitle)
+        assertEquals("Synthwave Duo", reloaded?.currentTrackArtist)
+        assertTrue(reloaded?.currentTrackIsPlaying == true)
+
+        val nonDevUsersRes = withTimeout(DEFAULT_TIMEOUT_MS) {
+            repo.fetchDeveloperAllUsersOverview()
+        }
+        assertTrue(nonDevUsersRes.isFailure)
+
+        val nonDevDetailRes = withTimeout(DEFAULT_TIMEOUT_MS) {
+            repo.fetchDeveloperUserDetails(uid)
+        }
+        assertTrue(nonDevDetailRes.isFailure)
     }
 
     @Test
@@ -439,6 +452,35 @@ class CloudLibraryRepositoryRuleTest : FirestoreEmulatorTestBase() {
             val fsError = e.unwrapFirestoreException()
             assertEquals(FirebaseFirestoreException.Code.PERMISSION_DENIED, fsError?.code)
         }
+    }
+
+    @Test
+    fun nonDeveloperCannotBanUnbanOrDeleteUsersFromServer() = runBlocking {
+        val aliceUid = signInTestUser(ALICE_EMAIL)
+        val aliceRepo = CloudLibraryRepository(firestore, auth)
+
+        val banStatus = withTimeout(FLOW_TIMEOUT_MS) {
+            aliceRepo.observeOwnBanStatus(aliceUid).first()
+        }
+        assertEquals(null, banStatus)
+
+        val bobUid = signInTestUser(BOB_EMAIL)
+        signInTestUser(ALICE_EMAIL)
+
+        val banRes = withTimeout(DEFAULT_TIMEOUT_MS) {
+            aliceRepo.banUser(bobUid, "Spam")
+        }
+        assertTrue(banRes.isFailure)
+
+        val unbanRes = withTimeout(DEFAULT_TIMEOUT_MS) {
+            aliceRepo.unbanUser(bobUid)
+        }
+        assertTrue(unbanRes.isFailure)
+
+        val deleteRes = withTimeout(DEFAULT_TIMEOUT_MS) {
+            aliceRepo.deleteDeveloperUserFromServer(bobUid)
+        }
+        assertTrue(deleteRes.isFailure)
     }
 
     private companion object {

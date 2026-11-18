@@ -28,8 +28,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
@@ -38,27 +36,28 @@ import androidx.compose.material.icons.rounded.BugReport
 import androidx.compose.material.icons.rounded.CloudQueue
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Fingerprint
+import androidx.compose.material.icons.rounded.Group
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Refresh
-import androidx.compose.material.icons.rounded.Visibility
-import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -67,22 +66,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.example.data.remote.formatCloudExactSize
 import com.example.data.remote.formatCloudStorageHeadline
 import com.example.ui.BugReportItemUi
 import com.example.ui.MainUiState
 import com.example.ui.auth.BiometricAvailability
 import com.example.ui.auth.checkBiometricAvailability
-import com.example.ui.auth.hasProvisionedDeveloperBiometricKey
 import com.example.ui.auth.isAllowedDeveloperEmail
 import com.example.ui.auth.launchDeveloperBiometricPrompt
 import com.example.ui.components.AccountAvatarImage
@@ -95,15 +89,21 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun DeveloperScreen(
     state: MainUiState,
     onClose: () -> Unit,
-    onUnlockWithPassword: (String) -> Unit,
     onUnlockWithBiometrics: () -> Unit,
     onLock: () -> Unit,
     onRefreshDashboard: () -> Unit,
+    onRefreshUsers: () -> Unit,
+    onSelectUser: (String) -> Unit,
+    onCloseUserDetails: () -> Unit,
+    onBanUser: (targetUid: String, reason: String?) -> Unit = { _, _ -> },
+    onUnbanUser: (targetUid: String) -> Unit = {},
+    onDeleteUserFromServer: (targetUid: String) -> Unit = {},
+    onClearUserActionMessage: () -> Unit = {},
     onDeleteReport: (BugReportItemUi) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -111,14 +111,12 @@ fun DeveloperScreen(
 
     val strings = LocalAppStrings.current
     val context = LocalContext.current
-    val focusManager = LocalFocusManager.current
     val haptics = rememberSoundLapaHaptics()
     val accent = MaterialTheme.colorScheme.primary
 
-    var passwordInput by remember { mutableStateOf("") }
-    var showPassword by remember { mutableStateOf(false) }
     var biometricStatusMessage by remember { mutableStateOf<String?>(null) }
     var pendingDeleteReport by remember { mutableStateOf<BugReportItemUi?>(null) }
+    var activeTab by remember { mutableIntStateOf(0) }
 
     val biometricAvailability = remember(context) {
         checkBiometricAvailability(context)
@@ -259,15 +257,12 @@ fun DeveloperScreen(
                                         biometricStatusMessage = null
                                         val signedInEmail = state.cloudSync.email
                                         val signedInUid = state.cloudSync.userId
-                                        val activatedDevUid = state.settings.devUnlockedUid
+                                        val isDevAccount = !state.cloudSync.isGuest &&
+                                            !signedInUid.isNullOrBlank() &&
+                                            (state.cloudSync.isVerifiedDeveloper || isAllowedDeveloperEmail(signedInEmail))
                                         when {
-                                            !isAllowedDeveloperEmail(signedInEmail) -> {
+                                            !isDevAccount -> {
                                                 biometricStatusMessage = strings.settingsV33.biometricOwnerOnlyHint
-                                            }
-                                            signedInUid.isNullOrBlank() ||
-                                                activatedDevUid != signedInUid ||
-                                                !hasProvisionedDeveloperBiometricKey(signedInUid) -> {
-                                                biometricStatusMessage = strings.settingsV33.biometricNeedPasswordFirstHint
                                             }
                                             biometricAvailability != BiometricAvailability.AVAILABLE -> {
                                                 biometricStatusMessage = strings.settingsDeveloperBiometricUnavailable
@@ -277,10 +272,9 @@ fun DeveloperScreen(
                                                     context = context,
                                                     signedInUid = signedInUid,
                                                     signedInEmail = signedInEmail,
-                                                    activatedDevUid = activatedDevUid,
                                                     title = strings.settingsDeveloperBiometricPromptTitle,
                                                     subtitle = strings.settingsDeveloperBiometricPromptSubtitle,
-                                                    negativeButtonText = strings.settingsDeveloperBiometricFallbackPassword,
+                                                    negativeButtonText = strings.cancel,
                                                     unavailableMessage = strings.settingsDeveloperBiometricUnavailable,
                                                     failedMessage = strings.settingsDeveloperBiometricFailed,
                                                     onAuthenticated = {
@@ -288,9 +282,7 @@ fun DeveloperScreen(
                                                         biometricStatusMessage = null
                                                         onUnlockWithBiometrics()
                                                     },
-                                                    onFallbackOrDismiss = {
-                                                        // Keep password card visible for immediate fallback
-                                                    },
+                                                    onDismissed = {},
                                                     onError = { msg ->
                                                         biometricStatusMessage = msg
                                                     },
@@ -300,7 +292,7 @@ fun DeveloperScreen(
                                     },
                                     shape = RoundedCornerShape(18.dp),
                                     colors = ButtonDefaults.buttonColors(
-                                        containerColor = accent.copy(alpha = 0.18f),
+                                        containerColor = accent.copy(alpha = 0.2f),
                                         contentColor = accent,
                                     ),
                                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
@@ -334,468 +326,100 @@ fun DeveloperScreen(
                                         modifier = Modifier.testTag("developer_biometric_status"),
                                     )
                                 }
-
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                ) {
-                                    HorizontalDivider(
-                                        modifier = Modifier.weight(1f),
-                                        color = MaterialTheme.colorScheme.outlineVariant,
-                                    )
-                                    Text(
-                                        text = strings.settingsDeveloperOrPasswordDivider,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
-                                    HorizontalDivider(
-                                        modifier = Modifier.weight(1f),
-                                        color = MaterialTheme.colorScheme.outlineVariant,
-                                    )
-                                }
-
-                                OutlinedTextField(
-                                    value = passwordInput,
-                                    onValueChange = { passwordInput = it },
-                                    label = { Text(strings.settingsDeveloperPasswordLabel) },
-                                    singleLine = true,
-                                    visualTransformation = if (showPassword) {
-                                        VisualTransformation.None
-                                    } else {
-                                        PasswordVisualTransformation()
-                                    },
-                                    trailingIcon = {
-                                        IconButton(onClick = { showPassword = !showPassword }) {
-                                            Icon(
-                                                imageVector = if (showPassword) {
-                                                    Icons.Rounded.VisibilityOff
-                                                } else {
-                                                    Icons.Rounded.Visibility
-                                                },
-                                                contentDescription = null,
-                                            )
-                                        }
-                                    },
-                                    keyboardOptions = KeyboardOptions(
-                                        keyboardType = KeyboardType.Password,
-                                        imeAction = ImeAction.Done,
-                                    ),
-                                    keyboardActions = KeyboardActions(
-                                        onDone = {
-                                            focusManager.clearFocus()
-                                            if (passwordInput.isNotBlank()) {
-                                                onUnlockWithPassword(passwordInput)
-                                            }
-                                        },
-                                    ),
-                                    shape = RoundedCornerShape(18.dp),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .testTag("settings_developer_password_input"),
-                                )
-
-                                if (state.developerMode.wrongPasswordError) {
-                                    Text(
-                                        text = strings.settingsDeveloperWrongPassword,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = LiquidRose,
-                                        modifier = Modifier.testTag("settings_developer_wrong_password"),
-                                    )
-                                }
-
-                                Button(
-                                    onClick = {
-                                        focusManager.clearFocus()
-                                        haptics.confirm()
-                                        onUnlockWithPassword(passwordInput)
-                                    },
-                                    enabled = passwordInput.isNotBlank(),
-                                    shape = CircleShape,
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = accent,
-                                        contentColor = MaterialTheme.colorScheme.onPrimary,
-                                    ),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .testTag("settings_developer_unlock_button"),
-                                ) {
-                                    Text(strings.settingsDeveloperUnlockButton)
-                                }
                             }
                         }
                     }
                 } else {
-                    val dateFormatter = remember {
-                        SimpleDateFormat("dd.MM.yyyy HH:mm", Locale.getDefault())
-                    }
-                    val storageStats = state.developerMode.cloudStorageStats
-                    val storageHeadline = remember(
-                        storageStats.usedBytes,
-                        storageStats.quotaBytes,
-                        strings.cloudStorageGbUnit,
+                    PrimaryTabRow(
+                        selectedTabIndex = activeTab,
+                        containerColor = MaterialTheme.colorScheme.background,
+                        contentColor = accent,
+                        modifier = Modifier.fillMaxWidth(),
                     ) {
-                        formatCloudStorageHeadline(
-                            usedBytes = storageStats.usedBytes,
-                            quotaBytes = storageStats.quotaBytes,
-                            gbUnit = strings.cloudStorageGbUnit,
+                        val tabItems = listOf(
+                            Triple(0, strings.devExtras.tabUsers, Icons.Rounded.Group) to "developer_tab_users",
+                            Triple(1, strings.devExtras.tabReports, Icons.Rounded.BugReport) to "developer_tab_reports",
+                            Triple(2, strings.devExtras.tabStorage, Icons.Rounded.CloudQueue) to "developer_tab_storage",
+                        )
+                        tabItems.forEach { (tabSpec, tag) ->
+                            val (idx, label, icon) = tabSpec
+                            val selected = activeTab == idx
+                            Tab(
+                                selected = selected,
+                                onClick = {
+                                    haptics.tick()
+                                    activeTab = idx
+                                },
+                                modifier = Modifier.testTag(tag),
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 10.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
+                                    Icon(
+                                        imageVector = icon,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(20.dp),
+                                    )
+                                    Text(
+                                        text = label,
+                                        fontSize = 12.sp,
+                                        lineHeight = 14.sp,
+                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    when (activeTab) {
+                        0 -> DeveloperUsersTabContent(
+                            users = state.developerMode.users,
+                            isLoadingUsers = state.developerMode.isLoadingUsers,
+                            usersErrorMessage = state.developerMode.usersErrorMessage,
+                            accent = accent,
+                            onRefreshUsers = onRefreshUsers,
+                            onSelectUser = onSelectUser,
+                        )
+
+                        1 -> DeveloperReportsTabContent(
+                            state = state,
+                            accent = accent,
+                            onRefreshDashboard = onRefreshDashboard,
+                            onRequestDeleteReport = { pendingDeleteReport = it },
+                        )
+
+                        else -> DeveloperStorageTabContent(
+                            state = state,
+                            accent = accent,
                         )
                     }
-
-                    LazyColumn(
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
-                        verticalArrangement = Arrangement.spacedBy(16.dp),
-                    ) {
-                        // 1. Cloud Storage Usage Card
-                        item(key = "cloud_storage_usage") {
-                            Surface(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .border(
-                                        width = 1.dp,
-                                        color = MaterialTheme.colorScheme.outlineVariant,
-                                        shape = RoundedCornerShape(26.dp),
-                                    )
-                                    .testTag("developer_cloud_storage_card"),
-                                shape = RoundedCornerShape(26.dp),
-                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
-                                contentColor = MaterialTheme.colorScheme.onSurface,
-                            ) {
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(18.dp),
-                                    verticalArrangement = Arrangement.spacedBy(14.dp),
-                                ) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                    ) {
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                            modifier = Modifier.weight(1f),
-                                        ) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .size(36.dp)
-                                                    .clip(RoundedCornerShape(14.dp))
-                                                    .background(accent.copy(alpha = 0.18f)),
-                                                contentAlignment = Alignment.Center,
-                                            ) {
-                                                Icon(
-                                                    imageVector = Icons.Rounded.CloudQueue,
-                                                    contentDescription = null,
-                                                    tint = accent,
-                                                    modifier = Modifier.size(20.dp),
-                                                )
-                                            }
-                                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                                Text(
-                                                    text = strings.settingsDeveloperStorageTitle,
-                                                    style = MaterialTheme.typography.titleMedium,
-                                                    fontWeight = FontWeight.Bold,
-                                                    maxLines = 2,
-                                                    overflow = TextOverflow.Ellipsis,
-                                                )
-                                                Text(
-                                                    text = strings.cloudStorageQuotaBadge,
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                )
-                                            }
-                                        }
-                                        if (state.developerMode.isLoadingStorageStats) {
-                                            CircularProgressIndicator(
-                                                modifier = Modifier.size(18.dp),
-                                                strokeWidth = 2.dp,
-                                                color = accent,
-                                            )
-                                        }
-                                    }
-
-                                    Text(
-                                        text = storageHeadline,
-                                        style = MaterialTheme.typography.headlineSmall,
-                                        fontWeight = FontWeight.Bold,
-                                        color = accent,
-                                        modifier = Modifier.testTag("developer_cloud_storage_headline"),
-                                    )
-
-                                    LinearProgressIndicator(
-                                        progress = { storageStats.usageFraction.coerceIn(0f, 1f) },
-                                        color = if (storageStats.usageFraction > 0.85f) LiquidRose else accent,
-                                        trackColor = MaterialTheme.colorScheme.background.copy(alpha = 0.7f),
-                                        strokeCap = StrokeCap.Round,
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .height(10.dp)
-                                            .clip(CircleShape)
-                                            .testTag("developer_cloud_storage_progress"),
-                                    )
-
-                                    FlowRow(
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                                    ) {
-                                        StorageStatChip(
-                                            label = strings.settingsDeveloperStorageUsedExact(
-                                                formatCloudExactSize(
-                                                    bytes = storageStats.usedBytes,
-                                                    gbUnit = strings.cloudStorageGbUnit,
-                                                    mbUnit = strings.cloudStorageMbUnit,
-                                                    kbUnit = strings.cloudStorageKbUnit,
-                                                    bUnit = strings.cloudStorageBUnit,
-                                                ),
-                                            ),
-                                            accent = LiquidMint,
-                                        )
-                                        StorageStatChip(
-                                            label = strings.settingsDeveloperStorageFreeLabel(
-                                                formatCloudExactSize(
-                                                    bytes = storageStats.freeBytes,
-                                                    gbUnit = strings.cloudStorageGbUnit,
-                                                    mbUnit = strings.cloudStorageMbUnit,
-                                                    kbUnit = strings.cloudStorageKbUnit,
-                                                    bUnit = strings.cloudStorageBUnit,
-                                                ),
-                                            ),
-                                            accent = LiquidCyan,
-                                        )
-                                        StorageStatChip(
-                                            label = strings.settingsDeveloperStorageAccountsLabel(
-                                                storageStats.activeUsersCount,
-                                            ),
-                                            accent = accent,
-                                        )
-                                        StorageStatChip(
-                                            label = strings.settingsDeveloperStorageTracksLabel(
-                                                storageStats.totalTracks,
-                                            ),
-                                            accent = accent,
-                                        )
-                                        StorageStatChip(
-                                            label = strings.settingsDeveloperStoragePlaylistsLabel(
-                                                storageStats.totalPlaylists,
-                                            ),
-                                            accent = accent,
-                                        )
-                                        StorageStatChip(
-                                            label = strings.settingsDeveloperStorageReportsLabel(
-                                                storageStats.totalBugReports,
-                                            ),
-                                            accent = LiquidRose,
-                                        )
-                                    }
-
-                                    if (!storageStats.isCloudLive) {
-                                        Text(
-                                            text = strings.settingsDeveloperStorageOfflineEstimateHint,
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        )
-                                    }
-                                }
-                            }
-                        }
-
-                        // 2. Reports Header & Actions
-                        item(key = "reports_header") {
-                            Surface(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .border(
-                                        width = 1.dp,
-                                        color = MaterialTheme.colorScheme.outlineVariant,
-                                        shape = RoundedCornerShape(26.dp),
-                                    ),
-                                shape = RoundedCornerShape(26.dp),
-                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
-                                contentColor = MaterialTheme.colorScheme.onSurface,
-                            ) {
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(18.dp),
-                                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                                ) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                    ) {
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                        ) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .size(36.dp)
-                                                    .clip(RoundedCornerShape(14.dp))
-                                                    .background(accent.copy(alpha = 0.18f)),
-                                                contentAlignment = Alignment.Center,
-                                            ) {
-                                                Icon(
-                                                    imageVector = Icons.Rounded.BugReport,
-                                                    contentDescription = null,
-                                                    tint = accent,
-                                                    modifier = Modifier.size(20.dp),
-                                                )
-                                            }
-                                            Text(
-                                                text = strings.settingsDeveloperReportsTitle,
-                                                style = MaterialTheme.typography.titleMedium,
-                                                fontWeight = FontWeight.Bold,
-                                            )
-                                        }
-                                        OutlinedButton(
-                                            onClick = {
-                                                haptics.tick()
-                                                onRefreshDashboard()
-                                            },
-                                            enabled = !state.developerMode.isLoadingReports &&
-                                                !state.developerMode.isLoadingStorageStats,
-                                            shape = CircleShape,
-                                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                                            modifier = Modifier.testTag("settings_developer_refresh_reports_button"),
-                                        ) {
-                                            if (state.developerMode.isLoadingReports) {
-                                                CircularProgressIndicator(
-                                                    modifier = Modifier.size(14.dp),
-                                                    strokeWidth = 2.dp,
-                                                    color = accent,
-                                                )
-                                            } else {
-                                                Icon(
-                                                    imageVector = Icons.Rounded.Refresh,
-                                                    contentDescription = null,
-                                                    modifier = Modifier.size(15.dp),
-                                                )
-                                            }
-                                            Spacer(Modifier.width(5.dp))
-                                            Text(strings.settingsDeveloperRefreshButton)
-                                        }
-                                    }
-
-                                    if (state.cloudSync.isGuest) {
-                                        Text(
-                                            text = strings.settingsDeveloperReportsCloudHint,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = LiquidCyan,
-                                        )
-                                    }
-
-                                    state.developerMode.errorMessage?.let { err ->
-                                        Text(
-                                            text = err,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = LiquidRose,
-                                        )
-                                    }
-
-                                    if (state.developerMode.reports.isEmpty() && !state.developerMode.isLoadingReports) {
-                                        Text(
-                                            text = strings.settingsDeveloperNoReports,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            modifier = Modifier.testTag("settings_developer_empty_reports"),
-                                        )
-                                    }
-                                }
-                            }
-                        }
-
-                        items(
-                            items = state.developerMode.reports,
-                            key = { it.reportId },
-                        ) { report ->
-                            val isDeleting = report.reportId in state.developerMode.deletingReportIds
-                            Surface(
-                                shape = RoundedCornerShape(20.dp),
-                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
-                                contentColor = MaterialTheme.colorScheme.onSurface,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .border(
-                                        width = 1.dp,
-                                        color = MaterialTheme.colorScheme.outlineVariant,
-                                        shape = RoundedCornerShape(20.dp),
-                                    )
-                                    .testTag("developer_report_item_${report.reportId}"),
-                            ) {
-                                Column(
-                                    modifier = Modifier.padding(14.dp),
-                                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                                ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                    ) {
-                                        AccountAvatarImage(
-                                            avatarUrlOrData = report.reporterAvatarUrl,
-                                            contentDescription = report.reporterName,
-                                            isGuest = false,
-                                            size = 38.dp,
-                                        )
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text(
-                                                text = report.reporterName,
-                                                style = MaterialTheme.typography.titleSmall,
-                                                fontWeight = FontWeight.Bold,
-                                                color = MaterialTheme.colorScheme.onSurface,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis,
-                                            )
-                                            Text(
-                                                text = "${dateFormatter.format(Date(report.createdAtMs))} • v${report.appVersion}",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            )
-                                        }
-                                        IconButton(
-                                            onClick = {
-                                                haptics.tick()
-                                                pendingDeleteReport = report
-                                            },
-                                            enabled = !isDeleting,
-                                            modifier = Modifier
-                                                .minimumInteractiveComponentSize()
-                                                .clip(CircleShape)
-                                                .background(LiquidRose.copy(alpha = 0.14f))
-                                                .testTag("developer_delete_report_${report.reportId}"),
-                                        ) {
-                                            if (isDeleting) {
-                                                CircularProgressIndicator(
-                                                    modifier = Modifier.size(18.dp),
-                                                    strokeWidth = 2.dp,
-                                                    color = LiquidRose,
-                                                )
-                                            } else {
-                                                Icon(
-                                                    imageVector = Icons.Rounded.DeleteOutline,
-                                                    contentDescription = strings.developerDeleteReportCd,
-                                                    tint = LiquidRose,
-                                                    modifier = Modifier.size(20.dp),
-                                                )
-                                            }
-                                        }
-                                    }
-                                    Text(
-                                        text = report.message,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = MaterialTheme.colorScheme.onSurface,
-                                    )
-                                }
-                            }
-                        }
-
-                        item(key = "developer_bottom_spacer") {
-                            Spacer(modifier = Modifier.height(24.dp))
-                        }
-                    }
                 }
+            }
+
+            if (state.developerMode.isUnlocked &&
+                (state.developerMode.selectedUserDetails != null || state.developerMode.isLoadingUserDetails)
+            ) {
+                DeveloperUserDetailOverlay(
+                    details = state.developerMode.selectedUserDetails,
+                    isLoading = state.developerMode.isLoadingUserDetails,
+                    currentDeveloperUid = state.cloudSync.userId,
+                    isActionInProgress = state.developerMode.isManagingUserAction,
+                    actionStatusMessage = state.developerMode.userActionMessage,
+                    accent = accent,
+                    onBanUser = onBanUser,
+                    onUnbanUser = onUnbanUser,
+                    onDeleteUserFromServer = onDeleteUserFromServer,
+                    onClearActionStatus = onClearUserActionMessage,
+                    onClose = {
+                        onClearUserActionMessage()
+                        onCloseUserDetails()
+                    },
+                )
             }
         }
     }
@@ -826,6 +450,398 @@ fun DeveloperScreen(
                 }
             },
         )
+    }
+}
+
+@Composable
+private fun DeveloperReportsTabContent(
+    state: MainUiState,
+    accent: androidx.compose.ui.graphics.Color,
+    onRefreshDashboard: () -> Unit,
+    onRequestDeleteReport: (BugReportItemUi) -> Unit,
+) {
+    val strings = LocalAppStrings.current
+    val haptics = rememberSoundLapaHaptics()
+    val dateFormatter = remember { SimpleDateFormat("dd.MM.yyyy HH:mm", Locale.getDefault()) }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        item(key = "reports_header", contentType = "reports_header") {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(
+                        width = 1.dp,
+                        color = MaterialTheme.colorScheme.outlineVariant,
+                        shape = RoundedCornerShape(26.dp),
+                    ),
+                shape = RoundedCornerShape(26.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                contentColor = MaterialTheme.colorScheme.onSurface,
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(accent.copy(alpha = 0.18f)),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.BugReport,
+                                    contentDescription = null,
+                                    tint = accent,
+                                    modifier = Modifier.size(20.dp),
+                                )
+                            }
+                            Text(
+                                text = strings.settingsDeveloperReportsTitle,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                            )
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                haptics.tick()
+                                onRefreshDashboard()
+                            },
+                            enabled = !state.developerMode.isLoadingReports &&
+                                !state.developerMode.isLoadingStorageStats,
+                            shape = CircleShape,
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                            modifier = Modifier.testTag("settings_developer_refresh_reports_button"),
+                        ) {
+                            if (state.developerMode.isLoadingReports) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(14.dp),
+                                    strokeWidth = 2.dp,
+                                    color = accent,
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Rounded.Refresh,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(15.dp),
+                                )
+                            }
+                            Spacer(Modifier.width(5.dp))
+                            Text(strings.settingsDeveloperRefreshButton)
+                        }
+                    }
+
+                    if (state.cloudSync.isGuest) {
+                        Text(
+                            text = strings.settingsDeveloperReportsCloudHint,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = LiquidCyan,
+                        )
+                    }
+
+                    state.developerMode.errorMessage?.let { err ->
+                        Text(
+                            text = err,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = LiquidRose,
+                        )
+                    }
+
+                    if (state.developerMode.reports.isEmpty() && !state.developerMode.isLoadingReports) {
+                        Text(
+                            text = strings.settingsDeveloperNoReports,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.testTag("settings_developer_empty_reports"),
+                        )
+                    }
+                }
+            }
+        }
+
+        items(
+            items = state.developerMode.reports,
+            key = { it.reportId },
+            contentType = { "bug_report" },
+        ) { report ->
+            val isDeleting = report.reportId in state.developerMode.deletingReportIds
+            Surface(
+                shape = RoundedCornerShape(20.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                contentColor = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(
+                        width = 1.dp,
+                        color = MaterialTheme.colorScheme.outlineVariant,
+                        shape = RoundedCornerShape(20.dp),
+                    )
+                    .testTag("developer_report_item_${report.reportId}"),
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        AccountAvatarImage(
+                            avatarUrlOrData = report.reporterAvatarUrl,
+                            contentDescription = report.reporterName,
+                            isGuest = false,
+                            size = 38.dp,
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = report.reporterName,
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                text = "${dateFormatter.format(Date(report.createdAtMs))} • v${report.appVersion}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        IconButton(
+                            onClick = {
+                                haptics.tick()
+                                onRequestDeleteReport(report)
+                            },
+                            enabled = !isDeleting,
+                            modifier = Modifier
+                                .minimumInteractiveComponentSize()
+                                .clip(CircleShape)
+                                .background(LiquidRose.copy(alpha = 0.14f))
+                                .testTag("developer_delete_report_${report.reportId}"),
+                        ) {
+                            if (isDeleting) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    strokeWidth = 2.dp,
+                                    color = LiquidRose,
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Rounded.DeleteOutline,
+                                    contentDescription = strings.developerDeleteReportCd,
+                                    tint = LiquidRose,
+                                    modifier = Modifier.size(20.dp),
+                                )
+                            }
+                        }
+                    }
+                    Text(
+                        text = report.message,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                }
+            }
+        }
+
+        item(key = "developer_reports_bottom_spacer", contentType = "spacer") {
+            Spacer(modifier = Modifier.height(24.dp))
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun DeveloperStorageTabContent(
+    state: MainUiState,
+    accent: androidx.compose.ui.graphics.Color,
+) {
+    val strings = LocalAppStrings.current
+    val storageStats = state.developerMode.cloudStorageStats
+    val storageHeadline = remember(
+        storageStats.usedBytes,
+        storageStats.quotaBytes,
+        strings.cloudStorageGbUnit,
+    ) {
+        formatCloudStorageHeadline(
+            usedBytes = storageStats.usedBytes,
+            quotaBytes = storageStats.quotaBytes,
+            gbUnit = strings.cloudStorageGbUnit,
+        )
+    }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        item(key = "cloud_storage_usage", contentType = "storage_card") {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(
+                        width = 1.dp,
+                        color = MaterialTheme.colorScheme.outlineVariant,
+                        shape = RoundedCornerShape(26.dp),
+                    )
+                    .testTag("developer_cloud_storage_card"),
+                shape = RoundedCornerShape(26.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                contentColor = MaterialTheme.colorScheme.onSurface,
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(accent.copy(alpha = 0.18f)),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.CloudQueue,
+                                    contentDescription = null,
+                                    tint = accent,
+                                    modifier = Modifier.size(20.dp),
+                                )
+                            }
+                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text(
+                                    text = strings.settingsDeveloperStorageTitle,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Text(
+                                    text = strings.cloudStorageQuotaBadge,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                        if (state.developerMode.isLoadingStorageStats) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp,
+                                color = accent,
+                            )
+                        }
+                    }
+
+                    Text(
+                        text = storageHeadline,
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = accent,
+                        modifier = Modifier.testTag("developer_cloud_storage_headline"),
+                    )
+
+                    LinearProgressIndicator(
+                        progress = { storageStats.usageFraction.coerceIn(0f, 1f) },
+                        color = if (storageStats.usageFraction > 0.85f) LiquidRose else accent,
+                        trackColor = MaterialTheme.colorScheme.background.copy(alpha = 0.7f),
+                        strokeCap = StrokeCap.Round,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(10.dp)
+                            .clip(CircleShape)
+                            .testTag("developer_cloud_storage_progress"),
+                    )
+
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        StorageStatChip(
+                            label = strings.settingsDeveloperStorageUsedExact(
+                                formatCloudExactSize(
+                                    bytes = storageStats.usedBytes,
+                                    gbUnit = strings.cloudStorageGbUnit,
+                                    mbUnit = strings.cloudStorageMbUnit,
+                                    kbUnit = strings.cloudStorageKbUnit,
+                                    bUnit = strings.cloudStorageBUnit,
+                                ),
+                            ),
+                            accent = LiquidMint,
+                        )
+                        StorageStatChip(
+                            label = strings.settingsDeveloperStorageFreeLabel(
+                                formatCloudExactSize(
+                                    bytes = storageStats.freeBytes,
+                                    gbUnit = strings.cloudStorageGbUnit,
+                                    mbUnit = strings.cloudStorageMbUnit,
+                                    kbUnit = strings.cloudStorageKbUnit,
+                                    bUnit = strings.cloudStorageBUnit,
+                                ),
+                            ),
+                            accent = LiquidCyan,
+                        )
+                        StorageStatChip(
+                            label = strings.settingsDeveloperStorageAccountsLabel(
+                                storageStats.activeUsersCount,
+                            ),
+                            accent = accent,
+                        )
+                        StorageStatChip(
+                            label = strings.settingsDeveloperStorageTracksLabel(
+                                storageStats.totalTracks,
+                            ),
+                            accent = accent,
+                        )
+                        StorageStatChip(
+                            label = strings.settingsDeveloperStoragePlaylistsLabel(
+                                storageStats.totalPlaylists,
+                            ),
+                            accent = accent,
+                        )
+                        StorageStatChip(
+                            label = strings.settingsDeveloperStorageReportsLabel(
+                                storageStats.totalBugReports,
+                            ),
+                            accent = LiquidRose,
+                        )
+                    }
+
+                    if (!storageStats.isCloudLive) {
+                        Text(
+                            text = strings.settingsDeveloperStorageOfflineEstimateHint,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 

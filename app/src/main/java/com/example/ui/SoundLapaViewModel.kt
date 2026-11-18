@@ -29,6 +29,7 @@ import com.example.data.remote.ArtistAlbumItem
 import com.example.data.remote.AvatarModerationService
 import com.example.data.remote.AvatarModerationVerdict
 import com.example.data.remote.CloudArtistSubscription
+import com.example.data.remote.CloudBanRecord
 import com.example.data.remote.CloudBugReport
 import com.example.data.remote.CloudFriend
 import com.example.data.remote.CloudLibraryRepository
@@ -38,7 +39,8 @@ import com.example.data.remote.CloudStorageStats
 import com.example.data.remote.CloudUserPlaylist
 import com.example.data.remote.CloudUserProfile
 import com.example.data.remote.DEFAULT_CLOUD_QUOTA_BYTES
-import com.example.data.remote.DEVELOPER_REPORTS_PASSWORD
+import com.example.data.remote.DeveloperUserFullDetails
+import com.example.data.remote.DeveloperUserOverview
 import com.example.data.remote.FullStreamResolver
 import com.example.data.remote.LyricsLine
 import com.example.data.remote.LyricsRepository
@@ -175,6 +177,7 @@ data class CloudSyncUiState(
     val photoUrl: String? = null,
     val bio: String? = null,
     val avatarBlocked: Boolean = false,
+    val banRecord: CloudBanRecord? = null,
     val isGuest: Boolean = false,
     val isVerifiedDeveloper: Boolean = false,
     val isSyncing: Boolean = false,
@@ -239,13 +242,19 @@ data class BugReportUiState(
 @Immutable
 data class DeveloperModeUiState(
     val isUnlocked: Boolean = false,
-    val wrongPasswordError: Boolean = false,
     val isLoadingReports: Boolean = false,
     val isLoadingStorageStats: Boolean = false,
+    val isLoadingUsers: Boolean = false,
+    val isLoadingUserDetails: Boolean = false,
+    val isManagingUserAction: Boolean = false,
     val deletingReportIds: Set<String> = emptySet(),
     val reports: List<BugReportItemUi> = emptyList(),
+    val users: List<DeveloperUserOverview> = emptyList(),
+    val selectedUserDetails: DeveloperUserFullDetails? = null,
     val cloudStorageStats: CloudStorageStats = CloudStorageStats(),
     val errorMessage: String? = null,
+    val usersErrorMessage: String? = null,
+    val userActionMessage: String? = null,
 )
 
 @Immutable
@@ -410,6 +419,11 @@ class SoundLapaViewModel(
     private var musicVideoProbeJob: Job? = null
     private var waveLoadJob: Job? = null
     private var waveRefillJob: Job? = null
+    private var devUsersJob: Job? = null
+    private var devUserDetailsJob: Job? = null
+    private var presenceSyncJob: Job? = null
+    private var isAppForeground: Boolean = true
+    private var lastPublishedPresenceKey: String? = null
 
     private val _waveIsLoading = MutableStateFlow(false)
     private val _waveSessionActive = MutableStateFlow(false)
@@ -453,6 +467,8 @@ class SoundLapaViewModel(
         val recommendationSeedArtists: List<String>,
         val filteredTracks: List<TrackEntity>,
         val searchScreenResults: List<TrackEntity>,
+        val searchArtistProfiles: List<SearchArtistProfile>,
+        val offlineTracksCount: Int,
         val selectedFilter: String,
     )
 
@@ -623,6 +639,18 @@ class SoundLapaViewModel(
             localMatches + resolvedSearchResults.filter { it.id !in localIds }
         }
 
+        val artistMatches = if (trimmedQuery.length >= 2) {
+            buildSearchArtistMatches(
+                rawQuery = trimmedQuery,
+                remoteProfiles = audius.searchArtistProfiles,
+                allTracks = tracks + resolvedSearchResults,
+            )
+        } else {
+            emptyList()
+        }
+
+        val offlineCount = tracks.count { it.isUserUpload && isTrackPlayableOffline(it) }
+
         val finalHomeTracks = if (!searchActive && filter == "Все") {
             recs.homeRecTracks
         } else {
@@ -637,6 +665,8 @@ class SoundLapaViewModel(
             recommendationSeedArtists = recs.recommendationSeedArtists,
             filteredTracks = finalHomeTracks,
             searchScreenResults = searchScreenMatches,
+            searchArtistProfiles = artistMatches,
+            offlineTracksCount = offlineCount,
             selectedFilter = filter,
         )
     }.flowOn(Dispatchers.Default)
@@ -659,7 +689,6 @@ class SoundLapaViewModel(
         val refreshingRecs = values[5] as Boolean
         val refreshingHome = values[6] as Boolean
         val isOnline = values[7] as Boolean
-        val offlineCount = snapshot.allTracks.count { it.isUserUpload && isTrackPlayableOffline(it) }
         HomeUiState(
             quickPickRows = snapshot.quickPickRows,
             trendingCarousel = snapshot.trendingCarousel,
@@ -676,13 +705,13 @@ class SoundLapaViewModel(
             currentTrackId = playback.currentTrackId,
             isPlaying = playback.isPlaying,
             isOnline = isOnline,
-            offlineTracksCount = offlineCount,
+            offlineTracksCount = snapshot.offlineTracksCount,
         )
     }
         .distinctUntilChanged()
         .stateIn(
             scope = viewModelScope,
-            started = SharingStarted.WhileSubscribed(5000),
+            started = SharingStarted.Eagerly,
             initialValue = HomeUiState(),
         )
 
@@ -758,24 +787,11 @@ class SoundLapaViewModel(
             ?: tracks.find { it.id == settings.lastPlayedTrackId }
             ?: tracks.firstOrNull()
 
-        val trimmedSearchQuery = _searchQuery.value.trim()
-        val artistMatches = if (trimmedSearchQuery.length >= 2) {
-            buildSearchArtistMatches(
-                rawQuery = trimmedSearchQuery,
-                remoteProfiles = audius.searchArtistProfiles,
-                allTracks = tracks + audius.searchResults,
-            )
-        } else {
-            emptyList()
-        }
-
-        val offlineCount = tracks.count { it.isUserUpload && isTrackPlayableOffline(it) }
-
         MainUiState(
             tracks = tracks,
             filteredTracks = snapshot.filteredTracks,
             searchScreenResults = snapshot.searchScreenResults,
-            searchArtistProfiles = artistMatches,
+            searchArtistProfiles = snapshot.searchArtistProfiles,
             playlists = playlists,
             subscribedArtists = subscribedArtists,
             selectedFilter = snapshot.selectedFilter,
@@ -795,14 +811,14 @@ class SoundLapaViewModel(
             isImportingPlaylist = utility.isImportingPlaylist,
             importStatusMessage = utility.importStatusMessage,
             isOnline = utility.isOnline,
-            offlineTracksCount = offlineCount,
+            offlineTracksCount = snapshot.offlineTracksCount,
             showOfflineDialog = utility.showOfflineDialog,
             offlineDialogTrackTitle = utility.offlineDialogTrackTitle,
             explicitTrackIds = settings.explicitTrackIds,
         )
     }.stateIn(
         scope = viewModelScope,
-        started = SharingStarted.WhileSubscribed(5000),
+        started = SharingStarted.Eagerly,
         initialValue = MainUiState(settings = preferences.currentSettings()),
     )
 
@@ -880,6 +896,30 @@ class SoundLapaViewModel(
             _showOfflineDialog.value = true
         }
         playbackController.connect()
+        // Event-driven presence & now-playing updates strictly on track open or play/pause changes
+        if (!isGuestMode && cloudRepository != null && !cloudUserId.isNullOrBlank()) {
+            viewModelScope.launch {
+                cloudRepository.observeOwnBanStatus(cloudUserId).collect { record ->
+                    _cloudSyncState.update { it.copy(banRecord = record) }
+                }
+            }
+            viewModelScope.launch {
+                var initialPresenceSkipped = false
+                playbackController.playbackState
+                    .map { it.currentTrackId to it.isPlaying }
+                    .distinctUntilChanged()
+                    .collect { (trackId, isPlaying) ->
+                        if (!initialPresenceSkipped) {
+                            initialPresenceSkipped = true
+                            if (trackId != null || isPlaying) {
+                                publishPresenceAndNowPlaying(isOnline = isAppForeground)
+                            }
+                        } else {
+                            publishPresenceAndNowPlaying(isOnline = isAppForeground)
+                        }
+                    }
+            }
+        }
         viewModelScope.launch {
             networkObserver.isOnline.collect { online ->
                 if (online) {
@@ -1178,12 +1218,12 @@ class SoundLapaViewModel(
     ): List<SearchArtistProfile> {
         val trimmed = rawQuery.trim()
         if (trimmed.length < 2) return emptyList()
-        val normQuery = trimmed.lowercase().replace(Regex("[^\\p{L}\\p{Nd}]"), "")
+        val normQuery = trimmed.lowercase().replace(SEARCH_NORM_REGEX, "")
         if (normQuery.isBlank()) return emptyList()
 
         val merged = LinkedHashMap<String, SearchArtistProfile>()
         remoteProfiles.forEach { profile ->
-            val key = profile.name.lowercase().replace(Regex("[^\\p{L}\\p{Nd}]"), "")
+            val key = profile.name.lowercase().replace(SEARCH_NORM_REGEX, "")
             if (key.isNotBlank()) {
                 merged.putIfAbsent(key, profile)
             }
@@ -1192,12 +1232,12 @@ class SoundLapaViewModel(
         // Supplement with local track artists that match the query
         allTracks.forEach { track ->
             val primaryArtist = track.artist
-                .split(Regex("\\s*(?:,|&|feat\\.|ft\\.|\\s+feat\\s+)\\s*", RegexOption.IGNORE_CASE))
+                .split(SEARCH_ARTIST_SPLIT_REGEX)
                 .firstOrNull()
                 ?.trim()
                 .orEmpty()
             if (primaryArtist.isBlank()) return@forEach
-            val key = primaryArtist.lowercase().replace(Regex("[^\\p{L}\\p{Nd}]"), "")
+            val key = primaryArtist.lowercase().replace(SEARCH_NORM_REGEX, "")
             if (key.isBlank()) return@forEach
             val matches = key == normQuery ||
                 key.startsWith(normQuery) ||
@@ -1223,7 +1263,7 @@ class SoundLapaViewModel(
         }
 
         return merged.values.sortedByDescending { profile ->
-            val normName = profile.name.lowercase().replace(Regex("[^\\p{L}\\p{Nd}]"), "")
+            val normName = profile.name.lowercase().replace(SEARCH_NORM_REGEX, "")
             val exactBonus = when {
                 normName == normQuery -> 10_000_000L
                 normName.startsWith(normQuery) -> 1_000_000L
@@ -1742,47 +1782,21 @@ class SoundLapaViewModel(
         _bugReportState.update { it.copy(statusMessage = null, savedOfflineOnly = false) }
     }
 
-    fun unlockDeveloperSection(passwordInput: String) {
-        if (passwordInput.trim() == DEVELOPER_REPORTS_PASSWORD) {
-            val uid = cloudUserId
-            val email = _cloudSyncState.value.email
-            if (!isGuestMode && !uid.isNullOrBlank() && isAllowedDeveloperEmail(email)) {
-                if (provisionDeveloperBiometricKey(uid, email)) {
-                    viewModelScope.launch {
-                        preferences.setDevUnlockedUid(uid)
-                    }
-                }
-            }
-            _developerModeState.update {
-                it.copy(
-                    isUnlocked = true,
-                    wrongPasswordError = false,
-                    errorMessage = null,
-                )
-            }
-            refreshDeveloperDashboard()
-        } else {
-            _developerModeState.update {
-                it.copy(
-                    isUnlocked = false,
-                    wrongPasswordError = true,
-                )
-            }
-        }
-    }
-
     fun unlockDeveloperWithBiometrics() {
         val uid = cloudUserId
         val email = _cloudSyncState.value.email
-        val activatedUid = preferences.currentSettings().devUnlockedUid
-        if (isGuestMode || uid.isNullOrBlank() || !isAllowedDeveloperEmail(email) || activatedUid != uid) {
+        val isVerifiedDev = !isGuestMode &&
+            !uid.isNullOrBlank() &&
+            (cloudRepository?.isCurrentUserVerifiedDeveloper() == true || isAllowedDeveloperEmail(email))
+        if (!isVerifiedDev) {
             return
         }
+        provisionDeveloperBiometricKey(uid!!, email)
         _developerModeState.update {
             it.copy(
                 isUnlocked = true,
-                wrongPasswordError = false,
                 errorMessage = null,
+                usersErrorMessage = null,
             )
         }
         refreshDeveloperDashboard()
@@ -1790,21 +1804,300 @@ class SoundLapaViewModel(
 
     fun lockDeveloperSection() {
         revokeDeveloperBiometricKey(cloudUserId)
+        devUsersJob?.cancel()
+        devUserDetailsJob?.cancel()
         viewModelScope.launch {
             preferences.setDevUnlockedUid(null)
         }
         _developerModeState.update {
             it.copy(
                 isUnlocked = false,
-                wrongPasswordError = false,
+                selectedUserDetails = null,
+                isLoadingUserDetails = false,
                 errorMessage = null,
+                usersErrorMessage = null,
             )
         }
     }
 
     fun refreshDeveloperDashboard() {
+        refreshDeveloperUsers()
         refreshDeveloperReports()
         refreshCloudStorageUsage()
+    }
+
+    fun refreshDeveloperUsers() {
+        val repo = cloudRepository ?: return
+        if (!_developerModeState.value.isUnlocked) return
+        if (isGuestMode || cloudUserId.isNullOrBlank()) return
+        devUsersJob?.cancel()
+        devUsersJob = viewModelScope.launch {
+            _developerModeState.update { it.copy(isLoadingUsers = true, usersErrorMessage = null) }
+            val result = repo.fetchDeveloperAllUsersOverview()
+            _developerModeState.update { state ->
+                result.fold(
+                    onSuccess = { list ->
+                        state.copy(
+                            isLoadingUsers = false,
+                            users = list,
+                            usersErrorMessage = null,
+                        )
+                    },
+                    onFailure = { err ->
+                        state.copy(
+                            isLoadingUsers = false,
+                            usersErrorMessage = err.localizedMessage,
+                        )
+                    },
+                )
+            }
+        }
+    }
+
+    fun inspectDeveloperUser(targetUid: String) {
+        val repo = cloudRepository ?: return
+        if (!_developerModeState.value.isUnlocked) return
+        if (isGuestMode || cloudUserId.isNullOrBlank()) return
+        devUserDetailsJob?.cancel()
+        val cachedOverview = _developerModeState.value.users.find { it.userId == targetUid }
+        devUserDetailsJob = viewModelScope.launch {
+            _developerModeState.update { state ->
+                state.copy(
+                    isLoadingUserDetails = true,
+                    selectedUserDetails = cachedOverview?.let {
+                        DeveloperUserFullDetails(overview = it)
+                    },
+                )
+            }
+            val result = repo.fetchDeveloperUserDetails(targetUid)
+            _developerModeState.update { state ->
+                result.fold(
+                    onSuccess = { full ->
+                        state.copy(
+                            isLoadingUserDetails = false,
+                            selectedUserDetails = full,
+                            users = state.users.map { u ->
+                                if (u.userId == full.overview.userId) full.overview else u
+                            },
+                        )
+                    },
+                    onFailure = { err ->
+                        state.copy(
+                            isLoadingUserDetails = false,
+                            usersErrorMessage = err.localizedMessage,
+                        )
+                    },
+                )
+            }
+        }
+    }
+
+    fun closeDeveloperUserDetails() {
+        devUserDetailsJob?.cancel()
+        _developerModeState.update {
+            it.copy(
+                isLoadingUserDetails = false,
+                selectedUserDetails = null,
+                userActionMessage = null,
+            )
+        }
+    }
+
+    fun clearDeveloperUserActionMessage() {
+        _developerModeState.update { it.copy(userActionMessage = null) }
+    }
+
+    fun banDeveloperUser(targetUid: String, reason: String?) {
+        val repo = cloudRepository ?: return
+        if (!_developerModeState.value.isUnlocked) return
+        if (isGuestMode || cloudUserId.isNullOrBlank()) return
+        if (_developerModeState.value.isManagingUserAction) return
+        viewModelScope.launch {
+            _developerModeState.update { it.copy(isManagingUserAction = true, userActionMessage = null) }
+            val result = repo.banUser(targetUid = targetUid, reason = reason)
+            val devExtras = com.example.ui.i18n.stringsForLanguage(preferences.currentSettings().appLanguage).devExtras
+            _developerModeState.update { state ->
+                result.fold(
+                    onSuccess = { banRecord ->
+                        val targetName = state.selectedUserDetails?.overview?.takeIf { it.userId == targetUid }?.displayName
+                            ?: state.users.find { it.userId == targetUid }?.displayName
+                            ?: targetUid
+                        val updatedSelected = state.selectedUserDetails?.let { details ->
+                            if (details.overview.userId == targetUid) {
+                                details.copy(
+                                    overview = details.overview.copy(
+                                        isBanned = true,
+                                        banReason = banRecord.reason,
+                                        bannedAtMs = banRecord.bannedAtMs,
+                                    ),
+                                )
+                            } else {
+                                details
+                            }
+                        }
+                        val updatedUsers = state.users.map { u ->
+                            if (u.userId == targetUid) {
+                                u.copy(
+                                    isBanned = true,
+                                    banReason = banRecord.reason,
+                                    bannedAtMs = banRecord.bannedAtMs,
+                                )
+                            } else {
+                                u
+                            }
+                        }
+                        state.copy(
+                            isManagingUserAction = false,
+                            selectedUserDetails = updatedSelected,
+                            users = updatedUsers,
+                            userActionMessage = devExtras.bannedSuccessMessage(targetName),
+                        )
+                    },
+                    onFailure = { err ->
+                        state.copy(
+                            isManagingUserAction = false,
+                            userActionMessage = err.localizedMessage ?: "Error",
+                        )
+                    },
+                )
+            }
+        }
+    }
+
+    fun unbanDeveloperUser(targetUid: String) {
+        val repo = cloudRepository ?: return
+        if (!_developerModeState.value.isUnlocked) return
+        if (isGuestMode || cloudUserId.isNullOrBlank()) return
+        if (_developerModeState.value.isManagingUserAction) return
+        viewModelScope.launch {
+            _developerModeState.update { it.copy(isManagingUserAction = true, userActionMessage = null) }
+            val result = repo.unbanUser(targetUid = targetUid)
+            val devExtras = com.example.ui.i18n.stringsForLanguage(preferences.currentSettings().appLanguage).devExtras
+            _developerModeState.update { state ->
+                result.fold(
+                    onSuccess = {
+                        val targetName = state.selectedUserDetails?.overview?.takeIf { it.userId == targetUid }?.displayName
+                            ?: state.users.find { it.userId == targetUid }?.displayName
+                            ?: targetUid
+                        val updatedSelected = state.selectedUserDetails?.let { details ->
+                            if (details.overview.userId == targetUid) {
+                                details.copy(
+                                    overview = details.overview.copy(
+                                        isBanned = false,
+                                        banReason = null,
+                                        bannedAtMs = 0L,
+                                    ),
+                                )
+                            } else {
+                                details
+                            }
+                        }
+                        val updatedUsers = state.users.map { u ->
+                            if (u.userId == targetUid) {
+                                u.copy(
+                                    isBanned = false,
+                                    banReason = null,
+                                    bannedAtMs = 0L,
+                                )
+                            } else {
+                                u
+                            }
+                        }
+                        state.copy(
+                            isManagingUserAction = false,
+                            selectedUserDetails = updatedSelected,
+                            users = updatedUsers,
+                            userActionMessage = devExtras.unbannedSuccessMessage(targetName),
+                        )
+                    },
+                    onFailure = { err ->
+                        state.copy(
+                            isManagingUserAction = false,
+                            userActionMessage = err.localizedMessage ?: "Error",
+                        )
+                    },
+                )
+            }
+        }
+    }
+
+    fun deleteDeveloperUserFromServer(targetUid: String) {
+        val repo = cloudRepository ?: return
+        if (!_developerModeState.value.isUnlocked) return
+        if (isGuestMode || cloudUserId.isNullOrBlank()) return
+        if (_developerModeState.value.isManagingUserAction) return
+        viewModelScope.launch {
+            _developerModeState.update { it.copy(isManagingUserAction = true, userActionMessage = null) }
+            val targetName = _developerModeState.value.selectedUserDetails?.overview?.takeIf { it.userId == targetUid }?.displayName
+                ?: _developerModeState.value.users.find { it.userId == targetUid }?.displayName
+                ?: targetUid
+            val result = repo.deleteDeveloperUserFromServer(targetUid)
+            val devExtras = com.example.ui.i18n.stringsForLanguage(preferences.currentSettings().appLanguage).devExtras
+            result.onSuccess {
+                _developerModeState.update { state ->
+                    state.copy(
+                        isManagingUserAction = false,
+                        selectedUserDetails = null,
+                        users = state.users.filterNot { it.userId == targetUid },
+                        usersErrorMessage = null,
+                        userActionMessage = devExtras.deletedUserSuccessMessage(targetName),
+                    )
+                }
+                refreshDeveloperReports()
+                refreshCloudStorageUsage()
+            }.onFailure { err ->
+                _developerModeState.update { state ->
+                    state.copy(
+                        isManagingUserAction = false,
+                        userActionMessage = err.localizedMessage ?: "Error",
+                    )
+                }
+            }
+        }
+    }
+
+    fun syncPlaybackOnForeground() {
+        playbackController.syncNowFromService()
+    }
+
+    fun onAppLifecycleChanged(isForeground: Boolean) {
+        isAppForeground = isForeground
+        if (isForeground) {
+            playbackController.syncNowFromService()
+        }
+        publishPresenceAndNowPlaying(isOnline = isForeground, force = true)
+    }
+
+    private fun publishPresenceAndNowPlaying(
+        isOnline: Boolean,
+        force: Boolean = false,
+    ) {
+        val repo = cloudRepository ?: return
+        val uid = cloudUserId?.takeIf { it.isNotBlank() } ?: return
+        if (isGuestMode || _cloudSyncState.value.banRecord != null) return
+
+        val playback = playbackController.playbackState.value
+        val track = playback.currentTrackId?.let { tid ->
+            playbackController.findTrackById(tid)
+                ?: uiState.value.tracks.find { it.id == tid }
+                ?: _audiusState.value.searchResults.find { it.id == tid }
+        }
+        val key = "$isOnline|${playback.isPlaying}|${track?.id}"
+        if (!force && key == lastPublishedPresenceKey) return
+        lastPublishedPresenceKey = key
+
+        presenceSyncJob?.cancel()
+        presenceSyncJob = app.appScope.launch(NonCancellable) {
+            repo.updateUserPresenceAndNowPlaying(
+                isOnline = isOnline,
+                trackId = track?.id,
+                trackTitle = track?.title,
+                trackArtist = track?.artist,
+                trackCoverUrl = track?.coverArtPath,
+                isPlaying = playback.isPlaying && track != null,
+            )
+        }
+        if (uid.isBlank()) return
     }
 
     fun refreshCloudStorageUsage() {
@@ -1818,7 +2111,7 @@ class SoundLapaViewModel(
                 // Ensure current user's snapshot is recorded in /cloud_metrics first
                 val profile = buildCurrentCloudProfileSnapshot(uid)
                 runCatching { repo.syncCloudMetricsFromLocal(dao, profile) }
-                stats = repo.fetchDeveloperCloudStorageStats(DEVELOPER_REPORTS_PASSWORD).getOrNull()
+                stats = repo.fetchDeveloperCloudStorageStats().getOrNull()
             }
 
             if (stats == null) {
@@ -1908,7 +2201,7 @@ class SoundLapaViewModel(
             val repo = cloudRepository
             var cloudError: String? = null
             if (!isGuestMode && repo != null && !cloudUserId.isNullOrBlank()) {
-                val res = repo.fetchDeveloperBugReports(DEVELOPER_REPORTS_PASSWORD)
+                val res = repo.fetchDeveloperBugReports()
                 res.onSuccess { cloudList ->
                     cloudList.forEach { c ->
                         merged[c.reportId] = BugReportItemUi(
@@ -1963,7 +2256,7 @@ class SoundLapaViewModel(
             val repo = cloudRepository
             if (!isGuestMode && repo != null && !cloudUserId.isNullOrBlank()) {
                 val targetDocId = report.docId.ifBlank { report.reportId }
-                val res = repo.deleteDeveloperBugReport(targetDocId, DEVELOPER_REPORTS_PASSWORD)
+                val res = repo.deleteDeveloperBugReport(targetDocId)
                 if (res.isFailure) {
                     _developerModeState.update {
                         it.copy(
@@ -2179,11 +2472,6 @@ class SoundLapaViewModel(
         soundCloudUrl: String? = null,
     ) {
         val cleanName = artistName.trim()
-            .split(Regex("\\s*(?:,|&|feat\\.|ft\\.|\\s+feat\\s+)\\s*", RegexOption.IGNORE_CASE))
-            .firstOrNull()
-            ?.trim()
-            ?.ifBlank { artistName.trim() }
-            ?: return
         if (cleanName.isBlank()) return
 
         artistProfileJob?.cancel()
@@ -3526,5 +3814,10 @@ class SoundLapaViewModel(
         playbackController.onOfflinePlaybackBlocked = null
         playbackController.disconnect()
         super.onCleared()
+    }
+
+    private companion object {
+        val SEARCH_NORM_REGEX = Regex("[^\\p{L}\\p{Nd}]")
+        val SEARCH_ARTIST_SPLIT_REGEX = Regex("\\s*(?:,|&|feat\\.|ft\\.|\\s+feat\\s+)\\s*", RegexOption.IGNORE_CASE)
     }
 }

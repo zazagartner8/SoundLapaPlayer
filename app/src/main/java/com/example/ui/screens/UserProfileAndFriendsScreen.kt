@@ -28,11 +28,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.AlternateEmail
 import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.Code
 import androidx.compose.material.icons.rounded.Group
 import androidx.compose.material.icons.rounded.PersonAdd
 import androidx.compose.material.icons.rounded.PersonRemove
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Verified
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -78,32 +80,73 @@ fun DeveloperVerifiedPill(
     accent: Color,
     modifier: Modifier = Modifier,
 ) {
+    val strings = LocalAppStrings.current
+    var showInfoDialog by remember { mutableStateOf(false) }
+
     Surface(
-        modifier = modifier,
-        shape = RoundedCornerShape(50),
-        color = accent.copy(alpha = 0.20f),
+        onClick = { showInfoDialog = true },
+        modifier = modifier.testTag("developer_verified_pill"),
+        shape = CircleShape,
+        color = accent.copy(alpha = 0.18f),
         contentColor = accent,
-        border = androidx.compose.foundation.BorderStroke(1.dp, accent.copy(alpha = 0.55f)),
+        border = androidx.compose.foundation.BorderStroke(1.dp, accent.copy(alpha = 0.50f)),
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp),
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
         ) {
             Icon(
                 imageVector = Icons.Rounded.Verified,
                 contentDescription = label,
                 tint = accent,
-                modifier = Modifier.size(14.dp),
+                modifier = Modifier.size(13.dp),
             )
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelSmall,
-                color = accent,
-                fontWeight = FontWeight.Bold,
-                maxLines = 1,
+            Icon(
+                imageVector = Icons.Rounded.Code,
+                contentDescription = null,
+                tint = accent,
+                modifier = Modifier.size(12.dp),
             )
         }
+    }
+
+    if (showInfoDialog) {
+        AlertDialog(
+            onDismissRequest = { showInfoDialog = false },
+            containerColor = MaterialTheme.colorScheme.surface,
+            titleContentColor = MaterialTheme.colorScheme.onSurface,
+            textContentColor = MaterialTheme.colorScheme.onSurface,
+            icon = {
+                Icon(
+                    imageVector = Icons.Rounded.Verified,
+                    contentDescription = label,
+                    tint = accent,
+                    modifier = Modifier.size(30.dp),
+                )
+            },
+            title = {
+                Text(
+                    text = strings.social.developerBadgeInfoTitle,
+                    fontWeight = FontWeight.Bold,
+                )
+            },
+            text = {
+                Text(
+                    text = strings.social.developerBadgeInfoBody,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = { showInfoDialog = false },
+                    modifier = Modifier.testTag("developer_badge_dialog_close"),
+                ) {
+                    Text(strings.close, color = accent, fontWeight = FontWeight.SemiBold)
+                }
+            },
+        )
     }
 }
 
@@ -135,13 +178,14 @@ fun UserProfileAndFriendsScreen(
     statsBackupState: StatsBackupUiState? = null,
     onRestoreStatsFromUri: ((android.net.Uri) -> Unit)? = null,
     onClearStatsRestoreStatus: (() -> Unit)? = null,
+    isStandaloneProfileInspection: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     val strings = LocalAppStrings.current
     val social = strings.social
 
     BackHandler {
-        if (inspectedProfile != null) {
+        if (inspectedProfile != null && !isStandaloneProfileInspection) {
             onClearInspectedProfile()
         } else {
             onBack()
@@ -178,7 +222,11 @@ fun UserProfileAndFriendsScreen(
                 ) {
                     IconButton(
                         onClick = {
-                            if (inspectedProfile != null) onClearInspectedProfile() else onBack()
+                            if (inspectedProfile != null && !isStandaloneProfileInspection) {
+                                onClearInspectedProfile()
+                            } else {
+                                onBack()
+                            }
                         },
                         modifier = Modifier.testTag("social_back_button"),
                     ) {
@@ -204,7 +252,7 @@ fun UserProfileAndFriendsScreen(
                 }
             }
 
-            if (!isSignedIn) {
+            if (!isSignedIn && !isStandaloneProfileInspection) {
                 item(key = "guest_lock") {
                     LiquidGlassCard(accentTint = accent, shape = RoundedCornerShape(24.dp)) {
                         Column(
@@ -383,6 +431,14 @@ fun UserProfileAndFriendsScreen(
                                 }
 
                                 if (isSignedIn) {
+                                    val savedNormalizedHandle = remember(currentProfile.username) {
+                                        normalizeUsernameHandle(currentProfile.username.orEmpty())
+                                    }
+                                    val isCurrentClaimedHandle =
+                                        savedNormalizedHandle.isNotBlank() && handleInput == savedNormalizedHandle
+                                    val canClaimHandle =
+                                        handleInput.length >= 3 && !isClaimingUsername && !isCurrentClaimedHandle
+
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
                                         verticalAlignment = Alignment.CenterVertically,
@@ -395,7 +451,13 @@ fun UserProfileAndFriendsScreen(
                                                     it in 'a'..'z' || it in '0'..'9' || it == '_'
                                                 }.take(24)
                                             },
-                                            label = { Text(social.usernameLabel) },
+                                            label = {
+                                                Text(
+                                                    text = social.usernameLabel,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                )
+                                            },
                                             placeholder = { Text(social.usernamePlaceholder) },
                                             leadingIcon = {
                                                 Icon(
@@ -412,9 +474,14 @@ fun UserProfileAndFriendsScreen(
                                         )
                                         Button(
                                             onClick = { onClaimUsername(handleInput) },
-                                            enabled = handleInput.length >= 3 && !isClaimingUsername,
+                                            enabled = canClaimHandle,
                                             shape = RoundedCornerShape(16.dp),
-                                            colors = ButtonDefaults.buttonColors(containerColor = accent),
+                                            colors = ButtonDefaults.buttonColors(
+                                                containerColor = accent,
+                                                contentColor = MaterialTheme.colorScheme.onPrimary,
+                                                disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                                                disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            ),
                                             modifier = Modifier
                                                 .height(54.dp)
                                                 .testTag("claim_username_button"),
@@ -426,7 +493,15 @@ fun UserProfileAndFriendsScreen(
                                                     color = MaterialTheme.colorScheme.onPrimary,
                                                 )
                                             } else {
-                                                Text(social.claimUsernameButton, maxLines = 1)
+                                                Text(
+                                                    text = if (isCurrentClaimedHandle) {
+                                                        social.usernameClaimedButton
+                                                    } else {
+                                                        social.claimUsernameButton
+                                                    },
+                                                    maxLines = 1,
+                                                    softWrap = false,
+                                                )
                                             }
                                         }
                                     }
@@ -445,19 +520,6 @@ fun UserProfileAndFriendsScreen(
                             }
                         }
                     }
-                }
-
-                item(key = "profile_listening_stats", contentType = "listening_stats") {
-                    ListeningStatsSection(
-                        events = listeningEvents,
-                        fallbackHistory = fallbackHistory,
-                        tracksById = tracksById,
-                        accent = accent,
-                        onPlayTrack = onPlayTrack,
-                        backupState = statsBackupState,
-                        onRestoreBackupUri = onRestoreStatsFromUri,
-                        onClearRestoreStatus = onClearStatsRestoreStatus,
-                    )
                 }
 
                 if (!statusMessage.isNullOrBlank()) {
@@ -643,6 +705,19 @@ fun UserProfileAndFriendsScreen(
                             }
                         }
                     }
+                }
+
+                item(key = "profile_listening_stats", contentType = "listening_stats") {
+                    ListeningStatsSection(
+                        events = listeningEvents,
+                        fallbackHistory = fallbackHistory,
+                        tracksById = tracksById,
+                        accent = accent,
+                        onPlayTrack = onPlayTrack,
+                        backupState = statsBackupState,
+                        onRestoreBackupUri = onRestoreStatsFromUri,
+                        onClearRestoreStatus = onClearStatsRestoreStatus,
+                    )
                 }
             }
         }

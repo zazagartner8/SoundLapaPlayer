@@ -78,9 +78,11 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -99,7 +101,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
-import coil.compose.SubcomposeAsyncImage
 import coil.request.ImageRequest
 import com.example.data.local.ArtistSubscriptionEntity
 import com.example.data.local.PlaylistEntity
@@ -155,11 +156,19 @@ fun LibraryScreen(
 ) {
     val strings = LocalAppStrings.current
     val haptics = rememberSoundLapaHaptics()
+    val libraryListState = rememberLazyListState()
     var selectedSection by remember { mutableIntStateOf(0) }
     var openedPlaylistId by remember { mutableStateOf<String?>(null) }
     var showCreatePlaylistDialog by remember { mutableStateOf(false) }
     var actionsMenuPlaylist by remember { mutableStateOf<PlaylistWithTracks?>(null) }
     var pendingDeletePlaylist by remember { mutableStateOf<PlaylistWithTracks?>(null) }
+
+    val currentOnPlayPlaylist by rememberUpdatedState(onPlayPlaylist)
+    val currentOnPlayTrack by rememberUpdatedState(onPlayTrack)
+    val currentOnToggleLike by rememberUpdatedState(onToggleLike)
+    val currentOnOpenTrackOptions by rememberUpdatedState(onOpenTrackOptions)
+    val currentOnOpenSubscribedArtist by rememberUpdatedState(onOpenSubscribedArtist)
+    val currentOnToggleUnsubscribeArtist by rememberUpdatedState(onToggleUnsubscribeArtist)
 
     LaunchedEffect(requestedSection) {
         if (requestedSection != null) {
@@ -183,6 +192,8 @@ fun LibraryScreen(
     val likedTracks = remember(state.tracks) { state.tracks.filter { it.isLiked } }
     val userTracks = remember(state.tracks) { state.tracks.filter { it.isUserUpload } }
     val tracksById = remember(state.tracks) { state.tracks.associateBy { it.id } }
+    val latestLikedTracks by rememberUpdatedState(likedTracks)
+    val latestUserTracks by rememberUpdatedState(userTracks)
 
     LaunchedEffect(openedPlaylist != null) {
         onPlaylistDetailOpenChanged(openedPlaylist != null)
@@ -376,6 +387,7 @@ fun LibraryScreen(
                 )
             } else {
             LazyColumn(
+                state = libraryListState,
                 modifier = Modifier
                     .fillMaxSize()
                     .widthIn(max = 720.dp),
@@ -387,7 +399,7 @@ fun LibraryScreen(
                 ),
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
-                item(key = "library_header") {
+                item(key = "library_header", contentType = "header") {
                     Text(
                         text = strings.libraryTitle,
                         style = MaterialTheme.typography.headlineMedium,
@@ -396,7 +408,7 @@ fun LibraryScreen(
                     )
                 }
 
-                item(key = "library_tabs") {
+                item(key = "library_tabs", contentType = "section_tabs") {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -514,17 +526,20 @@ fun LibraryScreen(
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 ) {
                                     Text(
                                         text = "${strings.playlistsTab} (${state.playlists.size})",
                                         style = MaterialTheme.typography.titleSmall,
                                         fontWeight = FontWeight.SemiBold,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f),
                                     )
                                     Row(
                                         verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
                                     ) {
                                         Surface(
                                             onClick = {
@@ -537,7 +552,7 @@ fun LibraryScreen(
                                             modifier = Modifier.testTag("playlists_import_inline_button"),
                                         ) {
                                             Row(
-                                                modifier = Modifier.padding(horizontal = 11.dp, vertical = 7.dp),
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
                                                 verticalAlignment = Alignment.CenterVertically,
                                                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                                             ) {
@@ -548,11 +563,12 @@ fun LibraryScreen(
                                                     modifier = Modifier.size(15.dp),
                                                 )
                                                 Text(
-                                                    text = strings.v34.importPlaylistButton,
+                                                    text = strings.v34.importPlaylistShort,
                                                     style = MaterialTheme.typography.labelMedium,
                                                     fontWeight = FontWeight.Medium,
                                                     color = MaterialTheme.colorScheme.onSurface,
                                                     maxLines = 1,
+                                                    softWrap = false,
                                                 )
                                             }
                                         }
@@ -567,7 +583,7 @@ fun LibraryScreen(
                                             modifier = Modifier.testTag("playlists_create_inline_button"),
                                         ) {
                                             Row(
-                                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                                                modifier = Modifier.padding(horizontal = 11.dp, vertical = 7.dp),
                                                 verticalAlignment = Alignment.CenterVertically,
                                                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                                             ) {
@@ -582,6 +598,8 @@ fun LibraryScreen(
                                                     style = MaterialTheme.typography.labelMedium,
                                                     fontWeight = FontWeight.SemiBold,
                                                     color = MaterialTheme.colorScheme.onSurface,
+                                                    maxLines = 1,
+                                                    softWrap = false,
                                                 )
                                             }
                                         }
@@ -593,20 +611,30 @@ fun LibraryScreen(
                                 key = { it.playlist.id },
                                 contentType = { "playlist_card" },
                             ) { pl ->
+                                val latestPl by rememberUpdatedState(pl)
+                                val onOpenPl = remember(pl.playlist.id) {
+                                    {
+                                        haptics.tick()
+                                        openedPlaylistId = latestPl.playlist.id
+                                    }
+                                }
+                                val onLongPressPl = remember(pl.playlist.id) {
+                                    {
+                                        haptics.confirm()
+                                        actionsMenuPlaylist = latestPl
+                                    }
+                                }
+                                val onPlayPl = remember(pl.playlist.id) {
+                                    {
+                                        haptics.tap()
+                                        currentOnPlayPlaylist(latestPl)
+                                    }
+                                }
                                 PlaylistRowCard(
                                     playlistWithTracks = pl,
-                                    onOpen = {
-                                        haptics.tick()
-                                        openedPlaylistId = pl.playlist.id
-                                    },
-                                    onLongPress = {
-                                        haptics.confirm()
-                                        actionsMenuPlaylist = pl
-                                    },
-                                    onPlay = {
-                                        haptics.tap()
-                                        onPlayPlaylist(pl)
-                                    },
+                                    onOpen = onOpenPl,
+                                    onLongPress = onLongPressPl,
+                                    onPlay = onPlayPl,
                                 )
                             }
                         }
@@ -614,7 +642,7 @@ fun LibraryScreen(
 
                     1 -> {
                         if (likedTracks.isEmpty()) {
-                            item(key = "empty_liked") {
+                            item(key = "empty_liked", contentType = "empty_notice") {
                                 EmptyLibraryNotice(strings.emptyFavorites)
                             }
                         } else {
@@ -624,13 +652,32 @@ fun LibraryScreen(
                                 contentType = { "track_row" },
                             ) { track ->
                                 val isCurrent = state.playback.currentTrackId == track.id
+                                val latestTrack by rememberUpdatedState(track)
+                                val onPlayClick = remember(track.id) {
+                                    {
+                                        haptics.tap()
+                                        currentOnPlayTrack(latestTrack, latestLikedTracks, strings.v34.playbackContextLiked)
+                                    }
+                                }
+                                val onLikeClick = remember(track.id) {
+                                    {
+                                        haptics.confirm()
+                                        currentOnToggleLike(latestTrack)
+                                    }
+                                }
+                                val onMoreClick = remember(track.id) {
+                                    {
+                                        haptics.tick()
+                                        currentOnOpenTrackOptions(latestTrack)
+                                    }
+                                }
                                 TrackRowItem(
                                     track = track,
                                     isCurrentTrack = isCurrent,
                                     isPlaying = isCurrent && state.playback.isPlaying,
-                                    onPlayClick = { onPlayTrack(track, likedTracks, strings.v34.playbackContextLiked) },
-                                    onLikeClick = { onToggleLike(track) },
-                                    onMoreClick = { onOpenTrackOptions(track) },
+                                    onPlayClick = onPlayClick,
+                                    onLikeClick = onLikeClick,
+                                    onMoreClick = onMoreClick,
                                 )
                             }
                         }
@@ -638,7 +685,7 @@ fun LibraryScreen(
 
                     2 -> {
                         if (state.subscribedArtists.isNotEmpty()) {
-                            item(key = "subscribed_artists_header") {
+                            item(key = "subscribed_artists_header", contentType = "section_header") {
                                 Text(
                                     text = "${strings.social.subscribedArtistsHeader} (${state.subscribedArtists.size})",
                                     style = MaterialTheme.typography.titleMedium,
@@ -652,27 +699,34 @@ fun LibraryScreen(
                                 key = { "sub_${it.artistKey}" },
                                 contentType = { "subscribed_artist" },
                             ) { sub ->
+                                val latestSub by rememberUpdatedState(sub)
+                                val onOpenSub = remember(sub.artistKey) {
+                                    {
+                                        haptics.tick()
+                                        currentOnOpenSubscribedArtist(latestSub)
+                                    }
+                                }
+                                val onUnsub = remember(sub.artistKey) {
+                                    {
+                                        haptics.tick()
+                                        currentOnToggleUnsubscribeArtist(latestSub)
+                                    }
+                                }
                                 SubscribedArtistRowCard(
                                     subscription = sub,
-                                    onOpen = {
-                                        haptics.tick()
-                                        onOpenSubscribedArtist(sub)
-                                    },
-                                    onToggleUnsubscribe = {
-                                        haptics.tick()
-                                        onToggleUnsubscribeArtist(sub)
-                                    },
+                                    onOpen = onOpenSub,
+                                    onToggleUnsubscribe = onUnsub,
                                 )
                             }
                         } else {
-                            item(key = "empty_subscribed_artists") {
+                            item(key = "empty_subscribed_artists", contentType = "empty_notice") {
                                 EmptyLibraryNotice(strings.social.emptySubscribedArtists)
                             }
                         }
                     }
 
                     3 -> {
-                        item(key = "upload_user_tracks_cta") {
+                        item(key = "upload_user_tracks_cta", contentType = "upload_cta") {
                             Button(
                                 onClick = {
                                     haptics.tap()
@@ -704,7 +758,7 @@ fun LibraryScreen(
                             }
                         }
                         if (userTracks.isEmpty()) {
-                            item(key = "empty_user_tracks") {
+                            item(key = "empty_user_tracks", contentType = "empty_notice") {
                                 EmptyLibraryNotice(strings.emptyMyTracks)
                             }
                         } else {
@@ -714,13 +768,32 @@ fun LibraryScreen(
                                 contentType = { "track_row" },
                             ) { track ->
                                 val isCurrent = state.playback.currentTrackId == track.id
+                                val latestTrack by rememberUpdatedState(track)
+                                val onPlayClick = remember(track.id) {
+                                    {
+                                        haptics.tap()
+                                        currentOnPlayTrack(latestTrack, latestUserTracks, strings.v34.playbackContextMyTracks)
+                                    }
+                                }
+                                val onLikeClick = remember(track.id) {
+                                    {
+                                        haptics.confirm()
+                                        currentOnToggleLike(latestTrack)
+                                    }
+                                }
+                                val onMoreClick = remember(track.id) {
+                                    {
+                                        haptics.tick()
+                                        currentOnOpenTrackOptions(latestTrack)
+                                    }
+                                }
                                 TrackRowItem(
                                     track = track,
                                     isCurrentTrack = isCurrent,
                                     isPlaying = isCurrent && state.playback.isPlaying,
-                                    onPlayClick = { onPlayTrack(track, userTracks, strings.v34.playbackContextMyTracks) },
-                                    onLikeClick = { onToggleLike(track) },
-                                    onMoreClick = { onOpenTrackOptions(track) },
+                                    onPlayClick = onPlayClick,
+                                    onLikeClick = onLikeClick,
+                                    onMoreClick = onMoreClick,
                                 )
                             }
                         }
@@ -935,25 +1008,19 @@ private fun PlaylistArtworkMosaic(
         tracks.filter { !it.coverArtPath.isNullOrBlank() }.distinctBy { it.coverArtPath }.take(4)
     }
 
-    if (!coverArtPath.isNullOrBlank()) {
-        SubcomposeAsyncImage(
+    var customCoverFailed by remember(coverArtPath) { mutableStateOf(false) }
+    if (!coverArtPath.isNullOrBlank() && !customCoverFailed) {
+        AsyncImage(
             model = ImageRequest.Builder(context)
                 .data(coverArtPath)
                 .allowHardware(true)
-                .size(420)
-                .crossfade(true)
+                .size(280)
+                .crossfade(false)
                 .build(),
             contentDescription = null,
             contentScale = ContentScale.Crop,
+            onError = { customCoverFailed = true },
             modifier = modifier.clip(shape),
-            error = {
-                PlaylistArtworkMosaicFallback(
-                    distinctArtTracks = distinctArtTracks,
-                    fallbackTrack = firstTrack,
-                    accentColor = accentColor,
-                    cornerRadius = cornerRadius,
-                )
-            },
         )
     } else {
         Box(modifier = modifier.clip(shape)) {
@@ -1091,8 +1158,18 @@ private fun PlaylistDetailView(
     val listState = rememberLazyListState()
     val density = LocalDensity.current
     val collapseRangePx = remember(density) { with(density) { 290.dp.toPx() } }
-    val scrollOffsetPx by remember {
+    val showBanner by remember(collapseRangePx) {
         derivedStateOf {
+            val offset = if (listState.firstVisibleItemIndex == 0) {
+                listState.firstVisibleItemScrollOffset.toFloat()
+            } else {
+                collapseRangePx
+            }
+            (offset / collapseRangePx).coerceIn(0f, 1f) < 0.99f
+        }
+    }
+    val scrollOffsetProvider = remember(listState, collapseRangePx) {
+        {
             if (listState.firstVisibleItemIndex == 0) {
                 listState.firstVisibleItemScrollOffset.toFloat()
             } else {
@@ -1100,8 +1177,15 @@ private fun PlaylistDetailView(
             }
         }
     }
-    val bannerCollapseFraction by remember {
-        derivedStateOf { (scrollOffsetPx / collapseRangePx).coerceIn(0f, 1f) }
+    val collapseFractionProvider = remember(listState, collapseRangePx) {
+        {
+            val offset = if (listState.firstVisibleItemIndex == 0) {
+                listState.firstVisibleItemScrollOffset.toFloat()
+            } else {
+                collapseRangePx
+            }
+            (offset / collapseRangePx).coerceIn(0f, 1f)
+        }
     }
     val durationLabel = remember(playlistWithTracks.tracks, state.settings.appLanguage, strings) {
         strings.playlistDurationLabel(
@@ -1119,6 +1203,10 @@ private fun PlaylistDetailView(
     val detailTracksCountLabel = remember(playlistWithTracks.tracks.size, strings) {
         strings.settingsV33.libraryPlaylistTracksCount(playlistWithTracks.tracks.size)
     }
+    val currentOnPlayTrack by rememberUpdatedState(onPlayTrack)
+    val currentOnToggleLike by rememberUpdatedState(onToggleLike)
+    val currentOnOpenPlaylistTrackOptions by rememberUpdatedState(onOpenPlaylistTrackOptions)
+    val latestSortedTracks by rememberUpdatedState(sortedTracks)
 
     Box(
         modifier = Modifier
@@ -1126,15 +1214,16 @@ private fun PlaylistDetailView(
             .widthIn(max = 720.dp),
         contentAlignment = Alignment.TopCenter,
     ) {
-        if (bannerCollapseFraction < 0.99f) {
+        if (showBanner) {
             PlaylistFloatingCoverBackdrop(
                 coverArtUrl = backdropCoverUrl,
                 fallbackTrack = backdropTrack,
                 heroAccent = heroTint,
                 heroSecondary = heroSecondary,
                 backgroundColor = backgroundColor,
-                collapseFraction = bannerCollapseFraction,
-                scrollOffsetPx = scrollOffsetPx,
+                collapseFractionProvider = collapseFractionProvider,
+                scrollOffsetProvider = scrollOffsetProvider,
+                isFastScrollingProvider = { listState.isScrollInProgress },
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(430.dp)
@@ -1447,20 +1536,39 @@ private fun PlaylistDetailView(
                     val isCurrent = state.playback.currentTrackId == track.id
                     val canMoveUp = sortMode == PlaylistSortMode.CUSTOM && index > 0
                     val canMoveDown = sortMode == PlaylistSortMode.CUSTOM && index < sortedTracks.lastIndex
+                    val latestTrack by rememberUpdatedState(track)
+                    val latestCanMoveUp by rememberUpdatedState(canMoveUp)
+                    val latestCanMoveDown by rememberUpdatedState(canMoveDown)
+                    val onPlayClick = remember(track.id) {
+                        {
+                            haptics.tap()
+                            currentOnPlayTrack(latestTrack, latestSortedTracks)
+                        }
+                    }
+                    val onLikeClick = remember(track.id) {
+                        {
+                            haptics.confirm()
+                            currentOnToggleLike(latestTrack)
+                        }
+                    }
+                    val onMoreClick = remember(track.id) {
+                        {
+                            haptics.tick()
+                            currentOnOpenPlaylistTrackOptions(latestTrack, latestCanMoveUp, latestCanMoveDown)
+                        }
+                    }
                     TrackRowItem(
                         track = track,
                         isCurrentTrack = isCurrent,
                         isPlaying = isCurrent && state.playback.isPlaying,
                         compact = true,
-                        onPlayClick = { onPlayTrack(track, sortedTracks) },
-                        onLikeClick = { onToggleLike(track) },
-                        onMoreClick = {
-                            onOpenPlaylistTrackOptions(track, canMoveUp, canMoveDown)
-                        },
+                        onPlayClick = onPlayClick,
+                        onLikeClick = onLikeClick,
+                        onMoreClick = onMoreClick,
                     )
                 }
             } else {
-                item(key = "pl_empty") {
+                item(key = "pl_empty", contentType = "empty_notice") {
                     EmptyLibraryNotice(strings.emptyPlaylist)
                 }
             }
@@ -1475,14 +1583,20 @@ private fun PlaylistFloatingCoverBackdrop(
     heroAccent: Color,
     heroSecondary: Color,
     backgroundColor: Color,
-    collapseFraction: Float,
-    scrollOffsetPx: Float,
+    collapseFractionProvider: () -> Float,
+    scrollOffsetProvider: () -> Float,
+    isFastScrollingProvider: () -> Boolean,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
     val isForeground = rememberIsAppForeground()
+    val isUiVisible = com.example.ui.shaders.LocalIsMainUiVisible.current
     val batterySaver = LocalBatterySaverEnabled.current
-    val phase = if (!batterySaver && isForeground && collapseFraction < 0.99f) {
+    val isFastScrolling by remember(isFastScrollingProvider) {
+        derivedStateOf { isFastScrollingProvider() }
+    }
+    var lastPhase by remember { mutableFloatStateOf(0f) }
+    val phase = if (!batterySaver && isForeground && isUiVisible && !isFastScrolling) {
         val infiniteTransition = rememberInfiniteTransition(label = "playlistBannerFloat")
         val animatedPhase by infiniteTransition.animateFloat(
             initialValue = 0f,
@@ -1493,12 +1607,12 @@ private fun PlaylistFloatingCoverBackdrop(
             ),
             label = "playlistBannerPhase",
         )
+        lastPhase = animatedPhase
         animatedPhase
     } else {
-        0f
+        lastPhase
     }
 
-    val visibleAlpha = (1f - collapseFraction).coerceIn(0f, 1f)
     val fadeScrim = remember(backgroundColor) {
         Brush.verticalGradient(
             0.0f to backgroundColor.copy(alpha = 0.08f),
@@ -1511,8 +1625,8 @@ private fun PlaylistFloatingCoverBackdrop(
     Box(
         modifier = modifier
             .graphicsLayer {
-                alpha = visibleAlpha
-                translationY = -scrollOffsetPx * 0.36f
+                alpha = (1f - collapseFractionProvider()).coerceIn(0f, 1f)
+                translationY = -scrollOffsetProvider() * 0.36f
             }
             .clip(RoundedCornerShape(0.dp))
             .testTag("playlist_floating_backdrop"),
@@ -1544,7 +1658,7 @@ private fun PlaylistFloatingCoverBackdrop(
                     model = ImageRequest.Builder(context)
                         .data(coverArtUrl)
                         .allowHardware(true)
-                        .size(320)
+                        .size(140)
                         .crossfade(false)
                         .build(),
                     contentDescription = null,
@@ -1555,7 +1669,7 @@ private fun PlaylistFloatingCoverBackdrop(
                 TrackCoverArtwork(
                     track = fallbackTrack,
                     cornerRadius = 0.dp,
-                    targetSizePx = 280,
+                    targetSizePx = 140,
                     modifier = Modifier.fillMaxSize(),
                 )
             } else {
@@ -1614,24 +1728,19 @@ private fun SubscribedArtistRowCard(
                     .background(accent.copy(alpha = 0.18f)),
                 contentAlignment = Alignment.Center,
             ) {
-                if (!subscription.avatarUrl.isNullOrBlank()) {
-                    SubcomposeAsyncImage(
+                var avatarLoadFailed by remember(subscription.avatarUrl) { mutableStateOf(false) }
+                if (!subscription.avatarUrl.isNullOrBlank() && !avatarLoadFailed) {
+                    AsyncImage(
                         model = ImageRequest.Builder(context)
                             .data(subscription.avatarUrl)
                             .size(160)
-                            .crossfade(true)
+                            .allowHardware(true)
+                            .crossfade(false)
                             .build(),
                         contentDescription = subscription.artistName,
                         contentScale = ContentScale.Crop,
+                        onError = { avatarLoadFailed = true },
                         modifier = Modifier.fillMaxSize(),
-                        error = {
-                            Icon(
-                                imageVector = Icons.Rounded.Person,
-                                contentDescription = null,
-                                tint = accent,
-                                modifier = Modifier.size(24.dp),
-                            )
-                        },
                     )
                 } else {
                     Icon(

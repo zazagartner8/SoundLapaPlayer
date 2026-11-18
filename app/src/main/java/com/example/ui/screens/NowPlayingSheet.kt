@@ -4,6 +4,9 @@ import android.view.LayoutInflater
 import androidx.activity.compose.BackHandler
 import androidx.annotation.OptIn
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.AnimatedVisibilityScope
+import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
@@ -162,6 +165,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 
+@kotlin.OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 fun NowPlayingSheet(
     track: TrackEntity,
@@ -192,6 +196,8 @@ fun NowPlayingSheet(
     onOpenArtistProfile: () -> Unit = {},
     onDragStateChange: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier,
+    sharedTransitionScope: SharedTransitionScope? = null,
+    animatedVisibilityScope: AnimatedVisibilityScope? = null,
 ) {
     val strings = LocalAppStrings.current
     val haptics = rememberSoundLapaHaptics()
@@ -339,8 +345,49 @@ fun NowPlayingSheet(
         onDispose { onDragStateChange(false) }
     }
 
+    val sharedContainerModifier = if (sharedTransitionScope != null && animatedVisibilityScope != null) {
+        with(sharedTransitionScope) {
+            Modifier.sharedBounds(
+                sharedContentState = rememberSharedContentState(key = "player_container_${track.id}"),
+                animatedVisibilityScope = animatedVisibilityScope,
+                enter = fadeIn(tween(220)),
+                exit = fadeOut(tween(180)),
+                boundsTransform = { _, _ -> spring(dampingRatio = 0.86f, stiffness = 360f) },
+                resizeMode = SharedTransitionScope.ResizeMode.RemeasureToBounds,
+            )
+        }
+    } else {
+        Modifier
+    }
+
+    val sharedCoverModifier = if (sharedTransitionScope != null && animatedVisibilityScope != null) {
+        with(sharedTransitionScope) {
+            Modifier.sharedElement(
+                state = rememberSharedContentState(key = "player_cover_${track.id}"),
+                animatedVisibilityScope = animatedVisibilityScope,
+                boundsTransform = { _, _ -> spring(dampingRatio = 0.86f, stiffness = 360f) },
+            )
+        }
+    } else {
+        Modifier
+    }
+
+    val sharedTitleModifier = if (sharedTransitionScope != null && animatedVisibilityScope != null) {
+        with(sharedTransitionScope) {
+            Modifier.sharedBounds(
+                sharedContentState = rememberSharedContentState(key = "player_title_${track.id}"),
+                animatedVisibilityScope = animatedVisibilityScope,
+                boundsTransform = { _, _ -> spring(dampingRatio = 0.86f, stiffness = 360f) },
+                resizeMode = SharedTransitionScope.ResizeMode.ScaleToBounds(),
+            )
+        }
+    } else {
+        Modifier
+    }
+
     Box(
         modifier = modifier
+            .then(sharedContainerModifier)
             .fillMaxSize()
             .graphicsLayer {
                 val y = dragOffsetY.value
@@ -562,7 +609,9 @@ fun NowPlayingSheet(
                                         if (!isVideoModeActive) {
                                             TrackCoverArtwork(
                                                 track = track,
-                                                modifier = Modifier.fillMaxSize(),
+                                                modifier = Modifier
+                                                    .fillMaxSize()
+                                                    .then(sharedCoverModifier),
                                                 cornerRadius = 25.dp,
                                                 targetSizePx = 1080,
                                                 crossfade = true,
@@ -660,7 +709,9 @@ fun NowPlayingSheet(
                                                 color = Color.White,
                                                 maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis,
-                                                modifier = Modifier.weight(1f, fill = false),
+                                                modifier = Modifier
+                                                    .weight(1f, fill = false)
+                                                    .then(sharedTitleModifier),
                                             )
                                         }
                                         Row(
