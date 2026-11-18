@@ -81,6 +81,12 @@ data class ResolvedAudioStream(
     val headers: Map<String, String> = emptyMap(),
 )
 
+enum class VideoStreamSource {
+    SPOTIFY_CANVAS,
+    SPOTIFY_VIDEO,
+    YOUTUBE_MUSIC,
+}
+
 data class ResolvedVideoStream(
     val videoUrl: String,
     val title: String,
@@ -89,7 +95,14 @@ data class ResolvedVideoStream(
     val headers: Map<String, String> = emptyMap(),
     val width: Int = 0,
     val height: Int = 0,
-)
+    val audioUrl: String? = null,
+    val isMuxed: Boolean = false,
+    val isLoopingCanvas: Boolean = false,
+    val sourceKind: VideoStreamSource = VideoStreamSource.YOUTUBE_MUSIC,
+) {
+    val hasAudio: Boolean
+        get() = !isLoopingCanvas && (isMuxed || !audioUrl.isNullOrBlank())
+}
 
 enum class StreamPayloadKind {
     PROGRESSIVE_AUDIO,
@@ -1682,6 +1695,8 @@ object FullStreamResolver {
         artist: String,
         title: String,
         expectedDurationMs: Long = 0L,
+        trackId: String? = null,
+        sourceUri: String? = null,
     ): ResolvedVideoStream? {
         ensureInitialized()
         val cleanTitle = title
@@ -1693,7 +1708,7 @@ object FullStreamResolver {
             .firstOrNull().orEmpty().trim()
         if (cleanTitle.isBlank()) return null
 
-        val cacheKey = "${cleanArtist.lowercase()}|${cleanTitle.lowercase()}"
+        val cacheKey = "${trackId.orEmpty()}|${cleanArtist.lowercase()}|${cleanTitle.lowercase()}"
         val nowMs = System.currentTimeMillis()
         musicVideoCache[cacheKey]?.let { cached ->
             if (cached.expiresAtMs > nowMs) return cached.resolved
@@ -1704,10 +1719,73 @@ object FullStreamResolver {
             musicVideoMissCache.remove(cacheKey)
         }
 
+        val resolved = resolveMusicVideoWithFallback(
+            spotifyLookup = {
+                SpotifyCatalogClient.resolveTrackClip(
+                    artist = artist,
+                    title = cleanTitle,
+                    durationMs = expectedDurationMs,
+                    sourceUri = sourceUri,
+                    trackIdHint = trackId,
+                )?.let { spClip ->
+                    ResolvedVideoStream(
+                        videoUrl = spClip.videoUrl,
+                        title = spClip.title.ifBlank { cleanTitle },
+                        durationMs = spClip.durationMs,
+                        sourcePageUrl = spClip.sourcePageUrl,
+                        headers = spClip.headers,
+                        width = spClip.width,
+                        height = spClip.height,
+                        audioUrl = null,
+                        isMuxed = spClip.isMuxed,
+                        isLoopingCanvas = spClip.isLoopingCanvas,
+                        sourceKind = if (spClip.isLoopingCanvas) {
+                            VideoStreamSource.SPOTIFY_CANVAS
+                        } else {
+                            VideoStreamSource.SPOTIFY_VIDEO
+                        },
+                    )
+                }
+            },
+            youtubeMusicFallback = {
+                findYouTubeMusicOfficialVideoStream(
+                    cleanArtist = cleanArtist,
+                    cleanTitle = cleanTitle,
+                    expectedDurationMs = expectedDurationMs,
+                )
+            },
+        )
+
+        if (resolved != null) {
+            musicVideoCache[cacheKey] = CachedVideoEntry(
+                resolved = resolved,
+                expiresAtMs = System.currentTimeMillis() + 60L * 60L * 1000L,
+            )
+            return resolved
+        }
+
+        musicVideoMissCache[cacheKey] = System.currentTimeMillis() + 10L * 60L * 1000L
+        return null
+    }
+
+    internal inline fun resolveMusicVideoWithFallback(
+        spotifyLookup: () -> ResolvedVideoStream?,
+        youtubeMusicFallback: () -> ResolvedVideoStream?,
+    ): ResolvedVideoStream? {
+        return runCatching { spotifyLookup() }.getOrNull()
+            ?: runCatching { youtubeMusicFallback() }.getOrNull()
+    }
+
+    private fun findYouTubeMusicOfficialVideoStream(
+        cleanArtist: String,
+        cleanTitle: String,
+        expectedDurationMs: Long = 0L,
+    ): ResolvedVideoStream? {
+
         val baseQuery = "$cleanArtist $cleanTitle".trim()
         val mvQuery = "$baseQuery official music video".trim()
 
-        // Search YouTube Music music_videos, YouTube videos, and optional Spotify-verified MV concurrently
+        // Search YouTube Music music_videos first and YouTube videos as fallback concurrently
         val ytmVideosFut = CompletableFuture.supplyAsync {
             runCatching {
                 val extractor = ServiceList.YouTube.getSearchExtractor(baseQuery, listOf("music_videos"), "")
@@ -1720,7 +1798,7 @@ object FullStreamResolver {
                             it.streamType != StreamType.LIVE_STREAM &&
                             it.duration in 30L..900L
                     }
-                    .take(6)
+                    .take(8)
             }.getOrDefault(emptyList())
         }
         val ytVideosFut = CompletableFuture.supplyAsync {
@@ -1741,10 +1819,9 @@ object FullStreamResolver {
 
         val ytmItems = runCatching { ytmVideosFut.get(5, TimeUnit.SECONDS) }.getOrDefault(emptyList())
         val ytItems = runCatching { ytVideosFut.get(5, TimeUnit.SECONDS) }.getOrDefault(emptyList())
-        val candidates = (ytmItems + ytItems).distinctBy { it.url }
+        val candidates = (ytmItems + ytItems).distinctBy { extractYouTubeVideoId(it.url) ?: it.url }
 
         if (candidates.isEmpty()) {
-            musicVideoMissCache[cacheKey] = System.currentTimeMillis() + 10L * 60L * 1000L
             return null
         }
 
@@ -1754,7 +1831,7 @@ object FullStreamResolver {
         val normArtist = cleanArtist.lowercase().replace('ё', 'е').replace(Regex("[^\\p{L}\\p{Nd}]"), "")
         val latinArtist = transliterateToLatin(cleanArtist).replace(Regex("[^a-z0-9]"), "")
         val refLower = "$cleanArtist $cleanTitle".lowercase()
-        val ytmUrlSet = ytmItems.mapNotNullTo(HashSet()) { it.url }
+        val ytmKeySet = ytmItems.mapNotNullTo(HashSet()) { extractYouTubeVideoId(it.url) ?: it.url }
 
         val scoredCandidates = candidates.mapNotNull { item ->
             val nameRaw = item.name.orEmpty()
@@ -1792,8 +1869,9 @@ object FullStreamResolver {
                 }
             }
 
-            val isFromYtmVideos = item.url in ytmUrlSet
-            var s = if (isFromYtmVideos) 160 else 0
+            val candidateKey = extractYouTubeVideoId(item.url) ?: item.url
+            val isFromYtmVideos = candidateKey != null && candidateKey in ytmKeySet
+            var s = if (isFromYtmVideos) 280 else 0
             if (nameLower.contains("official") && (nameLower.contains("video") || nameLower.contains("mv") || nameLower.contains("клип"))) s += 320
             else if (nameLower.contains("music video") || nameLower.contains("клип") || nameLower.contains("official mv")) s += 240
             if (hasTitleExact) s += 200 else if (hasTitleTokens) s += 110
@@ -1803,7 +1881,6 @@ object FullStreamResolver {
 
         val ranked = scoredCandidates.map { it.first }
         if (ranked.isEmpty()) {
-            musicVideoMissCache[cacheKey] = System.currentTimeMillis() + 10L * 60L * 1000L
             return null
         }
 
@@ -1845,8 +1922,19 @@ object FullStreamResolver {
                     val h = Regex("(\\d+)").find(stream.resolution.orEmpty())?.groupValues?.get(1)?.toIntOrNull() ?: 360
                     scoreVideoStreamCandidate(h, stream.codec) + 120
                 }
-            val chosen = videoOnlyMp4 ?: muxedMp4 ?: return null
+            val pairedAudio = sortProgressiveAudioStreams(info.audioStreams)
+                .firstOrNull { stream ->
+                    !stream.content.isNullOrBlank() &&
+                        (stream.format == MediaFormat.M4A || stream.format == MediaFormat.MPEG_4)
+                }
+                ?: sortProgressiveAudioStreams(info.audioStreams).firstOrNull { !it.content.isNullOrBlank() }
+
+            val usingVideoOnly = videoOnlyMp4 != null && (pairedAudio != null || muxedMp4 == null)
+            val chosen = if (usingVideoOnly) videoOnlyMp4 else (muxedMp4 ?: videoOnlyMp4)
+            chosen ?: return null
             val url = chosen.content ?: return null
+            val isMuxed = !usingVideoOnly && chosen === muxedMp4
+            val resolvedAudioUrl = if (isMuxed) null else pairedAudio?.content
             return ResolvedVideoStream(
                 videoUrl = url,
                 title = info.name ?: cand.name ?: cleanTitle,
@@ -1855,6 +1943,10 @@ object FullStreamResolver {
                 headers = mapOf("User-Agent" to userAgentForStreamUrl(url)),
                 width = chosen.width.coerceAtLeast(0),
                 height = chosen.height.coerceAtLeast(0),
+                audioUrl = resolvedAudioUrl,
+                isMuxed = isMuxed,
+                isLoopingCanvas = false,
+                sourceKind = VideoStreamSource.YOUTUBE_MUSIC,
             )
         }
 
@@ -1865,14 +1957,9 @@ object FullStreamResolver {
         for (future in futures) {
             val resolved = runCatching { future.get(6, TimeUnit.SECONDS) }.getOrNull()
             if (resolved != null) {
-                musicVideoCache[cacheKey] = CachedVideoEntry(
-                    resolved = resolved,
-                    expiresAtMs = System.currentTimeMillis() + 60L * 60L * 1000L,
-                )
                 return resolved
             }
         }
-        musicVideoMissCache[cacheKey] = System.currentTimeMillis() + 10L * 60L * 1000L
         return null
     }
 

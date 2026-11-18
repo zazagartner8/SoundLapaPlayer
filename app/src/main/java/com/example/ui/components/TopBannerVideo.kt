@@ -1,10 +1,13 @@
 package com.example.ui.components
 
 import android.graphics.Matrix
+import android.graphics.SurfaceTexture
 import android.net.Uri
 import android.view.TextureView
 import android.view.ViewGroup
 import androidx.annotation.OptIn
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -14,11 +17,14 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
@@ -26,6 +32,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
@@ -36,8 +43,9 @@ import com.example.ui.shaders.LocalIsMainUiVisible
 
 /**
  * Ambient muted looped video banner rendered seamlessly behind the top utility bar.
- * Uses TextureView + explicit CENTER_CROP transform + automatic state recovery so returning
- * after long navigation or off-screen pauses never leaves a blank black/transparent surface.
+ * Uses TextureView + SurfaceTextureListener + explicit CENTER_CROP transform + automatic
+ * decoder/error recovery so returning after long navigation or off-screen pauses never leaves
+ * a blank surface.
  */
 @OptIn(UnstableApi::class)
 @Composable
@@ -56,6 +64,7 @@ fun TopBannerVideo(
 
     val videoWidthState = remember { mutableIntStateOf(0) }
     val videoHeightState = remember { mutableIntStateOf(0) }
+    var attachedTextureView by remember { mutableStateOf<TextureView?>(null) }
 
     val exoPlayer = remember(context) {
         ExoPlayer.Builder(context).build().apply {
@@ -92,11 +101,15 @@ fun TopBannerVideo(
     fun ensurePlayingBanner() {
         if (latestBatterySaver || !latestIsUiVisible) return
         if (!lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) return
-        if (exoPlayer.playbackState == Player.STATE_IDLE || exoPlayer.playbackState == Player.STATE_ENDED) {
+        if (exoPlayer.playerError != null ||
+            exoPlayer.playbackState == Player.STATE_IDLE ||
+            exoPlayer.playbackState == Player.STATE_ENDED
+        ) {
             val videoUri = Uri.parse("android.resource://${context.packageName}/${R.raw.banner_soundlap}")
             exoPlayer.setMediaItem(MediaItem.fromUri(videoUri))
             exoPlayer.prepare()
         }
+        exoPlayer.volume = 0f
         exoPlayer.playWhenReady = true
         if (!exoPlayer.isPlaying) {
             exoPlayer.play()
@@ -114,6 +127,7 @@ fun TopBannerVideo(
 
     DisposableEffect(exoPlayer) {
         onDispose {
+            attachedTextureView = null
             exoPlayer.release()
         }
     }
@@ -124,6 +138,19 @@ fun TopBannerVideo(
                 if (videoSize.width > 0 && videoSize.height > 0) {
                     videoWidthState.intValue = videoSize.width
                     videoHeightState.intValue = videoSize.height
+                    attachedTextureView?.let { tv ->
+                        applyCenterCropMatrix(tv, videoSize.width, videoSize.height)
+                    }
+                }
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                if (!latestBatterySaver && latestIsUiVisible) {
+                    val videoUri = Uri.parse("android.resource://${context.packageName}/${R.raw.banner_soundlap}")
+                    exoPlayer.setMediaItem(MediaItem.fromUri(videoUri))
+                    exoPlayer.prepare()
+                    exoPlayer.playWhenReady = true
+                    exoPlayer.play()
                 }
             }
 
@@ -174,6 +201,46 @@ fun TopBannerVideo(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.MATCH_PARENT,
                         )
+                        surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                            override fun onSurfaceTextureAvailable(
+                                surface: SurfaceTexture,
+                                width: Int,
+                                height: Int,
+                            ) {
+                                if (attachedTextureView !== this@apply) {
+                                    exoPlayer.setVideoTextureView(this@apply)
+                                    attachedTextureView = this@apply
+                                }
+                                val vw = if (videoWidthState.intValue > 0) videoWidthState.intValue else exoPlayer.videoSize.width
+                                val vh = if (videoHeightState.intValue > 0) videoHeightState.intValue else exoPlayer.videoSize.height
+                                if (vw > 0 && vh > 0) {
+                                    applyCenterCropMatrix(this@apply, vw, vh)
+                                }
+                                ensurePlayingBanner()
+                            }
+
+                            override fun onSurfaceTextureSizeChanged(
+                                surface: SurfaceTexture,
+                                width: Int,
+                                height: Int,
+                            ) {
+                                val vw = if (videoWidthState.intValue > 0) videoWidthState.intValue else exoPlayer.videoSize.width
+                                val vh = if (videoHeightState.intValue > 0) videoHeightState.intValue else exoPlayer.videoSize.height
+                                if (vw > 0 && vh > 0) {
+                                    applyCenterCropMatrix(this@apply, vw, vh)
+                                }
+                            }
+
+                            override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
+                                if (attachedTextureView === this@apply) {
+                                    exoPlayer.clearVideoTextureView(this@apply)
+                                    attachedTextureView = null
+                                }
+                                return true
+                            }
+
+                            override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
+                        }
                         addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
                             val tv = v as TextureView
                             val vw = if (videoWidthState.intValue > 0) videoWidthState.intValue else exoPlayer.videoSize.width
@@ -183,35 +250,30 @@ fun TopBannerVideo(
                             }
                         }
                         exoPlayer.setVideoTextureView(this)
+                        attachedTextureView = this
                     }
                 },
                 update = { view ->
-                    exoPlayer.setVideoTextureView(view)
-                    val vw = if (videoWidthState.intValue > 0) videoWidthState.intValue else exoPlayer.videoSize.width
-                    val vh = if (videoHeightState.intValue > 0) videoHeightState.intValue else exoPlayer.videoSize.height
-                    if (vw > 0 && vh > 0) {
-                        applyCenterCropMatrix(view, vw, vh)
+                    if (view.isAvailable) {
+                        if (attachedTextureView !== view) {
+                            exoPlayer.setVideoTextureView(view)
+                            attachedTextureView = view
+                        }
+                        val vw = if (videoWidthState.intValue > 0) videoWidthState.intValue else exoPlayer.videoSize.width
+                        val vh = if (videoHeightState.intValue > 0) videoHeightState.intValue else exoPlayer.videoSize.height
+                        if (vw > 0 && vh > 0) {
+                            applyCenterCropMatrix(view, vw, vh)
+                        }
+                        ensurePlayingBanner()
                     }
-                    ensurePlayingBanner()
                 },
                 onRelease = { view ->
-                    exoPlayer.clearVideoTextureView(view)
+                    if (attachedTextureView === view) {
+                        exoPlayer.clearVideoTextureView(view)
+                        attachedTextureView = null
+                    }
                 },
                 modifier = Modifier.fillMaxSize(),
-            )
-        } else {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(
-                        Brush.horizontalGradient(
-                            listOf(
-                                bg,
-                                accent.copy(alpha = if (isDark) 0.28f else 0.18f),
-                                bg,
-                            ),
-                        ),
-                    ),
             )
         }
 

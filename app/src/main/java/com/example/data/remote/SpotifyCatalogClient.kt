@@ -11,13 +11,28 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.ConnectionPool
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.ByteArrayOutputStream
 import java.net.URLEncoder
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
+
+data class SpotifyTrackClipAsset(
+    val videoUrl: String,
+    val title: String,
+    val durationMs: Long,
+    val sourcePageUrl: String,
+    val headers: Map<String, String> = emptyMap(),
+    val width: Int = 0,
+    val height: Int = 0,
+    val isLoopingCanvas: Boolean = false,
+    val isMuxed: Boolean = false,
+)
 
 data class SpotifyArtistInfo(
     val id: String,
@@ -63,8 +78,24 @@ object SpotifyCatalogClient {
     private val trackArtworkCache = ConcurrentHashMap<String, String>()
     private val spotifyTrackIdCache = ConcurrentHashMap<String, String>()
     private val spotifyTrackIdMissCache = ConcurrentHashMap<String, Long>()
+    private val spotifyClipCache = ConcurrentHashMap<String, Pair<Long, SpotifyTrackClipAsset>>()
+    private val spotifyClipMissCache = ConcurrentHashMap<String, Long>()
     private val spotify22Regex = Regex("^[A-Za-z0-9]{22}$")
     private val spotifyTrackUrlRegex = Regex("open\\.spotify\\.com/(?:intl-[a-z]{2}/)?track/([A-Za-z0-9]{22})")
+    private const val SPOTIFY_CLIP_CACHE_TTL_MS = 60L * 60L * 1000L
+    private const val SPOTIFY_CLIP_MISS_TTL_MS = 5L * 60L * 1000L
+
+    @Volatile
+    private var cachedAnonAccessToken: String? = null
+    @Volatile
+    private var cachedAnonTokenExpiryMs: Long = 0L
+    @Volatile
+    private var cachedAnonClientId: String? = null
+    @Volatile
+    private var cachedClientToken: String? = null
+    @Volatile
+    private var cachedClientTokenExpiryMs: Long = 0L
+    private val spotifyTokenLock = Any()
 
     fun findCachedTrackArtwork(artist: String, title: String): String? {
         val titleKey = normalizeToken(title)
@@ -116,6 +147,539 @@ object SpotifyCatalogClient {
 
         spotifyTrackIdMissCache[key] = System.currentTimeMillis() + 10 * 60_000L
         return null
+    }
+
+    fun resolveTrackClip(
+        artist: String,
+        title: String,
+        durationMs: Long = 0L,
+        sourceUri: String? = null,
+        trackIdHint: String? = null,
+    ): SpotifyTrackClipAsset? {
+        val hintSpId = trackIdHint
+            ?.removePrefix("sp_")
+            ?.trim()
+            ?.takeIf { spotify22Regex.matches(it) }
+        val spotifyTrackId = hintSpId
+            ?: findSpotifyTrackId(
+                artist = artist,
+                title = title,
+                durationMs = durationMs,
+                sourceUri = sourceUri,
+            )
+            ?: return null
+        return resolveSpotifyTrackClip(
+            spotifyTrackId = spotifyTrackId,
+            titleHint = title,
+            trackDurationMs = durationMs,
+        )
+    }
+
+    fun resolveSpotifyTrackClip(
+        spotifyTrackId: String,
+        titleHint: String = "",
+        trackDurationMs: Long = 0L,
+    ): SpotifyTrackClipAsset? {
+        val cleanId = spotifyTrackId.trim()
+        if (!spotify22Regex.matches(cleanId)) return null
+
+        val now = System.currentTimeMillis()
+        spotifyClipCache[cleanId]?.let { (expiresAt, asset) ->
+            if (now < expiresAt) return asset
+            spotifyClipCache.remove(cleanId)
+        }
+        spotifyClipMissCache[cleanId]?.let { missUntil ->
+            if (now < missUntil) return null
+            spotifyClipMissCache.remove(cleanId)
+        }
+
+        val pageUrl = "https://open.spotify.com/track/$cleanId"
+        val resolvedTitle = titleHint.trim().ifBlank { "Spotify Clip" }
+
+        // 1. Query Spotify Track SSR HTML for session token, video clip, or Canvas metadata
+        val ssrHtml = httpGet(url = pageUrl, userAgent = SSR_CURL_USER_AGENT)
+        var resolved: SpotifyTrackClipAsset? = null
+        if (!ssrHtml.isNullOrBlank()) {
+            cacheSessionTokenFromHtml(ssrHtml)
+            resolved = parseTrackClipFromTrackHtml(
+                html = ssrHtml,
+                spotifyTrackId = cleanId,
+                titleHint = resolvedTitle,
+                trackDurationMs = trackDurationMs,
+                pageUrl = pageUrl,
+            )
+        }
+
+        // 2. Try Spotify Embed JSON + Canvaz Protobuf gateway in parallel if SSR had no clip
+        if (resolved == null) {
+            val embedFuture = CompletableFuture.supplyAsync {
+                httpGet(
+                    url = "https://open.spotify.com/embed/track/$cleanId",
+                    userAgent = FullStreamResolver.DEFAULT_BROWSER_USER_AGENT,
+                )?.let { embedHtml ->
+                    parseTrackClipFromEmbedHtml(
+                        html = embedHtml,
+                        titleHint = resolvedTitle,
+                        trackDurationMs = trackDurationMs,
+                        pageUrl = pageUrl,
+                    )
+                }
+            }
+            val canvazFuture = CompletableFuture.supplyAsync {
+                fetchSpotifyCanvasViaGateway(
+                    spotifyTrackId = cleanId,
+                    titleHint = resolvedTitle,
+                    pageUrl = pageUrl,
+                )
+            }
+            val embedAsset = runCatching { embedFuture.get(4, TimeUnit.SECONDS) }.getOrNull()
+            val canvazAsset = runCatching { canvazFuture.get(4, TimeUnit.SECONDS) }.getOrNull()
+            resolved = when {
+                embedAsset != null && !embedAsset.isLoopingCanvas -> embedAsset
+                canvazAsset != null -> canvazAsset
+                else -> embedAsset
+            }
+        }
+
+        if (resolved != null) {
+            spotifyClipCache[cleanId] = (System.currentTimeMillis() + SPOTIFY_CLIP_CACHE_TTL_MS) to resolved
+            return resolved
+        }
+
+        spotifyClipMissCache[cleanId] = System.currentTimeMillis() + SPOTIFY_CLIP_MISS_TTL_MS
+        return null
+    }
+
+    private fun cacheSessionTokenFromHtml(html: String) {
+        val rawSession = Regex(
+            """<script[^>]*id=["']session["'][^>]*>(.*?)</script>""",
+            setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE),
+        ).find(html)?.groupValues?.get(1)?.trim() ?: return
+
+        runCatching {
+            val obj = jsonParser.parseToJsonElement(rawSession).jsonObject
+            val token = obj["accessToken"]?.jsonPrimitive?.contentOrNull?.trim()
+                ?.takeIf { it.isNotBlank() } ?: return
+            val clientId = obj["clientId"]?.jsonPrimitive?.contentOrNull?.trim()
+                ?.takeIf { it.isNotBlank() }
+            val expiresAt = obj["accessTokenExpirationTimestampMs"]?.jsonPrimitive?.contentOrNull?.toLongOrNull()
+                ?: (System.currentTimeMillis() + 20 * 60_000L)
+            synchronized(spotifyTokenLock) {
+                cachedAnonAccessToken = token
+                cachedAnonTokenExpiryMs = expiresAt
+                if (clientId != null) cachedAnonClientId = clientId
+            }
+        }
+    }
+
+    private fun ensureAnonymousSpotifyTokens(): Pair<String, String?>? {
+        val now = System.currentTimeMillis()
+        synchronized(spotifyTokenLock) {
+            val tok = cachedAnonAccessToken
+            val exp = cachedAnonTokenExpiryMs
+            if (!tok.isNullOrBlank() && now + 30_000L < exp) {
+                val cToken = cachedClientToken?.takeIf { now + 30_000L < cachedClientTokenExpiryMs }
+                if (cToken != null) return tok to cToken
+            }
+        }
+
+        var accessToken: String? = null
+        var clientId: String? = null
+        synchronized(spotifyTokenLock) {
+            if (!cachedAnonAccessToken.isNullOrBlank() && now + 30_000L < cachedAnonTokenExpiryMs) {
+                accessToken = cachedAnonAccessToken
+                clientId = cachedAnonClientId
+            }
+        }
+
+        if (accessToken == null) {
+            val tokenJson = httpGet(
+                url = "https://open.spotify.com/get_access_token?reason=transport&productType=web_player",
+                userAgent = FullStreamResolver.DEFAULT_BROWSER_USER_AGENT,
+            )
+            if (!tokenJson.isNullOrBlank()) {
+                runCatching {
+                    val obj = jsonParser.parseToJsonElement(tokenJson).jsonObject
+                    val tok = obj["accessToken"]?.jsonPrimitive?.contentOrNull?.trim()
+                        ?.takeIf { it.isNotBlank() }
+                    val cid = obj["clientId"]?.jsonPrimitive?.contentOrNull?.trim()
+                        ?.takeIf { it.isNotBlank() }
+                    val exp = obj["accessTokenExpirationTimestampMs"]?.jsonPrimitive?.contentOrNull?.toLongOrNull()
+                        ?: (System.currentTimeMillis() + 20 * 60_000L)
+                    if (tok != null) {
+                        synchronized(spotifyTokenLock) {
+                            cachedAnonAccessToken = tok
+                            cachedAnonTokenExpiryMs = exp
+                            if (cid != null) cachedAnonClientId = cid
+                        }
+                        accessToken = tok
+                        clientId = cid ?: clientId
+                    }
+                }
+            }
+        }
+
+        val finalToken = accessToken ?: return null
+        val cidForClientToken = clientId ?: return finalToken to null
+
+        var clientToken: String? = null
+        synchronized(spotifyTokenLock) {
+            if (!cachedClientToken.isNullOrBlank() && now + 30_000L < cachedClientTokenExpiryMs) {
+                clientToken = cachedClientToken
+            }
+        }
+        if (clientToken == null) {
+            val payload = """{"client_data":{"client_version":"1.2.46.25.g7f189073","client_id":"$cidForClientToken","js_sdk_data":{"device_brand":"unknown","device_model":"unknown","os":"linux","os_version":"unknown","device_id":"$cidForClientToken","device_type":"computer"}}}"""
+            val ctResp = runCatching {
+                val req = Request.Builder()
+                    .url("https://clienttoken.spotify.com/v1/clienttoken")
+                    .header("User-Agent", FullStreamResolver.DEFAULT_BROWSER_USER_AGENT)
+                    .header("Accept", "application/json")
+                    .post(payload.toRequestBody("application/json; charset=utf-8".toMediaType()))
+                    .build()
+                client.newCall(req).execute().use { resp ->
+                    if (resp.isSuccessful) resp.body?.string() else null
+                }
+            }.getOrNull()
+            if (!ctResp.isNullOrBlank()) {
+                runCatching {
+                    val root = jsonParser.parseToJsonElement(ctResp).jsonObject
+                    val granted = root["granted_token"]?.jsonObject
+                    val tokenVal = granted?.get("token")?.jsonPrimitive?.contentOrNull?.trim()
+                        ?.takeIf { it.isNotBlank() }
+                    val expiresAfterSec = granted?.get("expires_after_seconds")?.jsonPrimitive?.contentOrNull?.toLongOrNull()
+                        ?: 3_600L
+                    if (tokenVal != null) {
+                        synchronized(spotifyTokenLock) {
+                            cachedClientToken = tokenVal
+                            cachedClientTokenExpiryMs = System.currentTimeMillis() + expiresAfterSec * 1_000L
+                        }
+                        clientToken = tokenVal
+                    }
+                }
+            }
+        }
+        return finalToken to clientToken
+    }
+
+    private fun fetchSpotifyCanvasViaGateway(
+        spotifyTrackId: String,
+        titleHint: String,
+        pageUrl: String,
+    ): SpotifyTrackClipAsset? {
+        val (accessToken, clientToken) = ensureAnonymousSpotifyTokens() ?: return null
+        val protoBody = encodeCanvazRequestProtobuf("spotify:track:$spotifyTrackId")
+        val responseBytes = runCatching {
+            val builder = Request.Builder()
+                .url("https://spclient.wg.spotify.com/canvaz-cache/v0/canvases")
+                .header("Accept", "application/protobuf")
+                .header("Content-Type", "application/protobuf")
+                .header("Authorization", "Bearer $accessToken")
+                .header("User-Agent", "Spotify/8.9.0 Android/34")
+                .post(protoBody.toRequestBody("application/protobuf".toMediaType()))
+            if (!clientToken.isNullOrBlank()) {
+                builder.header("Client-Token", clientToken)
+            }
+            client.newCall(builder.build()).execute().use { resp ->
+                if (!resp.isSuccessful) return@runCatching null
+                resp.body?.bytes()
+            }
+        }.getOrNull() ?: return null
+
+        val canvasUrl = extractProtobufVideoUrls(responseBytes).firstOrNull() ?: return null
+        return SpotifyTrackClipAsset(
+            videoUrl = canvasUrl,
+            title = titleHint,
+            durationMs = 8_000L,
+            sourcePageUrl = pageUrl,
+            headers = mapOf("User-Agent" to FullStreamResolver.DEFAULT_BROWSER_USER_AGENT),
+            width = 720,
+            height = 1280,
+            isLoopingCanvas = true,
+            isMuxed = false,
+        )
+    }
+
+    internal fun encodeCanvazRequestProtobuf(trackUri: String): ByteArray {
+        val uriBytes = trackUri.toByteArray(Charsets.UTF_8)
+        val entityOut = ByteArrayOutputStream()
+        writeProtoTag(entityOut, fieldNumber = 1, wireType = 2)
+        writeProtoVarint(entityOut, uriBytes.size.toLong())
+        entityOut.write(uriBytes)
+        val entityBytes = entityOut.toByteArray()
+
+        val reqOut = ByteArrayOutputStream()
+        writeProtoTag(reqOut, fieldNumber = 1, wireType = 2)
+        writeProtoVarint(reqOut, entityBytes.size.toLong())
+        reqOut.write(entityBytes)
+        return reqOut.toByteArray()
+    }
+
+    private fun writeProtoTag(out: ByteArrayOutputStream, fieldNumber: Int, wireType: Int) {
+        writeProtoVarint(out, ((fieldNumber shl 3) or wireType).toLong())
+    }
+
+    private fun writeProtoVarint(out: ByteArrayOutputStream, value: Long) {
+        var v = value
+        while ((v and -128L) != 0L) {
+            out.write(((v and 0x7FL) or 0x80L).toInt())
+            v = v ushr 7
+        }
+        out.write((v and 0x7FL).toInt())
+    }
+
+    internal fun extractProtobufVideoUrls(data: ByteArray): List<String> {
+        val found = LinkedHashSet<String>()
+        fun scan(bytes: ByteArray, depth: Int) {
+            if (depth > 5 || bytes.isEmpty()) return
+            var idx = 0
+            while (idx < bytes.size) {
+                val (tag, afterTag) = readProtoVarint(bytes, idx) ?: return
+                val wireType = (tag and 0x07L).toInt()
+                idx = afterTag
+                when (wireType) {
+                    0 -> {
+                        val (_, next) = readProtoVarint(bytes, idx) ?: return
+                        idx = next
+                    }
+                    1 -> {
+                        if (idx + 8 > bytes.size) return
+                        idx += 8
+                    }
+                    2 -> {
+                        val (lenLong, start) = readProtoVarint(bytes, idx) ?: return
+                        val len = lenLong.toInt()
+                        if (len < 0 || start + len > bytes.size) return
+                        val slice = bytes.copyOfRange(start, start + len)
+                        idx = start + len
+                        if (slice.isNotEmpty()) {
+                            val asText = runCatching { String(slice, Charsets.UTF_8) }.getOrNull().orEmpty()
+                            val trimmed = asText.trim()
+                            if (trimmed.startsWith("https://") &&
+                                (trimmed.contains("canvaz.scdn.co", ignoreCase = true) ||
+                                    trimmed.contains(".mp4", ignoreCase = true))
+                            ) {
+                                found += trimmed
+                            } else {
+                                scan(slice, depth + 1)
+                            }
+                        }
+                    }
+                    5 -> {
+                        if (idx + 4 > bytes.size) return
+                        idx += 4
+                    }
+                    else -> return
+                }
+            }
+        }
+        scan(data, 0)
+        return found.sortedByDescending { it.contains("canvaz.scdn.co", ignoreCase = true) }
+    }
+
+    private fun readProtoVarint(bytes: ByteArray, startIdx: Int): Pair<Long, Int>? {
+        var idx = startIdx
+        var result = 0L
+        var shift = 0
+        while (idx < bytes.size && shift < 64) {
+            val b = bytes[idx].toInt() and 0xFF
+            idx++
+            result = result or ((b and 0x7F).toLong() shl shift)
+            if ((b and 0x80) == 0) {
+                return result to idx
+            }
+            shift += 7
+        }
+        return null
+    }
+
+    private fun parseTrackClipFromTrackHtml(
+        html: String,
+        spotifyTrackId: String,
+        titleHint: String,
+        trackDurationMs: Long,
+        pageUrl: String,
+    ): SpotifyTrackClipAsset? {
+        val rawBase64 = Regex(
+            """<script[^>]*id=["']initialState["'][^>]*>(.*?)</script>""",
+            setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE),
+        ).find(html)?.groupValues?.get(1)?.trim()
+
+        if (!rawBase64.isNullOrBlank()) {
+            val jsonText = runCatching { decodeBase64ToUtf8(rawBase64) }.getOrNull()
+            if (!jsonText.isNullOrBlank()) {
+                parseTrackClipFromInitialStateJson(
+                    jsonText = jsonText,
+                    spotifyTrackId = spotifyTrackId,
+                    titleHint = titleHint,
+                    trackDurationMs = trackDurationMs,
+                    pageUrl = pageUrl,
+                )?.let { return it }
+            }
+        }
+
+        // Direct fallback scan on HTML meta tags or inline canvaz MP4 links
+        val metaVideo = extractMetaContent(html, "og:video")
+            ?: extractMetaContent(html, "twitter:player:stream")
+        if (!metaVideo.isNullOrBlank() && metaVideo.startsWith("https://") &&
+            (metaVideo.contains(".mp4", ignoreCase = true) || metaVideo.contains(".m3u8", ignoreCase = true))
+        ) {
+            val isCanvas = metaVideo.contains("canvaz.scdn.co", ignoreCase = true) ||
+                metaVideo.contains("cnvs", ignoreCase = true)
+            return SpotifyTrackClipAsset(
+                videoUrl = metaVideo,
+                title = titleHint,
+                durationMs = if (isCanvas) 8_000L else trackDurationMs.coerceAtLeast(30_000L),
+                sourcePageUrl = pageUrl,
+                headers = mapOf("User-Agent" to FullStreamResolver.DEFAULT_BROWSER_USER_AGENT),
+                width = if (isCanvas) 720 else 1280,
+                height = if (isCanvas) 1280 else 720,
+                isLoopingCanvas = isCanvas,
+                isMuxed = !isCanvas,
+            )
+        }
+
+        val canvazInline = Regex("""https://canvaz\.scdn\.co/[^\s"'<>]+?\.mp4(?:\?[^\s"'<>]*)?""")
+            .find(html)?.value
+        if (!canvazInline.isNullOrBlank()) {
+            return SpotifyTrackClipAsset(
+                videoUrl = canvazInline,
+                title = titleHint,
+                durationMs = 8_000L,
+                sourcePageUrl = pageUrl,
+                headers = mapOf("User-Agent" to FullStreamResolver.DEFAULT_BROWSER_USER_AGENT),
+                width = 720,
+                height = 1280,
+                isLoopingCanvas = true,
+                isMuxed = false,
+            )
+        }
+        return null
+    }
+
+    internal fun parseTrackClipFromInitialStateJson(
+        jsonText: String,
+        spotifyTrackId: String,
+        titleHint: String,
+        trackDurationMs: Long,
+        pageUrl: String = "https://open.spotify.com/track/$spotifyTrackId",
+    ): SpotifyTrackClipAsset? {
+        return runCatching {
+            val root = jsonParser.parseToJsonElement(jsonText)
+            var fullVideoUrl: String? = null
+            var fullVideoDurationMs = 0L
+            var fullVideoWidth = 0
+            var fullVideoHeight = 0
+            var canvasUrl: String? = null
+            var canvasWidth = 720
+            var canvasHeight = 1280
+
+            fun walk(node: kotlinx.serialization.json.JsonElement, keyHint: String = "", depth: Int = 0) {
+                if (depth > 14) return
+                when (node) {
+                    is JsonObject -> {
+                        val canvasObj = node["canvas"] as? JsonObject
+                        val directCanvasUrl = canvasObj?.get("url")?.jsonPrimitive?.contentOrNull?.trim()
+                            ?.takeIf { it.startsWith("https://") }
+                        if (directCanvasUrl != null && canvasUrl == null) {
+                            canvasUrl = directCanvasUrl
+                        }
+                        for ((k, v) in node) {
+                            val kl = k.lowercase()
+                            if (v is kotlinx.serialization.json.JsonPrimitive && v.isString) {
+                                val str = v.content.trim()
+                                if (str.startsWith("https://")) {
+                                    when {
+                                        str.contains("canvaz.scdn.co", ignoreCase = true) ||
+                                            (kl.contains("canvas") && str.contains(".mp4", ignoreCase = true)) -> {
+                                            if (canvasUrl == null) canvasUrl = str
+                                        }
+                                        (kl.contains("video") || keyHint.contains("video") || keyHint.contains("musicvideo")) &&
+                                            (str.contains(".mp4", ignoreCase = true) || str.contains(".m3u8", ignoreCase = true)) &&
+                                            !str.contains("canvaz.scdn.co", ignoreCase = true) -> {
+                                            if (fullVideoUrl == null) {
+                                                fullVideoUrl = str
+                                                val dur = (node["duration"] as? JsonObject)
+                                                    ?.get("totalMilliseconds")?.jsonPrimitive?.contentOrNull?.toLongOrNull()
+                                                    ?: node["durationMs"]?.jsonPrimitive?.contentOrNull?.toLongOrNull()
+                                                    ?: 0L
+                                                if (dur > 0L) fullVideoDurationMs = dur
+                                                val w = node["width"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0
+                                                val h = node["height"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0
+                                                if (w > 0 && h > 0) {
+                                                    fullVideoWidth = w
+                                                    fullVideoHeight = h
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                walk(v, kl, depth + 1)
+                            }
+                        }
+                    }
+                    is JsonArray -> node.forEach { walk(it, keyHint, depth + 1) }
+                    else -> Unit
+                }
+            }
+
+            walk(root)
+
+            val chosenVideo = fullVideoUrl
+            if (!chosenVideo.isNullOrBlank()) {
+                val resolvedDur = fullVideoDurationMs.takeIf { it > 0L }
+                    ?: trackDurationMs.takeIf { it > 0L }
+                    ?: 180_000L
+                return@runCatching SpotifyTrackClipAsset(
+                    videoUrl = chosenVideo,
+                    title = titleHint,
+                    durationMs = resolvedDur,
+                    sourcePageUrl = pageUrl,
+                    headers = mapOf("User-Agent" to FullStreamResolver.DEFAULT_BROWSER_USER_AGENT),
+                    width = fullVideoWidth.takeIf { it > 0 } ?: 1280,
+                    height = fullVideoHeight.takeIf { it > 0 } ?: 720,
+                    isLoopingCanvas = false,
+                    isMuxed = true,
+                )
+            }
+
+            val chosenCanvas = canvasUrl
+            if (!chosenCanvas.isNullOrBlank()) {
+                return@runCatching SpotifyTrackClipAsset(
+                    videoUrl = chosenCanvas,
+                    title = titleHint,
+                    durationMs = 8_000L,
+                    sourcePageUrl = pageUrl,
+                    headers = mapOf("User-Agent" to FullStreamResolver.DEFAULT_BROWSER_USER_AGENT),
+                    width = canvasWidth,
+                    height = canvasHeight,
+                    isLoopingCanvas = true,
+                    isMuxed = false,
+                )
+            }
+            null
+        }.getOrNull()
+    }
+
+    private fun parseTrackClipFromEmbedHtml(
+        html: String,
+        titleHint: String,
+        trackDurationMs: Long,
+        pageUrl: String,
+    ): SpotifyTrackClipAsset? {
+        val nextData = Regex(
+            """<script[^>]*id=["']__NEXT_DATA__["'][^>]*>(.*?)</script>""",
+            setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE),
+        ).find(html)?.groupValues?.get(1)?.trim() ?: return null
+
+        return parseTrackClipFromInitialStateJson(
+            jsonText = nextData,
+            spotifyTrackId = "",
+            titleHint = titleHint,
+            trackDurationMs = trackDurationMs,
+            pageUrl = pageUrl,
+        )
     }
 
     private fun resolveSpotifyIdViaOdesli(platformUrl: String): String? {

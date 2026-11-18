@@ -108,10 +108,26 @@ class SoundLapaPlaybackService : MediaSessionService() {
     private var appAudioFocusModeBuilt: AudioFocusMode? = null
     private var isDuckedByFocus: Boolean = false
     private var pausedByFocusLoss: Boolean = false
+    @Volatile
+    private var clipAudioMuteOverride: Boolean = false
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private val activeNetworkResolutions = AtomicInteger(0)
+
+    private fun desiredPrimaryVolume(): Float = when {
+        clipAudioMuteOverride -> 0f
+        isDuckedByFocus && currentFocusMode == AudioFocusMode.DUCK -> 0.25f
+        else -> 1f
+    }
+
+    private fun applyClipAudioMuteOverrideSync(muted: Boolean) {
+        clipAudioMuteOverride = muted
+        if (muted && crossfadeJob?.isActive == true) {
+            cancelCrossfade(restorePrimaryVolume = false)
+        }
+        activePlayer?.volume = desiredPrimaryVolume()
+    }
 
     private val appAudioFocusListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
         when (currentFocusMode) {
@@ -119,7 +135,7 @@ class SoundLapaPlaybackService : MediaSessionService() {
                 isDuckedByFocus = false
                 pausedByFocusLoss = false
                 if (crossfadeJob?.isActive != true) {
-                    activePlayer?.volume = 1f
+                    activePlayer?.volume = desiredPrimaryVolume()
                 }
                 activePlayer?.let { updateAudioFocusTelemetry(it, it.playbackSuppressionReason) }
             }
@@ -129,7 +145,7 @@ class SoundLapaPlaybackService : MediaSessionService() {
                         isDuckedByFocus = false
                         pausedByFocusLoss = false
                         if (crossfadeJob?.isActive != true) {
-                            activePlayer?.volume = 1f
+                            activePlayer?.volume = desiredPrimaryVolume()
                         }
                         activePlayer?.let { updateAudioFocusTelemetry(it, it.playbackSuppressionReason) }
                     }
@@ -137,7 +153,7 @@ class SoundLapaPlaybackService : MediaSessionService() {
                     AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK,
                     -> {
                         isDuckedByFocus = true
-                        activePlayer?.volume = 0.25f
+                        activePlayer?.volume = if (clipAudioMuteOverride) 0f else 0.25f
                         _audioFocusStatus.value = AudioFocusUiStatus.DUCKING
                     }
                     AudioManager.AUDIOFOCUS_LOSS -> {
@@ -158,7 +174,7 @@ class SoundLapaPlaybackService : MediaSessionService() {
                         val player = activePlayer
                         if (player != null) {
                             if (crossfadeJob?.isActive != true) {
-                                player.volume = 1f
+                                player.volume = desiredPrimaryVolume()
                             }
                             if (shouldResume) {
                                 player.playWhenReady = true
@@ -249,9 +265,7 @@ class SoundLapaPlaybackService : MediaSessionService() {
             val id = mediaItem?.mediaId
             if (!isTransitioningSwap && crossfadeJob?.isActive != true) {
                 silenceStandbyDecksSync(exceptDeck = player)
-                if (!isDuckedByFocus) {
-                    player.volume = 1f
-                }
+                player.volume = desiredPrimaryVolume()
             }
             if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED ||
                 reason == Player.MEDIA_ITEM_TRANSITION_REASON_SEEK
@@ -367,6 +381,24 @@ class SoundLapaPlaybackService : MediaSessionService() {
         mediaSession = MediaSession.Builder(this, playerA)
             .setSessionActivity(sessionActivityPendingIntent)
             .setCallback(object : MediaSession.Callback {
+                override fun onPlayerCommandRequest(
+                    session: MediaSession,
+                    controller: MediaSession.ControllerInfo,
+                    playerCommand: Int,
+                ): Int {
+                    if (playerCommand == Player.COMMAND_SET_MEDIA_ITEM ||
+                        playerCommand == Player.COMMAND_CHANGE_MEDIA_ITEMS ||
+                        playerCommand == Player.COMMAND_SEEK_TO_MEDIA_ITEM ||
+                        playerCommand == Player.COMMAND_SEEK_TO_NEXT ||
+                        playerCommand == Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM ||
+                        playerCommand == Player.COMMAND_SEEK_TO_PREVIOUS ||
+                        playerCommand == Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM
+                    ) {
+                        prepareCleanSingleDeckStartSync()
+                    }
+                    return super.onPlayerCommandRequest(session, controller, playerCommand)
+                }
+
                 override fun onAddMediaItems(
                     mediaSession: MediaSession,
                     controller: MediaSession.ControllerInfo,
@@ -499,6 +531,7 @@ class SoundLapaPlaybackService : MediaSessionService() {
                         prefetchUpcomingForActiveDeck(current)
                     }
                     if (smoothTransitionEnabled &&
+                        !clipAudioMuteOverride &&
                         crossfadeJob?.isActive != true &&
                         autoCrossfadeTriggeredTrackId != trackId &&
                         current.hasNextMediaItem() &&
@@ -524,7 +557,7 @@ class SoundLapaPlaybackService : MediaSessionService() {
                                         shuffleEnabled = current.shuffleModeEnabled,
                                         maxLeadWaitMs = 2_400L,
                                         fallbackApplyOnActive = {
-                                            activePlayer?.volume = 1f
+                                            activePlayer?.volume = desiredPrimaryVolume()
                                         },
                                         onDeckActivated = { _, _ -> },
                                     )
@@ -630,11 +663,12 @@ class SoundLapaPlaybackService : MediaSessionService() {
 
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                /* minBufferMs = */ 20_000,
-                /* maxBufferMs = */ 60_000,
-                /* bufferForPlaybackMs = */ 350,
-                /* bufferForPlaybackAfterRebufferMs = */ 1_000,
+                /* minBufferMs = */ 28_000,
+                /* maxBufferMs = */ 75_000,
+                /* bufferForPlaybackMs = */ 450,
+                /* bufferForPlaybackAfterRebufferMs = */ 1_200,
             )
+            .setBackBuffer(/* backBufferDurationMs = */ 20_000, /* retainBackBufferFromKeyframe = */ false)
             .setPrioritizeTimeOverSizeThresholds(true)
             .build()
 
@@ -710,7 +744,6 @@ class SoundLapaPlaybackService : MediaSessionService() {
                     deck.pause()
                     deck.stop()
                     deck.clearMediaItems()
-                    deck.volume = 1f
                 }
             }
         }
@@ -724,7 +757,7 @@ class SoundLapaPlaybackService : MediaSessionService() {
         crossfadeJob = null
         silenceStandbyDecksSync(exceptDeck = activePlayer)
         activePlayer?.let { active ->
-            active.volume = if (isDuckedByFocus && currentFocusMode == AudioFocusMode.DUCK) 0.25f else 1f
+            active.volume = desiredPrimaryVolume()
         }
         refreshWakeLocks()
     }
@@ -826,11 +859,12 @@ class SoundLapaPlaybackService : MediaSessionService() {
 
                 if (!isActive ||
                     myGeneration != crossfadeGeneration ||
+                    clipAudioMuteOverride ||
                     !outgoing.isPlaying ||
                     outgoing.playbackState == Player.STATE_ENDED
                 ) {
                     silenceStandbyDecksSync(exceptDeck = outgoing)
-                    outgoing.volume = 1f
+                    outgoing.volume = desiredPrimaryVolume()
                     fallbackApplyOnActive()
                     return@launch
                 }
@@ -845,7 +879,7 @@ class SoundLapaPlaybackService : MediaSessionService() {
                     delay(16L)
                     primeWaitMs += 16L
                 }
-                if (!isActive || myGeneration != crossfadeGeneration) return@launch
+                if (!isActive || myGeneration != crossfadeGeneration || clipAudioMuteOverride) return@launch
 
                 // 4. Switch active deck on MediaSession once incoming deck is already READY and playing
                 isTransitioningSwap = true
@@ -892,21 +926,21 @@ class SoundLapaPlaybackService : MediaSessionService() {
                     }
                     val inGain = sin(angle).toFloat().coerceIn(0f, 1f)
 
-                    outgoing.volume = outGain
-                    incoming.volume = inGain
+                    outgoing.volume = if (clipAudioMuteOverride) 0f else outGain
+                    incoming.volume = if (clipAudioMuteOverride) 0f else inGain
 
                     if (t >= 1f) break
                     delay(16L)
                 }
 
                 if (myGeneration == crossfadeGeneration) {
-                    incoming.volume = if (isDuckedByFocus && currentFocusMode == AudioFocusMode.DUCK) 0.25f else 1f
+                    incoming.volume = desiredPrimaryVolume()
                     silenceStandbyDecksSync(exceptDeck = activePlayer)
                 }
             } finally {
                 isTransitioningSwap = false
                 if (myGeneration == crossfadeGeneration) {
-                    activePlayer?.volume = if (isDuckedByFocus && currentFocusMode == AudioFocusMode.DUCK) 0.25f else 1f
+                    activePlayer?.volume = desiredPrimaryVolume()
                     val nonActive = if (swapped) outgoing else incoming
                     if (nonActive !== activePlayer) {
                         silenceStandbyDecksSync(exceptDeck = activePlayer)
@@ -918,7 +952,6 @@ class SoundLapaPlaybackService : MediaSessionService() {
                         incoming.pause()
                         incoming.stop()
                         incoming.clearMediaItems()
-                        incoming.volume = 1f
                     }
                 }
                 refreshWakeLocks()
@@ -933,7 +966,7 @@ class SoundLapaPlaybackService : MediaSessionService() {
         crossfadeJob = null
         silenceStandbyDecksSync(exceptDeck = activePlayer)
         if (restorePrimaryVolume) {
-            activePlayer?.volume = if (isDuckedByFocus && currentFocusMode == AudioFocusMode.DUCK) 0.25f else 1f
+            activePlayer?.volume = desiredPrimaryVolume()
         }
         refreshWakeLocks()
     }
@@ -996,7 +1029,7 @@ class SoundLapaPlaybackService : MediaSessionService() {
             AudioFocusMode.PAUSE -> {
                 isDuckedByFocus = false
                 if (crossfadeJob?.isActive != true) {
-                    activePlayer?.volume = 1f
+                    activePlayer?.volume = desiredPrimaryVolume()
                 }
                 if (activePlayer?.isPlaying == true || activePlayer?.playWhenReady == true) {
                     ensureAppAudioFocusRequested()
@@ -1011,7 +1044,7 @@ class SoundLapaPlaybackService : MediaSessionService() {
             AudioFocusMode.MIX -> {
                 abandonAppAudioFocus()
                 if (crossfadeJob?.isActive != true) {
-                    activePlayer?.volume = 1f
+                    activePlayer?.volume = desiredPrimaryVolume()
                 }
             }
         }
@@ -1124,6 +1157,10 @@ class SoundLapaPlaybackService : MediaSessionService() {
         fun setAudioFocusMode(mode: AudioFocusMode) {
             activeInstance?.applyAudioFocusMode(mode)
         }
+
+        fun setClipAudioMuteOverride(muted: Boolean) {
+            activeInstance?.applyClipAudioMuteOverrideSync(muted)
+        }
     }
 }
 
@@ -1139,11 +1176,13 @@ private class SoundLapaMediaSourceFactory(
     private var drmProvider: DrmSessionManagerProvider? = null
     private var loadErrorPolicy: LoadErrorHandlingPolicy? = null
 
-    private val localHttpFactory = DefaultHttpDataSource.Factory()
+    private val sharedHttpFactory = DefaultHttpDataSource.Factory()
         .setAllowCrossProtocolRedirects(true)
         .setUserAgent(FullStreamResolver.DEFAULT_BROWSER_USER_AGENT)
         .setConnectTimeoutMs(15_000)
         .setReadTimeoutMs(30_000)
+
+    private val sharedDataSourceFactory = DefaultDataSource.Factory(context, sharedHttpFactory)
 
     override fun setDrmSessionManagerProvider(drmSessionManagerProvider: DrmSessionManagerProvider): MediaSource.Factory {
         drmProvider = drmSessionManagerProvider
@@ -1164,8 +1203,7 @@ private class SoundLapaMediaSourceFactory(
         val uri = mediaItem.localConfiguration?.uri ?: mediaItem.requestMetadata.mediaUri
         val scheme = uri?.scheme?.lowercase().orEmpty()
         if (scheme == "content" || scheme == "android.resource") {
-            val dataSourceFactory = DefaultDataSource.Factory(context, localHttpFactory)
-            return ProgressiveMediaSource.Factory(dataSourceFactory, extractorsFactory).apply {
+            return ProgressiveMediaSource.Factory(sharedDataSourceFactory, extractorsFactory).apply {
                 drmProvider?.let { setDrmSessionManagerProvider(it) }
                 loadErrorPolicy?.let { setLoadErrorHandlingPolicy(it) }
             }.createMediaSource(mediaItem)
@@ -1183,6 +1221,7 @@ private class SoundLapaMediaSourceFactory(
             dao = dao,
             resolveScope = resolveScope,
             extractorsFactory = extractorsFactory,
+            sharedDataSourceFactory = sharedDataSourceFactory,
             drmProvider = drmProvider,
             loadErrorPolicy = loadErrorPolicy,
             onResolutionStateChanged = onResolutionStateChanged,
@@ -1197,6 +1236,7 @@ private class ResolvingCompositeMediaSource(
     private val dao: SoundLapaDao,
     private val resolveScope: CoroutineScope,
     private val extractorsFactory: DefaultExtractorsFactory,
+    private val sharedDataSourceFactory: DefaultDataSource.Factory,
     private val drmProvider: DrmSessionManagerProvider?,
     private val loadErrorPolicy: LoadErrorHandlingPolicy?,
     private val onResolutionStateChanged: (Int) -> Unit,
@@ -1310,16 +1350,16 @@ private class ResolvingCompositeMediaSource(
     }
 
     private fun buildChildMediaSource(resolved: ResolvedAudioStream): MediaSource {
-        val httpFactory = DefaultHttpDataSource.Factory()
-            .setAllowCrossProtocolRedirects(true)
-            .setConnectTimeoutMs(15_000)
-            .setReadTimeoutMs(30_000)
-        if (resolved.headers.isNotEmpty()) {
-            httpFactory.setDefaultRequestProperties(resolved.headers)
+        val dataSourceFactory = if (resolved.headers.isNotEmpty()) {
+            val httpFactory = DefaultHttpDataSource.Factory()
+                .setAllowCrossProtocolRedirects(true)
+                .setConnectTimeoutMs(15_000)
+                .setReadTimeoutMs(30_000)
+                .setDefaultRequestProperties(resolved.headers)
+            DefaultDataSource.Factory(context, httpFactory)
         } else {
-            httpFactory.setUserAgent(FullStreamResolver.DEFAULT_BROWSER_USER_AGENT)
+            sharedDataSourceFactory
         }
-        val dataSourceFactory = DefaultDataSource.Factory(context, httpFactory)
 
         val childItem = initialMediaItem.buildUpon()
             .setUri(Uri.parse(resolved.directUrl))

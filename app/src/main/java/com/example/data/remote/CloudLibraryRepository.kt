@@ -1695,6 +1695,7 @@ class CloudLibraryRepository(
         trackArtist: String?,
         trackCoverUrl: String?,
         isPlaying: Boolean,
+        appVersion: String? = com.example.BuildConfig.VERSION_NAME,
     ): Result<Unit> = withContext(Dispatchers.IO) {
         val uid = try {
             requireUserId()
@@ -1707,6 +1708,7 @@ class CloudLibraryRepository(
         val cleanTitle = trackTitle?.trim()?.takeIf { it.isNotEmpty() }?.take(180)
         val cleanArtist = trackArtist?.trim()?.takeIf { it.isNotEmpty() }?.take(180)
         val cleanCover = compactCloudUrl(trackCoverUrl, 320)
+        val cleanVersion = appVersion?.trim()?.takeIf { it.isNotEmpty() }?.take(32)
         try {
             val snap = docRef.get().await()
             if (snap.exists()) {
@@ -1715,6 +1717,9 @@ class CloudLibraryRepository(
                     put("lastActiveAtMs", now)
                     put("currentTrackIsPlaying", isPlaying && cleanTrackId != null)
                     put("currentTrackUpdatedAtMs", now)
+                    if (cleanVersion != null) {
+                        put("appVersion", cleanVersion)
+                    }
                     if (cleanTrackId != null) {
                         put("currentTrackId", cleanTrackId)
                         put("currentTrackTitle", cleanTitle ?: "Track")
@@ -1743,6 +1748,7 @@ class CloudLibraryRepository(
                     displayName = fallbackName,
                     email = auth.currentUser?.email,
                     photoUrl = auth.currentUser?.photoUrl?.toString(),
+                    appVersion = cleanVersion,
                 )
                 val createMap = baseProfile.toCreateMap(uid).toMutableMap()
                 createMap["isOnline"] = isOnline
@@ -1941,6 +1947,10 @@ class CloudLibraryRepository(
         fallbackUid: String,
     ): DeveloperUserOverview {
         val uid = profile.userId.ifBlank { fallbackUid }
+        val nowMs = System.currentTimeMillis()
+        val effectiveIsOnline = profile.isOnline &&
+            profile.lastActiveAtMs > 0L &&
+            (nowMs - profile.lastActiveAtMs) <= 4L * 60_000L
         return DeveloperUserOverview(
             userId = uid,
             accountUid = profile.accountUid?.takeIf { it.isNotBlank() }
@@ -1950,13 +1960,13 @@ class CloudLibraryRepository(
             email = profile.email?.takeIf { it.isNotBlank() },
             photoUrl = if (profile.avatarBlocked) null else profile.photoUrl,
             bio = profile.bio?.takeIf { it.isNotBlank() },
-            isOnline = profile.isOnline,
+            isOnline = effectiveIsOnline,
             lastActiveAtMs = profile.lastActiveAtMs,
             currentTrackId = profile.currentTrackId?.takeIf { it.isNotBlank() },
             currentTrackTitle = profile.currentTrackTitle?.takeIf { it.isNotBlank() },
             currentTrackArtist = profile.currentTrackArtist?.takeIf { it.isNotBlank() },
             currentTrackCoverUrl = profile.currentTrackCoverUrl?.takeIf { it.isNotBlank() },
-            currentTrackIsPlaying = profile.currentTrackIsPlaying,
+            currentTrackIsPlaying = effectiveIsOnline && profile.currentTrackIsPlaying,
             currentTrackUpdatedAtMs = profile.currentTrackUpdatedAtMs,
             storageBytes = metrics?.storageBytes?.coerceAtLeast(0L) ?: 0L,
             tracksCount = metrics?.tracksCount?.coerceAtLeast(0) ?: 0,
@@ -1965,6 +1975,7 @@ class CloudLibraryRepository(
             searchHistory = profile.searchHistory.orEmpty(),
             settings = profile.parsedSettings(),
             profileUpdatedAtMs = profile.updatedAt?.toDate()?.time ?: profile.lastActiveAtMs,
+            appVersion = profile.appVersion?.trim()?.takeIf { it.isNotEmpty() },
             isBanned = banRecord != null,
             banReason = banRecord?.reason,
             bannedAtMs = banRecord?.bannedAtMs ?: 0L,

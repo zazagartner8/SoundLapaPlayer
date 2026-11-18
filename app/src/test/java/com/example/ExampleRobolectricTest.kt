@@ -49,7 +49,7 @@ class ExampleRobolectricTest {
     assertFalse(SoundLapaSettings().isGuestMode)
     assertFalse(SoundLapaSettings().batterySaverEnabled)
     assertEquals(com.example.data.local.AudioFocusMode.PAUSE, SoundLapaSettings().audioFocusMode)
-    assertEquals("3.4.1", BuildConfig.VERSION_NAME)
+    assertEquals("3.4.2", BuildConfig.VERSION_NAME)
     assertNotNull(HomeRoute)
 
     val ru = stringsForLanguage("ru")
@@ -57,9 +57,9 @@ class ExampleRobolectricTest {
     assertEquals("Лайкнутые", ru.favoritesTab)
     assertEquals("Загруженные треки", ru.myTracksTab)
     assertEquals("Сингл", ru.singleReleaseLabel)
-    assertTrue(ru.aboutWhatsNewTitle.contains("3.4.1"))
-    assertTrue(stringsForLanguage("en").aboutWhatsNewTitle.contains("3.4.1"))
-    assertTrue(stringsForLanguage("it").aboutWhatsNewTitle.contains("3.4.1"))
+    assertTrue(ru.aboutWhatsNewTitle.contains("3.4.2"))
+    assertTrue(stringsForLanguage("en").aboutWhatsNewTitle.contains("3.4.2"))
+    assertTrue(stringsForLanguage("it").aboutWhatsNewTitle.contains("3.4.2"))
     assertTrue(ru.confirmDeleteTitle.isNotBlank())
     assertTrue(ru.deleteConfirmAction.isNotBlank())
     assertTrue(ru.artistSearchProfileSubtitle.isNotBlank())
@@ -950,11 +950,12 @@ class ExampleRobolectricTest {
   }
 
   @Test
-  fun `v3_4_1 strings changelog and claimed handle labels are populated across languages`() {
+  fun `v3_4_2 strings changelog and clip audio labels are populated across languages`() {
     listOf("ru", "en", "it").forEach { code ->
       val s = stringsForLanguage(code)
-      assertEquals("v3.4.1", s.changelog.versions.first().version)
-      assertTrue(s.aboutWhatsNewTitle.contains("3.4.1"))
+      assertEquals("v3.4.2", s.changelog.versions.first().version)
+      assertTrue(s.changelog.versions.any { it.version == "v3.4.1" })
+      assertTrue(s.aboutWhatsNewTitle.contains("3.4.2"))
       assertTrue(s.social.usernameClaimedButton.isNotBlank())
       assertTrue(s.social.developerBadgeInfoTitle.isNotBlank())
       assertTrue(s.social.developerBadgeInfoBody.isNotBlank())
@@ -967,6 +968,8 @@ class ExampleRobolectricTest {
       assertTrue(s.devExtras.deleteUserFromServerButton.isNotBlank())
       assertTrue(s.v34.bannedScreenTitle.isNotBlank())
       assertTrue(s.v34.chooseArtistDialogTitle.isNotBlank())
+      assertTrue(s.playerV33.clipAudioTrackLabel.isNotBlank())
+      assertTrue(s.playerV33.clipAudioClipLabel.isNotBlank())
     }
 
     val ru = stringsForLanguage("ru")
@@ -976,6 +979,43 @@ class ExampleRobolectricTest {
     assertEquals("Проверить и сохранить", ru.playerV33.cropAvatarApplyButton)
     assertEquals("Пасхалка", ru.v34.easterEggTitle)
     assertEquals("катись нахуй отсюда", ru.v34.easterEggDescription)
+    assertEquals("Звук трека", ru.playerV33.clipAudioTrackLabel)
+    assertEquals("Звук клипа", ru.playerV33.clipAudioClipLabel)
+  }
+
+  @Test
+  fun `play count session tracker credits once after 40s natural playback and rejects forward seeks`() {
+    val tracker = com.example.player.PlayCountSessionTracker()
+    tracker.onTrackStarted("track_a", startPositionMs = 0L)
+
+    // Simulate 40 seconds of natural playback in 1s increments -> credits once at 40s
+    var creditedCount = 0
+    for (sec in 1..45) {
+      if (tracker.onProgressSample("track_a", posMs = sec * 1_000L, isActuallyPlaying = true, wallDeltaMs = 1_000L)) {
+        creditedCount++
+      }
+    }
+    assertEquals(1, creditedCount)
+    assertTrue(tracker.isCredited)
+
+    // Looping back to < 3s starts a fresh session and earns another credit after 40s
+    var loopCredited = false
+    for (sec in 0..42) {
+      if (tracker.onProgressSample("track_a", posMs = sec * 1_000L, isActuallyPlaying = true, wallDeltaMs = 1_000L)) {
+        loopCredited = true
+      }
+    }
+    assertTrue(loopCredited)
+
+    // Forward seeking past 40s disqualifies play count credit for that session
+    val seekTracker = com.example.player.PlayCountSessionTracker()
+    seekTracker.onTrackStarted("track_b", startPositionMs = 0L)
+    seekTracker.onUserSeek(fromPosMs = 2_000L, toPosMs = 41_000L)
+    assertTrue(seekTracker.isSeekDisqualified)
+    val creditedAfterSeek = (41..60).any { sec ->
+      seekTracker.onProgressSample("track_b", posMs = sec * 1_000L, isActuallyPlaying = true, wallDeltaMs = 1_000L)
+    }
+    assertFalse(creditedAfterSeek)
   }
 
   @Test
@@ -999,6 +1039,47 @@ class ExampleRobolectricTest {
       listOf("Solo Artist"),
       com.example.ui.components.splitArtistCredits("Solo Artist"),
     )
+  }
+
+  @Test
+  fun `music video activated state auto enables clip audio and clip duration only for non canvas clips`() {
+    val fullMvStream = com.example.data.remote.ResolvedVideoStream(
+      videoUrl = "https://example.com/mv.mp4",
+      title = "Official Video",
+      durationMs = 245_000L,
+      sourcePageUrl = "https://youtube.com/watch?v=abc",
+      isMuxed = true,
+      isLoopingCanvas = false,
+      sourceKind = com.example.data.remote.VideoStreamSource.YOUTUBE_MUSIC,
+    )
+    val mvUi = com.example.ui.MusicVideoUiState.activatedState(
+      trackId = "track_mv_1",
+      stream = fullMvStream,
+      previousSessionId = 0,
+    )
+    assertTrue(mvUi.isVideoModeEnabled)
+    assertTrue(mvUi.useClipAudio)
+    assertEquals(245_000L, mvUi.clipDurationMs)
+    assertEquals(1, mvUi.clipAudioSessionId)
+
+    val canvasStream = com.example.data.remote.ResolvedVideoStream(
+      videoUrl = "https://canvaz.scdn.co/upload/artist/canvas.cnvs.mp4",
+      title = "Spotify Canvas",
+      durationMs = 8_000L,
+      sourcePageUrl = "https://open.spotify.com/track/123",
+      isMuxed = false,
+      isLoopingCanvas = true,
+      sourceKind = com.example.data.remote.VideoStreamSource.SPOTIFY_CANVAS,
+    )
+    val canvasUi = com.example.ui.MusicVideoUiState.activatedState(
+      trackId = "track_canvas_1",
+      stream = canvasStream,
+      previousSessionId = 1,
+    )
+    assertTrue(canvasUi.isVideoModeEnabled)
+    assertFalse(canvasUi.useClipAudio)
+    assertEquals(0L, canvasUi.clipDurationMs)
+    assertEquals(1, canvasUi.clipAudioSessionId)
   }
 }
 

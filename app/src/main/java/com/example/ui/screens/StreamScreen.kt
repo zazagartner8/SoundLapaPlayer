@@ -89,6 +89,8 @@ fun StreamScreen(
     onOpenTrackOptions: (TrackEntity) -> Unit,
     bottomContentPadding: Dp,
     modifier: Modifier = Modifier,
+    onPlayQuickPickTrack: (TrackEntity) -> Unit = onPlayTrack,
+    onPlayTrendingTrack: (TrackEntity) -> Unit = onPlayTrack,
 ) {
     val strings = LocalAppStrings.current
     val haptics = rememberSoundLapaHaptics()
@@ -99,6 +101,8 @@ fun StreamScreen(
 
     val currentOnSelectFilter by rememberUpdatedState(onSelectFilter)
     val currentOnPlayTrack by rememberUpdatedState(onPlayTrack)
+    val currentOnPlayQuickPickTrack by rememberUpdatedState(onPlayQuickPickTrack)
+    val currentOnPlayTrendingTrack by rememberUpdatedState(onPlayTrendingTrack)
     val currentOnPlayRecommendedTrack by rememberUpdatedState(onPlayRecommendedTrack)
     val currentOnToggleLike by rememberUpdatedState(onToggleLike)
     val currentOnOpenTrackOptions by rememberUpdatedState(onOpenTrackOptions)
@@ -191,30 +195,34 @@ fun StreamScreen(
                                 color = MaterialTheme.colorScheme.onBackground,
                             )
                             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                state.quickPickRows.forEach { pair ->
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                    ) {
-                                        pair.forEach { track ->
-                                            val isCurrentPlaying =
-                                                state.currentTrackId == track.id && state.isPlaying
-                                            val latestTrack by rememberUpdatedState(track)
-                                            val onQuickPickClick = remember(track.id) {
-                                                {
-                                                    haptics.tap()
-                                                    currentOnPlayTrack(latestTrack)
+                                state.quickPickRows.forEachIndexed { rowIdx, pair ->
+                                    androidx.compose.runtime.key("qp_row_$rowIdx") {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        ) {
+                                            pair.forEach { track ->
+                                                androidx.compose.runtime.key("qp_${track.id}") {
+                                                    val isCurrentPlaying =
+                                                        state.currentTrackId == track.id && state.isPlaying
+                                                    val latestTrack by rememberUpdatedState(track)
+                                                    val onQuickPickClick = remember(track.id) {
+                                                        {
+                                                            haptics.tap()
+                                                            currentOnPlayQuickPickTrack(latestTrack)
+                                                        }
+                                                    }
+                                                    QuickPickGridCard(
+                                                        track = track,
+                                                        isCurrentPlaying = isCurrentPlaying,
+                                                        onClick = onQuickPickClick,
+                                                        modifier = Modifier.weight(1f),
+                                                    )
                                                 }
                                             }
-                                            QuickPickGridCard(
-                                                track = track,
-                                                isCurrentPlaying = isCurrentPlaying,
-                                                onClick = onQuickPickClick,
-                                                modifier = Modifier.weight(1f),
-                                            )
-                                        }
-                                        if (pair.size == 1) {
-                                            Spacer(modifier = Modifier.weight(1f))
+                                            if (pair.size == 1) {
+                                                Spacer(modifier = Modifier.weight(1f))
+                                            }
                                         }
                                     }
                                 }
@@ -243,7 +251,10 @@ fun StreamScreen(
                                     val isCurrent = state.currentTrackId == track.id
                                     val latestTrack by rememberUpdatedState(track)
                                     val onTrendingClick = remember(track.id) {
-                                        { currentOnPlayTrack(latestTrack) }
+                                        {
+                                            haptics.tap()
+                                            currentOnPlayTrendingTrack(latestTrack)
+                                        }
                                     }
                                     TrendingSquareCard(
                                         track = track,

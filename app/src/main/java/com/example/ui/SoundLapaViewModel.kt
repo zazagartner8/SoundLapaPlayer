@@ -73,6 +73,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.distinctUntilChangedBy
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -203,11 +204,35 @@ data class LyricsUiState(
 data class MusicVideoUiState(
     val trackId: String? = null,
     val isVideoModeEnabled: Boolean = false,
+    val useClipAudio: Boolean = false,
     val isLoading: Boolean = false,
     val isCheckingAvailability: Boolean = false,
     val stream: ResolvedVideoStream? = null,
     val unavailable: Boolean = false,
-)
+    val clipDurationMs: Long = 0L,
+    val clipAudioSessionId: Int = 0,
+) {
+    companion object {
+        fun activatedState(
+            trackId: String,
+            stream: ResolvedVideoStream,
+            previousSessionId: Int,
+        ): MusicVideoUiState {
+            val autoClipAudio = stream.hasAudio
+            return MusicVideoUiState(
+                trackId = trackId,
+                isVideoModeEnabled = true,
+                useClipAudio = autoClipAudio,
+                isLoading = false,
+                isCheckingAvailability = false,
+                stream = stream,
+                unavailable = false,
+                clipDurationMs = if (!stream.isLoopingCanvas) stream.durationMs.coerceAtLeast(0L) else 0L,
+                clipAudioSessionId = if (autoClipAudio) previousSessionId + 1 else previousSessionId,
+            )
+        }
+    }
+}
 
 @Immutable
 data class SocialUiState(
@@ -422,6 +447,7 @@ class SoundLapaViewModel(
     private var devUsersJob: Job? = null
     private var devUserDetailsJob: Job? = null
     private var presenceSyncJob: Job? = null
+    private var presenceHeartbeatJob: Job? = null
     private var isAppForeground: Boolean = true
     private var lastPublishedPresenceKey: String? = null
 
@@ -541,21 +567,32 @@ class SoundLapaViewModel(
     private val recommendationsFlow = combine(
         dao.observeAllTracks(),
         preferences.settings
-            .map { Triple(it.listeningHistory, it.listeningEvents, it.searchHistory) }
-            .distinctUntilChanged(),
+            .distinctUntilChangedBy { s ->
+                Triple(
+                    s.listeningHistory,
+                    s.listeningEvents.map { Triple(it.dayEpoch, it.trackId, it.playCount) },
+                    s.searchHistory,
+                )
+            }
+            .map { Triple(it.listeningHistory, it.listeningEvents, it.searchHistory) },
     ) { tracks, (listeningHistory, listeningEvents, searchHistory) ->
         val persistedById = tracks.associateBy { it.id }
         val recentTracks = listeningHistory
             .sortedByDescending { it.lastPlayedAtMs }
             .mapNotNull { entry -> persistedById[entry.trackId] }
             .distinctBy { it.id }
+            .distinctBy {
+                "${it.title.trim().lowercase().replace('ё', 'е')}|${it.artist.trim().lowercase().replace('ё', 'е')}"
+            }
             .take(4)
         val trendingCarousel = RecommendationEngine.computeTrendingSimilarTracks(
             allTracks = tracks,
             listeningHistory = listeningHistory,
             searchHistory = searchHistory,
             limit = 6,
-        )
+        ).distinctBy {
+            "${it.title.trim().lowercase().replace('ё', 'е')}|${it.artist.trim().lowercase().replace('ё', 'е')}"
+        }
         val quickAndTrendIds = (recentTracks.map { it.id } + trendingCarousel.map { it.id }).toHashSet()
         val recResult = RecommendationEngine.computeRecommendations(
             allTracks = tracks,
@@ -565,7 +602,11 @@ class SoundLapaViewModel(
             listeningEvents = listeningEvents,
             excludeIds = quickAndTrendIds,
         )
-        val recommendedTop = recResult.tracks.take(12)
+        val recommendedTop = recResult.tracks
+            .distinctBy {
+                "${it.title.trim().lowercase().replace('ё', 'е')}|${it.artist.trim().lowercase().replace('ё', 'е')}"
+            }
+            .take(12)
         val recAndShownIds = quickAndTrendIds + recommendedTop.map { it.id }
         val forYouTracks = RecommendationEngine.computeForYouTracks(
             allTracks = tracks,
@@ -918,6 +959,14 @@ class SoundLapaViewModel(
                             publishPresenceAndNowPlaying(isOnline = isAppForeground)
                         }
                     }
+            }
+            presenceHeartbeatJob = viewModelScope.launch {
+                while (true) {
+                    delay(90_000L)
+                    if (isAppForeground) {
+                        publishPresenceAndNowPlaying(isOnline = true, force = true)
+                    }
+                }
             }
         }
         viewModelScope.launch {
@@ -2064,6 +2113,9 @@ class SoundLapaViewModel(
         isAppForeground = isForeground
         if (isForeground) {
             playbackController.syncNowFromService()
+        } else if (_musicVideoState.value.useClipAudio) {
+            playbackController.setClipAudioMuteOverride(false)
+            _musicVideoState.update { it.copy(useClipAudio = false) }
         }
         publishPresenceAndNowPlaying(isOnline = isForeground, force = true)
     }
@@ -2142,6 +2194,7 @@ class SoundLapaViewModel(
             bio = cs.bio,
             avatarBlocked = cs.avatarBlocked,
             accountUid = cs.accountUid ?: SoundLapUidFormatter.format(uid),
+            appVersion = com.example.BuildConfig.VERSION_NAME,
             searchHistory = s.searchHistory.take(25),
             listeningStatsJson = CloudUserProfile.encodeListeningEventsForCloud(s.listeningEvents),
             settings = com.example.data.remote.CloudUserSettings.fromSoundLapaSettings(s).toMap(),
@@ -2477,31 +2530,48 @@ class SoundLapaViewModel(
         artistProfileJob?.cancel()
         albumLoadJob?.cancel()
 
-        val currentTracks = uiState.value.tracks
-        val localMatches = buildList {
-            if (seedTrack != null) add(seedTrack)
-            currentTracks.forEach { t ->
-                if (t.id != seedTrack?.id && audiusRepository.isTrackByArtist(t, listOf(cleanName, artistName))) {
-                    add(t)
-                }
-            }
-        }
-
         val online = networkObserver.refresh()
+        val openedAtMs = android.os.SystemClock.elapsedRealtime()
         _artistProfileState.value = ArtistProfileUiState(
             isVisible = true,
             artistName = cleanName,
-            avatarUrl = seedTrack?.coverArtPath ?: localMatches.firstOrNull()?.coverArtPath,
-            accentColorHex = seedTrack?.accentColorHex ?: localMatches.firstOrNull()?.accentColorHex ?: 0xFF8B5CF6L,
-            secondaryColorHex = seedTrack?.secondaryColorHex ?: localMatches.firstOrNull()?.secondaryColorHex ?: 0xFF5CE1E6L,
+            avatarUrl = seedTrack?.coverArtPath,
+            accentColorHex = seedTrack?.accentColorHex ?: 0xFF8B5CF6L,
+            secondaryColorHex = seedTrack?.secondaryColorHex ?: 0xFF5CE1E6L,
             isLoading = online,
-            tracks = localMatches,
+            tracks = listOfNotNull(seedTrack),
             albums = emptyList(),
         )
 
-        if (!online) return
-
         artistProfileJob = viewModelScope.launch {
+            val allTracksSnapshot = uiState.value.tracks
+            val localMatches = kotlinx.coroutines.withContext(Dispatchers.Default) {
+                buildList {
+                    if (seedTrack != null) add(seedTrack)
+                    allTracksSnapshot.forEach { t ->
+                        if (t.id != seedTrack?.id && audiusRepository.isTrackByArtist(t, listOf(cleanName, artistName))) {
+                            add(t)
+                        }
+                    }
+                }
+            }
+            val elapsedOnLocal = android.os.SystemClock.elapsedRealtime() - openedAtMs
+            if (elapsedOnLocal < 300L) {
+                delay(300L - elapsedOnLocal)
+            }
+            _artistProfileState.update { current ->
+                if (!current.isVisible || !current.artistName.equals(cleanName, ignoreCase = true)) {
+                    current
+                } else {
+                    current.copy(
+                        avatarUrl = current.avatarUrl ?: localMatches.firstOrNull()?.coverArtPath,
+                        tracks = if (localMatches.isNotEmpty()) localMatches else current.tracks,
+                    )
+                }
+            }
+
+            if (!online) return@launch
+
             val catalog = runCatching {
                 audiusRepository.fetchArtistCatalog(
                     artistName = cleanName,
@@ -2509,6 +2579,8 @@ class SoundLapaViewModel(
                     knownSpotifyArtistId = spotifyId,
                     knownSoundCloudUrl = soundCloudUrl,
                     onPartialResult = { partial ->
+                        val elapsed = android.os.SystemClock.elapsedRealtime() - openedAtMs
+                        if (elapsed < 320L) return@fetchArtistCatalog
                         _artistProfileState.update { current ->
                             if (!current.isVisible || !current.artistName.equals(cleanName, ignoreCase = true)) {
                                 current
@@ -3211,9 +3283,11 @@ class SoundLapaViewModel(
         if (_musicVideoState.value.trackId != trackId) {
             musicVideoJob?.cancel()
             musicVideoProbeJob?.cancel()
+            playbackController.setClipAudioMuteOverride(false)
             _musicVideoState.value = MusicVideoUiState(
                 trackId = trackId,
                 isVideoModeEnabled = false,
+                useClipAudio = false,
             )
         }
     }
@@ -3230,24 +3304,43 @@ class SoundLapaViewModel(
         }
         musicVideoProbeJob?.cancel()
         val keepVideoMode = current.trackId == track.id && current.isVideoModeEnabled
+        val keepClipAudio = current.trackId == track.id && current.useClipAudio
         _musicVideoState.value = MusicVideoUiState(
             trackId = track.id,
             isVideoModeEnabled = keepVideoMode,
+            useClipAudio = keepClipAudio,
             isCheckingAvailability = true,
         )
         musicVideoProbeJob = viewModelScope.launch {
             val foundStream = kotlinx.coroutines.withContext(Dispatchers.IO) {
                 runCatching {
-                    FullStreamResolver.findOfficialMusicVideoStream(track.artist, track.title, track.durationMs)
+                    FullStreamResolver.findOfficialMusicVideoStream(
+                        artist = track.artist,
+                        title = track.title,
+                        expectedDurationMs = track.durationMs,
+                        trackId = track.id,
+                        sourceUri = track.sourceUri,
+                    )
                 }.getOrNull()
             }
             val latest = _musicVideoState.value
             if (latest.trackId == track.id && !latest.isLoading) {
-                _musicVideoState.value = latest.copy(
-                    isCheckingAvailability = false,
-                    stream = foundStream ?: latest.stream,
-                    unavailable = foundStream == null && latest.stream == null,
-                )
+                val resolvedStream = foundStream ?: latest.stream
+                if (latest.isVideoModeEnabled && resolvedStream != null) {
+                    val activated = MusicVideoUiState.activatedState(
+                        trackId = track.id,
+                        stream = resolvedStream,
+                        previousSessionId = latest.clipAudioSessionId,
+                    )
+                    playbackController.setClipAudioMuteOverride(activated.useClipAudio)
+                    _musicVideoState.value = activated
+                } else {
+                    _musicVideoState.value = latest.copy(
+                        isCheckingAvailability = false,
+                        stream = resolvedStream,
+                        unavailable = foundStream == null && latest.stream == null,
+                    )
+                }
             }
         }
     }
@@ -3255,62 +3348,96 @@ class SoundLapaViewModel(
     fun toggleMusicVideoMode(track: TrackEntity, enableVideo: Boolean) {
         if (!enableVideo) {
             musicVideoJob?.cancel()
+            playbackController.setClipAudioMuteOverride(false)
             _musicVideoState.update {
                 it.copy(
                     trackId = track.id,
                     isVideoModeEnabled = false,
+                    useClipAudio = false,
                     isLoading = false,
+                    clipDurationMs = 0L,
                 )
             }
             return
         }
         val current = _musicVideoState.value
-        if (current.trackId == track.id && current.stream != null) {
-            _musicVideoState.update {
-                it.copy(
-                    isVideoModeEnabled = true,
-                    isLoading = false,
-                    isCheckingAvailability = false,
-                    unavailable = false,
-                )
-            }
+        val existingStream = if (current.trackId == track.id) current.stream else null
+        if (existingStream != null) {
+            val activated = MusicVideoUiState.activatedState(
+                trackId = track.id,
+                stream = existingStream,
+                previousSessionId = current.clipAudioSessionId,
+            )
+            playbackController.setClipAudioMuteOverride(activated.useClipAudio)
+            _musicVideoState.value = activated
             return
         }
         musicVideoProbeJob?.cancel()
         musicVideoJob?.cancel()
+        playbackController.setClipAudioMuteOverride(false)
+        val preservedSessionId = if (current.trackId == track.id) current.clipAudioSessionId else 0
         _musicVideoState.value = MusicVideoUiState(
             trackId = track.id,
             isVideoModeEnabled = true,
+            useClipAudio = false,
             isLoading = true,
             isCheckingAvailability = false,
+            clipAudioSessionId = preservedSessionId,
         )
         musicVideoJob = viewModelScope.launch {
             val stream = kotlinx.coroutines.withContext(Dispatchers.IO) {
                 runCatching {
-                    FullStreamResolver.findOfficialMusicVideoStream(track.artist, track.title, track.durationMs)
+                    FullStreamResolver.findOfficialMusicVideoStream(
+                        artist = track.artist,
+                        title = track.title,
+                        expectedDurationMs = track.durationMs,
+                        trackId = track.id,
+                        sourceUri = track.sourceUri,
+                    )
                 }.getOrNull()
             }
-            if (_musicVideoState.value.trackId == track.id && _musicVideoState.value.isVideoModeEnabled) {
-                _musicVideoState.value = if (stream != null) {
-                    MusicVideoUiState(
+            val latest = _musicVideoState.value
+            if (latest.trackId == track.id && latest.isVideoModeEnabled) {
+                if (stream != null) {
+                    val activated = MusicVideoUiState.activatedState(
                         trackId = track.id,
-                        isVideoModeEnabled = true,
-                        isLoading = false,
-                        isCheckingAvailability = false,
                         stream = stream,
-                        unavailable = false,
+                        previousSessionId = latest.clipAudioSessionId,
                     )
+                    playbackController.setClipAudioMuteOverride(activated.useClipAudio)
+                    _musicVideoState.value = activated
                 } else {
-                    MusicVideoUiState(
+                    playbackController.setClipAudioMuteOverride(false)
+                    _musicVideoState.value = MusicVideoUiState(
                         trackId = track.id,
                         isVideoModeEnabled = true,
+                        useClipAudio = false,
                         isLoading = false,
                         isCheckingAvailability = false,
                         stream = null,
                         unavailable = true,
+                        clipDurationMs = 0L,
+                        clipAudioSessionId = latest.clipAudioSessionId,
                     )
                 }
             }
+        }
+    }
+
+    fun toggleClipAudio(enabled: Boolean) {
+        val current = _musicVideoState.value
+        val stream = current.stream
+        val canPlayClipAudio = current.isVideoModeEnabled &&
+            stream != null &&
+            stream.hasAudio
+        val nextEnabled = enabled && canPlayClipAudio
+        playbackController.setClipAudioMuteOverride(nextEnabled)
+        _musicVideoState.update { state ->
+            val restartClipFromStart = nextEnabled && !state.useClipAudio
+            state.copy(
+                useClipAudio = nextEnabled,
+                clipAudioSessionId = if (restartClipFromStart) state.clipAudioSessionId + 1 else state.clipAudioSessionId,
+            )
         }
     }
 
@@ -3810,6 +3937,9 @@ class SoundLapaViewModel(
     }
 
     override fun onCleared() {
+        presenceHeartbeatJob?.cancel()
+        publishPresenceAndNowPlaying(isOnline = false, force = true)
+        playbackController.setClipAudioMuteOverride(false)
         networkObserver.stop()
         playbackController.onOfflinePlaybackBlocked = null
         playbackController.disconnect()

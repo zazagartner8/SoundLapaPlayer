@@ -93,7 +93,8 @@ service cloud.firestore {
         (!('currentTrackArtist' in data) || (data.currentTrackArtist is string && data.currentTrackArtist.size() <= 200)) &&
         (!('currentTrackCoverUrl' in data) || (data.currentTrackCoverUrl is string && data.currentTrackCoverUrl.size() <= 1000)) &&
         (!('currentTrackIsPlaying' in data) || data.currentTrackIsPlaying is bool) &&
-        (!('currentTrackUpdatedAtMs' in data) || (data.currentTrackUpdatedAtMs is int && data.currentTrackUpdatedAtMs >= 0));
+        (!('currentTrackUpdatedAtMs' in data) || (data.currentTrackUpdatedAtMs is int && data.currentTrackUpdatedAtMs >= 0)) &&
+        (!('appVersion' in data) || (data.appVersion is string && data.appVersion.size() >= 1 && data.appVersion.size() <= 32));
     }
 
     function isValidBugReport(data) {
@@ -206,7 +207,7 @@ service cloud.firestore {
           'accountUid', 'searchHistory', 'listeningStatsJson', 'settings',
           'isOnline', 'lastActiveAtMs', 'currentTrackId', 'currentTrackTitle',
           'currentTrackArtist', 'currentTrackCoverUrl', 'currentTrackIsPlaying',
-          'currentTrackUpdatedAtMs', 'createdAt', 'updatedAt'
+          'currentTrackUpdatedAtMs', 'appVersion', 'createdAt', 'updatedAt'
         ]) &&
         incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
@@ -225,7 +226,7 @@ service cloud.firestore {
           'accountUid', 'searchHistory', 'listeningStatsJson', 'settings',
           'isOnline', 'lastActiveAtMs', 'currentTrackId', 'currentTrackTitle',
           'currentTrackArtist', 'currentTrackCoverUrl', 'currentTrackIsPlaying',
-          'currentTrackUpdatedAtMs', 'updatedAt'
+          'currentTrackUpdatedAtMs', 'appVersion', 'updatedAt'
         ]);
 
       allow delete: if ((isOwner(userId) && isNotBanned()) || isVerifiedDeveloper()) && isValidId(userId);

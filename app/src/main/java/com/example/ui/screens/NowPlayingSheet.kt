@@ -64,6 +64,7 @@ import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Lyrics
 import androidx.compose.material.icons.rounded.MoreVert
+import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.OndemandVideo
 import androidx.compose.material.icons.rounded.OpenInFull
 import androidx.compose.material.icons.rounded.Pause
@@ -72,6 +73,7 @@ import androidx.compose.material.icons.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
+import androidx.compose.material.icons.rounded.VolumeUp
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -87,6 +89,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -142,6 +145,7 @@ import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.source.MergingMediaSource
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.example.R
@@ -161,6 +165,8 @@ import com.example.ui.i18n.LocalAppStrings
 import com.example.ui.shaders.FloatingCoverBackdrop
 import com.example.ui.shaders.LiquidGlassCard
 import com.example.ui.shaders.TrackCoverArtwork
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlin.math.abs
@@ -181,6 +187,7 @@ fun NowPlayingSheet(
     onProbeMusicVideo: () -> Unit = {},
     onSeekToMs: (Long) -> Unit = {},
     onToggleMusicVideoMode: (Boolean) -> Unit = {},
+    onToggleClipAudio: (Boolean) -> Unit = {},
     onCollapse: () -> Unit,
     onTogglePlayPause: () -> Unit,
     onPrevious: () -> Unit,
@@ -203,7 +210,7 @@ fun NowPlayingSheet(
     val haptics = rememberSoundLapaHaptics()
     val themeAccent = MaterialTheme.colorScheme.primary
     val accent = Color(track.accentColorHex)
-    val durationMs = playback.durationMs.takeIf { it > 0L } ?: track.durationMs
+    val trackDurationMs = playback.durationMs.takeIf { it > 0L } ?: track.durationMs
 
     var isLyricsExpanded by rememberSaveable(track.id) { mutableStateOf(initialScrollToLyrics) }
     LaunchedEffect(initialScrollToLyrics) {
@@ -221,6 +228,32 @@ fun NowPlayingSheet(
     )
 
     val stream = musicVideoState.stream
+    val clipPositionFlow = remember(track.id) { MutableStateFlow(0L) }
+    var clipPreparedDurationMs by remember(track.id, stream?.videoUrl) {
+        mutableLongStateOf(
+            if (stream != null && !stream.isLoopingCanvas) stream.durationMs.coerceAtLeast(0L) else 0L,
+        )
+    }
+    var clipSeekNonce by remember(track.id, stream?.videoUrl) { mutableIntStateOf(0) }
+    var clipSeekTargetMs by remember(track.id, stream?.videoUrl) { mutableLongStateOf(0L) }
+
+    LaunchedEffect(track.id, musicVideoState.clipAudioSessionId, musicVideoState.useClipAudio) {
+        if (musicVideoState.useClipAudio) {
+            clipPositionFlow.value = 0L
+        }
+    }
+
+    val isUsingClipTimeline = musicVideoState.isVideoModeEnabled &&
+        stream != null &&
+        !stream.isLoopingCanvas &&
+        musicVideoState.useClipAudio
+    val effectiveClipDurationMs = clipPreparedDurationMs.takeIf { it > 0L }
+        ?: stream?.durationMs?.takeIf { it > 0L }
+        ?: musicVideoState.clipDurationMs.takeIf { it > 0L }
+        ?: trackDurationMs
+    val seekBarDurationMs = if (isUsingClipTimeline) effectiveClipDurationMs else trackDurationMs
+    val seekBarPositionFlow: StateFlow<Long> = if (isUsingClipTimeline) clipPositionFlow else positionFlow
+
     var clipAspectRatio by remember(track.id, stream?.videoUrl) {
         val hintRatio = if (stream != null && stream.width > 0 && stream.height > 0) {
             (stream.width.toFloat() / stream.height.toFloat()).coerceIn(0.56f, 1.85f)
@@ -245,6 +278,9 @@ fun NowPlayingSheet(
     val scope = rememberCoroutineScope()
     val scrollState = rememberScrollState()
     val dragOffsetY = remember { Animatable(0f) }
+    LaunchedEffect(Unit) {
+        dragOffsetY.snapTo(0f)
+    }
     var isBodyNestedDragging by remember { mutableStateOf(false) }
     val dismissThresholdPx = remember(density) { with(density) { 140.dp.toPx() } }
 
@@ -353,7 +389,7 @@ fun NowPlayingSheet(
                 enter = fadeIn(tween(220)),
                 exit = fadeOut(tween(180)),
                 boundsTransform = { _, _ -> spring(dampingRatio = 0.86f, stiffness = 360f) },
-                resizeMode = SharedTransitionScope.ResizeMode.RemeasureToBounds,
+                resizeMode = SharedTransitionScope.ResizeMode.ScaleToBounds(),
             )
         }
     } else {
@@ -541,14 +577,36 @@ fun NowPlayingSheet(
                             .padding(top = 2.dp, bottom = 4.dp)
                             .testTag("floating_cover_clip_switcher"),
                     ) {
-                        CoverClipModeSwitcher(
-                            isVideoMode = musicVideoState.isVideoModeEnabled,
-                            accent = themeAccent,
-                            onSelectVideoMode = { enable ->
-                                haptics.tick()
-                                onToggleMusicVideoMode(enable)
-                            },
-                        )
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            CoverClipModeSwitcher(
+                                isVideoMode = musicVideoState.isVideoModeEnabled,
+                                accent = themeAccent,
+                                onSelectVideoMode = { enable ->
+                                    haptics.tick()
+                                    onToggleMusicVideoMode(enable)
+                                },
+                            )
+                            val canSwitchClipAudio = musicVideoState.isVideoModeEnabled &&
+                                stream != null &&
+                                stream.hasAudio
+                            androidx.compose.animation.AnimatedVisibility(
+                                visible = canSwitchClipAudio,
+                                enter = fadeIn(tween(200)) + expandVertically(tween(200)),
+                                exit = fadeOut(tween(160)) + shrinkVertically(tween(160)),
+                            ) {
+                                ClipAudioSourceSwitcher(
+                                    useClipAudio = musicVideoState.useClipAudio,
+                                    accent = themeAccent,
+                                    onSelectClipAudio = { useClip ->
+                                        haptics.tick()
+                                        onToggleClipAudio(useClip)
+                                    },
+                                )
+                            }
+                        }
                     }
                 }
 
@@ -606,26 +664,37 @@ fun NowPlayingSheet(
                                             .clip(RoundedCornerShape(if (isVideoModeActive) 28.dp else 25.dp))
                                             .background(if (isVideoModeActive) Color(0xFF09080D) else Color.Transparent),
                                     ) {
-                                        if (!isVideoModeActive) {
-                                            TrackCoverArtwork(
-                                                track = track,
-                                                modifier = Modifier
-                                                    .fillMaxSize()
-                                                    .then(sharedCoverModifier),
-                                                cornerRadius = 25.dp,
-                                                targetSizePx = 1080,
-                                                crossfade = true,
-                                            )
-                                        }
+                                        TrackCoverArtwork(
+                                            track = track,
+                                            modifier = Modifier
+                                                .fillMaxSize()
+                                                .then(sharedCoverModifier)
+                                                .graphicsLayer { alpha = if (isVideoModeActive) 0f else 1f },
+                                            cornerRadius = 25.dp,
+                                            targetSizePx = 1080,
+                                            crossfade = true,
+                                        )
 
                                         if (musicVideoState.isVideoModeEnabled) {
                                             when {
                                                 stream != null -> {
-                                                    MutedMusicVideoPlayer(
+                                                    MusicVideoPlayer(
                                                         stream = stream,
-                                                        trackDurationMs = durationMs,
+                                                        trackDurationMs = trackDurationMs,
                                                         isPlaying = playback.isPlaying,
+                                                        useClipAudio = musicVideoState.useClipAudio && stream.hasAudio,
+                                                        clipAudioSessionId = musicVideoState.clipAudioSessionId,
+                                                        clipSeekTargetMs = clipSeekTargetMs,
+                                                        clipSeekNonce = clipSeekNonce,
                                                         positionFlow = positionFlow,
+                                                        onClipPositionChanged = { posMs ->
+                                                            clipPositionFlow.value = posMs
+                                                        },
+                                                        onClipDurationResolved = { durMs ->
+                                                            if (durMs > 0L && !stream.isLoopingCanvas) {
+                                                                clipPreparedDurationMs = durMs
+                                                            }
+                                                        },
                                                         onAspectRatioResolved = { resolvedRatio ->
                                                             clipAspectRatio = resolvedRatio.coerceIn(0.56f, 1.85f)
                                                         },
@@ -782,11 +851,23 @@ fun NowPlayingSheet(
                                 }
 
                                 SmoothPlaybackSeekBar(
-                                    trackId = track.id,
-                                    durationMs = durationMs,
+                                    timelineKey = "${track.id}|${if (isUsingClipTimeline) "clip:${stream?.videoUrl}" else "track"}",
+                                    durationMs = seekBarDurationMs,
                                     isPlaying = playback.isPlaying,
-                                    positionFlow = positionFlow,
-                                    onSeekFraction = onSeekFraction,
+                                    positionFlow = seekBarPositionFlow,
+                                    onSeekFraction = { fraction ->
+                                        if (isUsingClipTimeline) {
+                                            val clamped = if (fraction.isFinite()) fraction.coerceIn(0f, 1f) else 0f
+                                            val targetMs = (effectiveClipDurationMs * clamped)
+                                                .toLong()
+                                                .coerceIn(0L, effectiveClipDurationMs)
+                                            clipPositionFlow.value = targetMs
+                                            clipSeekTargetMs = targetMs
+                                            clipSeekNonce += 1
+                                        } else {
+                                            onSeekFraction(fraction)
+                                        }
+                                    },
                                     onTickHaptic = haptics::tick,
                                 )
 
@@ -951,7 +1032,7 @@ fun NowPlayingSheet(
         ) {
             ExpandedLyricsOverlay(
                 track = track,
-                durationMs = durationMs,
+                durationMs = trackDurationMs,
                 isPlaying = playback.isPlaying,
                 lyricsState = lyricsState,
                 positionFlow = positionFlow,
@@ -1525,7 +1606,7 @@ private fun ExpandedLyricsOverlay(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 SmoothPlaybackSeekBar(
-                    trackId = track.id,
+                    timelineKey = track.id,
                     durationMs = durationMs,
                     isPlaying = isPlaying,
                     positionFlow = positionFlow,
@@ -1646,7 +1727,7 @@ private fun NowPlayingBottomDock(
 
 @Composable
 private fun SmoothPlaybackSeekBar(
-    trackId: String,
+    timelineKey: String,
     durationMs: Long,
     isPlaying: Boolean,
     positionFlow: StateFlow<Long>,
@@ -1655,14 +1736,14 @@ private fun SmoothPlaybackSeekBar(
 ) {
     val basePositionMs by positionFlow.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
-    var isScrubbing by remember(trackId) { mutableStateOf(false) }
-    var scrubFraction by remember(trackId) { mutableFloatStateOf(0f) }
-    val animFraction = remember(trackId) {
+    var isScrubbing by remember(timelineKey) { mutableStateOf(false) }
+    var scrubFraction by remember(timelineKey) { mutableFloatStateOf(0f) }
+    val animFraction = remember(timelineKey) {
         val init = if (durationMs > 0L) (basePositionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f
         Animatable(if (init.isFinite()) init else 0f)
     }
 
-    LaunchedEffect(trackId, basePositionMs, durationMs, isPlaying, isScrubbing) {
+    LaunchedEffect(timelineKey, basePositionMs, durationMs, isPlaying, isScrubbing) {
         if (isScrubbing) return@LaunchedEffect
         val target = if (durationMs > 0L) {
             (basePositionMs.toFloat() / durationMs.toFloat())
@@ -1831,13 +1912,55 @@ private fun ModeSegmentPill(
     }
 }
 
+@Composable
+private fun ClipAudioSourceSwitcher(
+    useClipAudio: Boolean,
+    accent: Color,
+    onSelectClipAudio: (Boolean) -> Unit,
+) {
+    val strings = LocalAppStrings.current
+    Row(
+        modifier = Modifier
+            .clip(CircleShape)
+            .background(Color.Black.copy(alpha = 0.46f))
+            .border(1.dp, Color.White.copy(alpha = 0.20f), CircleShape)
+            .padding(2.dp)
+            .testTag("player_clip_audio_switcher"),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        ModeSegmentPill(
+            selected = !useClipAudio,
+            icon = Icons.Rounded.MusicNote,
+            label = strings.playerV33.clipAudioTrackLabel,
+            accent = accent,
+            testTag = "player_track_audio_button",
+            onClick = { onSelectClipAudio(false) },
+        )
+        ModeSegmentPill(
+            selected = useClipAudio,
+            icon = Icons.Rounded.VolumeUp,
+            label = strings.playerV33.clipAudioClipLabel,
+            accent = accent,
+            testTag = "player_clip_audio_button",
+            onClick = { onSelectClipAudio(true) },
+        )
+    }
+}
+
 @OptIn(UnstableApi::class)
 @Composable
-private fun MutedMusicVideoPlayer(
+private fun MusicVideoPlayer(
     stream: ResolvedVideoStream,
     trackDurationMs: Long,
     isPlaying: Boolean,
+    useClipAudio: Boolean,
+    clipAudioSessionId: Int,
+    clipSeekTargetMs: Long,
+    clipSeekNonce: Int,
     positionFlow: StateFlow<Long>,
+    onClipPositionChanged: (Long) -> Unit,
+    onClipDurationResolved: (Long) -> Unit,
     onAspectRatioResolved: (Float) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -1845,22 +1968,27 @@ private fun MutedMusicVideoPlayer(
     val lifecycleOwner = LocalLifecycleOwner.current
     val audioPositionMs by positionFlow.collectAsStateWithLifecycle()
     val latestIsPlaying by rememberUpdatedState(isPlaying)
+    val latestUseClipAudio by rememberUpdatedState(useClipAudio)
+    val latestClipSessionId by rememberUpdatedState(clipAudioSessionId)
     val latestTrackDurationMs by rememberUpdatedState(trackDurationMs)
-    var firstFrameRendered by remember(stream.videoUrl) { mutableStateOf(false) }
-    var lastVideoSeekAtMs by remember(stream.videoUrl) { mutableLongStateOf(0L) }
-    var lastAppliedSpeed by remember(stream.videoUrl) { mutableFloatStateOf(1f) }
+    val latestOnClipPositionChanged by rememberUpdatedState(onClipPositionChanged)
+    val latestOnClipDurationResolved by rememberUpdatedState(onClipDurationResolved)
+    var firstFrameRendered by remember(stream.videoUrl, stream.audioUrl) { mutableStateOf(false) }
+    var lastVideoSeekAtMs by remember(stream.videoUrl, stream.audioUrl) { mutableLongStateOf(0L) }
+    var lastAppliedSpeed by remember(stream.videoUrl, stream.audioUrl) { mutableFloatStateOf(1f) }
+    var handledClipSessionId by remember(stream.videoUrl, stream.audioUrl) { mutableIntStateOf(-1) }
     val videoAlpha by animateFloatAsState(
         targetValue = if (firstFrameRendered) 1f else 0f,
         animationSpec = tween(durationMillis = 200),
         label = "videoFadeIn",
     )
 
-    val exoPlayer = remember(stream.videoUrl) {
+    val exoPlayer = remember(stream.videoUrl, stream.audioUrl, stream.isMuxed) {
         val loadControl = DefaultLoadControl.Builder()
-            .setBufferDurationsMs(4_000, 16_000, 120, 320)
+            .setBufferDurationsMs(4_000, 18_000, 140, 360)
             .setPrioritizeTimeOverSizeThresholds(true)
             .build()
-        val httpFactory = DefaultHttpDataSource.Factory()
+        val videoHttpFactory = DefaultHttpDataSource.Factory()
             .setAllowCrossProtocolRedirects(true)
             .setConnectTimeoutMs(10_000)
             .setReadTimeoutMs(12_000)
@@ -1869,18 +1997,51 @@ private fun MutedMusicVideoPlayer(
                     setDefaultRequestProperties(stream.headers)
                 }
             }
+        val videoSourceFactory = DefaultMediaSourceFactory(videoHttpFactory)
+        val videoMediaSource = videoSourceFactory.createMediaSource(MediaItem.fromUri(stream.videoUrl))
+        val mediaSource = if (!stream.isMuxed && !stream.audioUrl.isNullOrBlank()) {
+            val audioUa = FullStreamResolver.userAgentForStreamUrl(stream.audioUrl)
+            val audioHttpFactory = DefaultHttpDataSource.Factory()
+                .setAllowCrossProtocolRedirects(true)
+                .setConnectTimeoutMs(10_000)
+                .setReadTimeoutMs(12_000)
+                .setDefaultRequestProperties(mapOf("User-Agent" to audioUa))
+            val audioMediaSource = DefaultMediaSourceFactory(audioHttpFactory)
+                .createMediaSource(MediaItem.fromUri(stream.audioUrl))
+            MergingMediaSource(videoMediaSource, audioMediaSource)
+        } else {
+            videoMediaSource
+        }
+
         ExoPlayer.Builder(context)
             .setLoadControl(loadControl)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(httpFactory))
+            .setMediaSourceFactory(videoSourceFactory)
             .build()
             .apply {
                 setSeekParameters(SeekParameters.CLOSEST_SYNC)
-                setMediaItem(MediaItem.fromUri(stream.videoUrl))
+                setMediaSource(mediaSource)
                 repeatMode = Player.REPEAT_MODE_ONE
-                volume = 0f
+                volume = if (latestUseClipAudio && !stream.isLoopingCanvas) 1f else 0f
                 playWhenReady = latestIsPlaying
                 prepare()
             }
+    }
+
+    fun applyClipAudioModeReady() {
+        exoPlayer.volume = 1f
+        if (abs(1.0f - lastAppliedSpeed) > 0.008f) {
+            lastAppliedSpeed = 1.0f
+            exoPlayer.playbackParameters = PlaybackParameters(1.0f)
+        }
+        val realDur = exoPlayer.duration
+        if (realDur > 0L) {
+            latestOnClipDurationResolved(realDur)
+        }
+        if (handledClipSessionId != latestClipSessionId) {
+            handledClipSessionId = latestClipSessionId
+            exoPlayer.seekTo(0L)
+            latestOnClipPositionChanged(0L)
+        }
     }
 
     fun syncPlayerPositionAndRate(
@@ -1888,6 +2049,18 @@ private fun MutedMusicVideoPlayer(
         forceImmediateThresholdMs: Long = 450L,
     ) {
         if (exoPlayer.playbackState != Player.STATE_READY) return
+        if (stream.isLoopingCanvas) {
+            exoPlayer.volume = 0f
+            if (abs(1.0f - lastAppliedSpeed) > 0.008f) {
+                lastAppliedSpeed = 1.0f
+                exoPlayer.playbackParameters = PlaybackParameters(1.0f)
+            }
+            return
+        }
+        if (latestUseClipAudio) {
+            applyClipAudioModeReady()
+            return
+        }
         val clipDurationMs = exoPlayer.duration.takeIf { it > 0L } ?: stream.durationMs
         if (clipDurationMs <= 0L) return
 
@@ -1908,9 +2081,46 @@ private fun MutedMusicVideoPlayer(
         val drift = abs(exoPlayer.currentPosition - target)
         val now = System.currentTimeMillis()
         val largeJump = drift > 900L
-        if (largeJump || (drift > forceImmediateThresholdMs && (now - lastVideoSeekAtMs) > 400L)) {
+        if (largeJump || (drift > forceImmediateThresholdMs && (now - lastVideoSeekAtMs) > 450L)) {
             lastVideoSeekAtMs = now
             exoPlayer.seekTo(target)
+        }
+    }
+
+    LaunchedEffect(useClipAudio, clipAudioSessionId, exoPlayer) {
+        if (useClipAudio && !stream.isLoopingCanvas) {
+            exoPlayer.volume = 1f
+            if (exoPlayer.playbackState == Player.STATE_READY) {
+                applyClipAudioModeReady()
+            } else {
+                handledClipSessionId = clipAudioSessionId
+                exoPlayer.seekTo(0L)
+                latestOnClipPositionChanged(0L)
+            }
+        } else {
+            exoPlayer.volume = 0f
+            syncPlayerPositionAndRate(positionFlow.value, forceImmediateThresholdMs = 80L)
+        }
+    }
+
+    LaunchedEffect(clipSeekNonce, exoPlayer) {
+        if (clipSeekNonce > 0 && latestUseClipAudio && !stream.isLoopingCanvas) {
+            exoPlayer.seekTo(clipSeekTargetMs.coerceAtLeast(0L))
+            latestOnClipPositionChanged(clipSeekTargetMs.coerceAtLeast(0L))
+        }
+    }
+
+    LaunchedEffect(exoPlayer, isPlaying, useClipAudio, stream.isLoopingCanvas) {
+        if (useClipAudio && !stream.isLoopingCanvas) {
+            while (true) {
+                val dur = exoPlayer.duration
+                if (dur > 0L) {
+                    latestOnClipDurationResolved(dur)
+                }
+                val pos = exoPlayer.currentPosition.coerceAtLeast(0L)
+                latestOnClipPositionChanged(pos)
+                delay(if (isPlaying) 120L else 300L)
+            }
         }
     }
 
@@ -1922,11 +2132,13 @@ private fun MutedMusicVideoPlayer(
         } else {
             exoPlayer.pause()
         }
-        syncPlayerPositionAndRate(positionFlow.value, forceImmediateThresholdMs = 180L)
+        if (!latestUseClipAudio && !stream.isLoopingCanvas) {
+            syncPlayerPositionAndRate(positionFlow.value, forceImmediateThresholdMs = 180L)
+        }
     }
 
-    LaunchedEffect(audioPositionMs, trackDurationMs, isPlaying, exoPlayer) {
-        if (!isPlaying) return@LaunchedEffect
+    LaunchedEffect(audioPositionMs, trackDurationMs, isPlaying, useClipAudio, exoPlayer) {
+        if (!isPlaying || useClipAudio || stream.isLoopingCanvas) return@LaunchedEffect
         syncPlayerPositionAndRate(audioPositionMs, forceImmediateThresholdMs = 450L)
     }
 
@@ -1941,9 +2153,14 @@ private fun MutedMusicVideoPlayer(
 
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState == Player.STATE_READY) {
+                    val dur = exoPlayer.duration
+                    if (dur > 0L && !stream.isLoopingCanvas) {
+                        latestOnClipDurationResolved(dur)
+                    }
+                    exoPlayer.volume = if (latestUseClipAudio && !stream.isLoopingCanvas) 1f else 0f
                     exoPlayer.playWhenReady = latestIsPlaying
                     if (latestIsPlaying) exoPlayer.play() else exoPlayer.pause()
-                    syncPlayerPositionAndRate(positionFlow.value, forceImmediateThresholdMs = 220L)
+                    syncPlayerPositionAndRate(positionFlow.value, forceImmediateThresholdMs = 120L)
                 }
             }
 
@@ -1952,7 +2169,11 @@ private fun MutedMusicVideoPlayer(
                 newPosition: Player.PositionInfo,
                 reason: Int,
             ) {
-                syncPlayerPositionAndRate(positionFlow.value, forceImmediateThresholdMs = 300L)
+                if (latestUseClipAudio && !stream.isLoopingCanvas) {
+                    latestOnClipPositionChanged(exoPlayer.currentPosition.coerceAtLeast(0L))
+                } else if (!stream.isLoopingCanvas) {
+                    syncPlayerPositionAndRate(positionFlow.value, forceImmediateThresholdMs = 300L)
+                }
             }
 
             override fun onRenderedFirstFrame() {
@@ -1970,7 +2191,9 @@ private fun MutedMusicVideoPlayer(
                     } else {
                         exoPlayer.pause()
                     }
-                    syncPlayerPositionAndRate(positionFlow.value, forceImmediateThresholdMs = 200L)
+                    if (!latestUseClipAudio && !stream.isLoopingCanvas) {
+                        syncPlayerPositionAndRate(positionFlow.value, forceImmediateThresholdMs = 200L)
+                    }
                 }
                 Lifecycle.Event.ON_STOP -> {
                     exoPlayer.playWhenReady = false

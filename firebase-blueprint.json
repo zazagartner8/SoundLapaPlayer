@@ -81,6 +81,10 @@
           "type": "integer",
           "description": "Client epoch milliseconds when now-playing track info changed"
         },
+        "appVersion": {
+          "type": "string",
+          "description": "Installed SoundLap app version string reported by the client"
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",

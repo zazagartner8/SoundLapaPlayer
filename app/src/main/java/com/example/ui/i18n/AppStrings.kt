@@ -162,6 +162,8 @@ data class PlayerV33Strings(
     val cropAvatarApplyButton: String,
     val lyricsExpandCd: String,
     val lyricsCollapseCd: String,
+    val clipAudioTrackLabel: String,
+    val clipAudioClipLabel: String,
 )
 
 @Immutable
@@ -735,13 +737,13 @@ private val RussianStrings = AppStrings(
     aboutAppDescription = "SoundLap — быстрый музыкальный плеер с потоковым поиском оригинальных треков, синхронизацией текста, режимом клипов, профилями друзей и облачной медиатекой.",
     appVersionLabel = "Версия",
     aboutBuildLabel = "Сборка",
-    aboutWhatsNewTitle = "Что нового в v3.4.1",
+    aboutWhatsNewTitle = "Что нового в v3.4.2",
     aboutWhatsNewItems = listOf(
-        "Исправлено фоновое воспроизведение без остановок, убрано раздвоение трека в начале и удержано уведомление плеера в шторке",
-        "Надёжный вход через Google Аккаунт без отмены при переходе между экранами",
-        "Оптимизирована плавность: скрытые экраны и неактивные анимации больше не перерисовываются в фоне",
-        "Компактный значок разработчика с подробной карточкой, поиск друзей под профилем и статус «Занято» для занятого ника",
-        "Исправлена кнопка «Плейлист» в медиатеке, возврат из профиля создателя без лишнего экрана и очищены технические детали",
+        "Возвращён бесшовный вид верхнего видеобаннера и исправлено его пропадание при смене экранов",
+        "Стабилизирована анимация разворачивания плеера и ускорено открытие окна и страниц артистов",
+        "Исправлен запуск треков из «Недавно прослушанные», убрано раздвоение звука и дубликаты треков",
+        "Треки сразу попадают в «Недавно прослушанные», а +1 прослушивание засчитывается через 40 секунд без перемотки",
+        "Устранено накопление лагов при долгом прослушивании; официальные клипы YouTube Music с переключением «Звук трека / Звук клипа»",
     ),
     aboutFeaturesTitle = "Ключевые возможности",
     aboutFeatureSearchTitle = "Точный поиск оригиналов",
@@ -993,6 +995,8 @@ private val RussianStrings = AppStrings(
         cropAvatarApplyButton = "Проверить и сохранить",
         lyricsExpandCd = "Развернуть текст на весь экран",
         lyricsCollapseCd = "Свернуть текст песни",
+        clipAudioTrackLabel = "Звук трека",
+        clipAudioClipLabel = "Звук клипа",
     ),
     settingsV33 = SettingsV33Strings(
         libraryPlaylistTracksCount = { count -> "Треков: $count" },
@@ -1048,8 +1052,20 @@ private val RussianStrings = AppStrings(
         openHistoryHint = "Нажмите, чтобы посмотреть историю всех версий",
         versions = listOf(
             ChangelogVersionEntry(
-                version = "v3.4.1",
+                version = "v3.4.2",
                 badge = "Новое",
+                title = "SoundLap v3.4.2 — Баннер, Статистика 40с, Клипы YTM и Плавность",
+                items = listOf(
+                    "Возвращён оригинальный бесшовный вид верхнего видеобаннера без пропадания при длительном нахождении на других вкладках",
+                    "Стабилизирована анимация разворачивания/сворачивания плеера и оптимизировано открытие окна соавторов и профиля артиста",
+                    "Исправлен запуск точных треков из «Недавно прослушанные», убрано раздвоение звука и дубликаты на Главной",
+                    "Честная статистика: трек сразу добавляется в «Недавно прослушанные», а счётчик прослушиваний (+1) засчитывается через 40 секунд без перемотки",
+                    "Пакетное сохранение статистики, увеличенные аудиобуферы против лагов и официальные клипы YouTube Music с кнопкой «Звук трека / Звук клипа»",
+                ),
+            ),
+            ChangelogVersionEntry(
+                version = "v3.4.1",
+                badge = "Обновление",
                 title = "SoundLap v3.4.1 — Стабильность звука, Профиль и Быстродействие",
                 items = listOf(
                     "Аудиосервис держит WakeLock/WiFi-Lock, префетчит и делает кроссфейд прямо в фоне без лагов и остановок",
@@ -1308,13 +1324,13 @@ private val EnglishStrings = AppStrings(
     aboutAppDescription = "SoundLap is a responsive music player with accurate original track matching, synced lyrics, in-player music videos, friends by @username, and cloud library sync.",
     appVersionLabel = "Version",
     aboutBuildLabel = "Build",
-    aboutWhatsNewTitle = "What's new in v3.4.1",
+    aboutWhatsNewTitle = "What's new in v3.4.2",
     aboutWhatsNewItems = listOf(
-        "Uninterrupted background playback with WakeLock/WiFi-Lock, no doubled audio at track start & persistent notification on pause",
-        "Hardened Google Sign-In flow bound to Activity context with reliable account state sync",
-        "Off-screen rendering and background shader/video loops pause automatically when covered for maximum smoothness",
-        "Compact verified developer badge with detail popup, friend search right under your profile & Claimed username button state",
-        "Fixed Library playlist button layout, standalone creator profile back flow & cleaner About technical specs",
+        "Restored the seamless top header video banner and fixed it disappearing after switching screens",
+        "Stabilized player expand/collapse morphing and smoothed out opening the artist picker and artist profiles",
+        "Fixed playback from Recently played, eliminated track audio doubling, and deduplicated Home & queue items",
+        "Tracks enter Recently played right away while play counts (+1) require 40 seconds of continuous listening without seeking ahead",
+        "Eliminated long-session lag via batched stats & bigger audio buffers; official YouTube Music clips with Track / Clip audio toggle",
     ),
     aboutFeaturesTitle = "Key capabilities",
     aboutFeatureSearchTitle = "Accurate original matching",
@@ -1566,6 +1582,8 @@ private val EnglishStrings = AppStrings(
         cropAvatarApplyButton = "Verify & save",
         lyricsExpandCd = "Expand lyrics fullscreen",
         lyricsCollapseCd = "Collapse lyrics",
+        clipAudioTrackLabel = "Track audio",
+        clipAudioClipLabel = "Clip audio",
     ),
     settingsV33 = SettingsV33Strings(
         libraryPlaylistTracksCount = { count -> "Track count: $count" },
@@ -1621,8 +1639,20 @@ private val EnglishStrings = AppStrings(
         openHistoryHint = "Tap to view full release history",
         versions = listOf(
             ChangelogVersionEntry(
-                version = "v3.4.1",
+                version = "v3.4.2",
                 badge = "Latest",
+                title = "SoundLap v3.4.2 — Banner, 40s Stats, YTM Clips & Smoothness",
+                items = listOf(
+                    "Restored the seamless top video banner look and fixed it disappearing after switching screens",
+                    "Stabilized mini-to-full player transition and eliminated frame hitches when opening artist picker & artist pages",
+                    "Fixed wrong tracks playing from Recently played, eliminated audio doubling, and deduplicated Home cards",
+                    "Immediate Recently played history + fair +1 play count only after 40 seconds of uninterrupted listening without forward seeks",
+                    "Batched stats writes & pooled audio buffers prevent playback lag over long sessions; YouTube Music clips with Track / Clip audio toggle",
+                ),
+            ),
+            ChangelogVersionEntry(
+                version = "v3.4.1",
+                badge = "Update",
                 title = "SoundLap v3.4.1 — Audio Stability, Profile & Performance",
                 items = listOf(
                     "Service-hosted background supervisor with WakeLock/WiFi-Lock keeps playback, prefetch & crossfade running smoothly off-screen",
@@ -1879,13 +1909,13 @@ private val ItalianStrings = AppStrings(
     aboutAppDescription = "SoundLap è un lettore musicale reattivo con ricerca precisa delle versioni originali, testi sincronizzati, video musicali integrati, amici con @username e sincronizzazione cloud.",
     appVersionLabel = "Versione",
     aboutBuildLabel = "Build",
-    aboutWhatsNewTitle = "Novità nella v3.4.1",
+    aboutWhatsNewTitle = "Novità nella v3.4.2",
     aboutWhatsNewItems = listOf(
-        "Riproduzione in background senza interruzioni con WakeLock/WiFi-Lock, zero audio doppio all'avvio e notifica persistente in pausa",
-        "Accesso con Google potenziato su contesto Activity con sincronizzazione affidabile dell'account",
-        "Rendering off-screen ottimizzato: schermate coperte e animazioni inattive si fermano automaticamente",
-        "Badge sviluppatore compatto con finestra informativa, ricerca amici sotto il profilo e stato Occupato per il nome utente",
-        "Corretto il pulsante Playlist in Libreria, ritorno diretto dal profilo creatore e specifiche tecniche pulite",
+        "Ripristinato l'aspetto continuo del banner video superiore evitando la scomparsa al cambio schermata",
+        "Stabilizzata l'animazione di apertura del player e velocizzata l'apertura dell'elenco e dei profili artisti",
+        "Corretto l'avvio dei brani da Ascoltati di recente, eliminato l'audio doppio e i duplicati nella Home",
+        "Aggiunta immediata in Ascoltati di recente e conteggio ascolti (+1) solo dopo 40 secondi naturali senza avanzamento rapido",
+        "Eliminati i rallentamenti prolungati con statistiche a batch e buffer potenziati; clip YouTube Music con selettore Audio brano / Audio video",
     ),
     aboutFeaturesTitle = "Funzionalità principali",
     aboutFeatureSearchTitle = "Ricerca brani originali",
@@ -2137,6 +2167,8 @@ private val ItalianStrings = AppStrings(
         cropAvatarApplyButton = "Verifica e salva",
         lyricsExpandCd = "Espandi testo a schermo intero",
         lyricsCollapseCd = "Comprimi testo",
+        clipAudioTrackLabel = "Audio brano",
+        clipAudioClipLabel = "Audio video",
     ),
     settingsV33 = SettingsV33Strings(
         libraryPlaylistTracksCount = { count -> "Numero brani: $count" },
@@ -2192,8 +2224,20 @@ private val ItalianStrings = AppStrings(
         openHistoryHint = "Tocca per leggere la cronologia completa",
         versions = listOf(
             ChangelogVersionEntry(
-                version = "v3.4.1",
+                version = "v3.4.2",
                 badge = "Nuovo",
+                title = "SoundLap v3.4.2 — Banner, Statistiche 40s, Clip YTM e Fluidità",
+                items = listOf(
+                    "Ripristinato il banner video originale senza interruzioni e corretto lo sbiadimento dopo altre schermate",
+                    "Stabilizzata la transizione tra mini-player e lettore completo e velocizzata l'apertura di elenco e profili artisti",
+                    "Corretta la riproduzione esatta in Ascoltati di recente, rimosso il doppio audio e i duplicati nella Home",
+                    "Aggiunta immediata in Ascoltati di recente e +1 ascolto solo dopo 40 secondi continui senza saltare avanti",
+                    "Statistiche salvate a batch, buffer audio più ampi contro i lag e clip ufficiali YouTube Music con opzione Audio brano / Audio video",
+                ),
+            ),
+            ChangelogVersionEntry(
+                version = "v3.4.1",
+                badge = "Aggiornamento",
                 title = "SoundLap v3.4.1 — Stabilità Audio, Profilo e Fluidità",
                 items = listOf(
                     "Supervisore audio nel servizio con WakeLock/WiFi-Lock per riproduzione e crossfade continui in background",

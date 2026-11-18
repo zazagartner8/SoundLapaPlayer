@@ -470,6 +470,9 @@ private fun DeveloperUserOverviewCard(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
+                if (!user.appVersion.isNullOrBlank()) {
+                    UserStatBadge(label = "v${user.appVersion}")
+                }
                 UserStatBadge(label = strings.settingsDeveloperStorageTracksLabel(user.tracksCount))
                 UserStatBadge(label = strings.settingsDeveloperStoragePlaylistsLabel(user.playlistsCount))
                 UserStatBadge(label = strings.stats.minutesUnitShort(totalMinutes))
@@ -914,6 +917,10 @@ internal fun DeveloperUserDetailOverlay(
                                     KeyValueRow(
                                         label = strings.devExtras.userDetailUidLabel,
                                         value = "${overview.accountUid ?: "—"} (${overview.userId})",
+                                    )
+                                    KeyValueRow(
+                                        label = strings.appVersionLabel,
+                                        value = overview.appVersion?.let { "v$it" } ?: "—",
                                     )
                                     if (!overview.bio.isNullOrBlank()) {
                                         KeyValueRow(

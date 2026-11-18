@@ -56,9 +56,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
@@ -697,8 +699,13 @@ private fun ArtistShimmeringBanner(
     val isFastScrolling by remember(isFastScrollingProvider) {
         derivedStateOf { isFastScrollingProvider() }
     }
+    var bannerSettled by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        kotlinx.coroutines.delay(300L)
+        bannerSettled = true
+    }
     var lastPhase by remember { mutableFloatStateOf(0f) }
-    val phase = if (!batterySaver && isForeground && isUiVisible && !isFastScrolling) {
+    val phase = if (bannerSettled && !batterySaver && isForeground && isUiVisible && !isFastScrolling) {
         val infiniteTransition = rememberInfiniteTransition(label = "artistBannerShimmer")
         val animatedPhase by infiniteTransition.animateFloat(
             initialValue = 0f,
@@ -752,7 +759,7 @@ private fun ArtistShimmeringBanner(
                         alpha = 0.44f
                     }
                     .let { base ->
-                        if (batterySaver) base
+                        if (batterySaver || !bannerSettled || isFastScrolling) base
                         else base.blur(
                             radius = 24.dp,
                             edgeTreatment = BlurredEdgeTreatment.Rectangle,

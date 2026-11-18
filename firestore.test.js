@@ -203,6 +203,7 @@ test("User profile supports custom bio, compressed avatar data URI, and synced s
       bio: "Basshead & producer",
       photoUrl: "data:image/jpeg;base64,/9j/4AAQSkZJRg==",
       accountUid: "SL-ABCD-1234",
+      appVersion: "3.4.2",
       searchHistory: ["miyagi", "kurokov"],
       listeningStatsJson: "[{\"dayEpoch\":20000,\"trackId\":\"t1\",\"title\":\"Test\",\"artist\":\"Artist\",\"listenedMs\":120000,\"playCount\":2,\"lastPlayedAtMs\":1700000000000}]",
       settings: {
@@ -220,6 +221,20 @@ test("User profile supports custom bio, compressed avatar data URI, and synced s
         audioFocusMode: "MIX",
         updatedAtMs: 1700000000000,
       },
+    })
+  );
+
+  // Rejects empty or oversized appVersion
+  await assertFails(
+    aliceDoc.update({
+      appVersion: "",
+      updatedAt: ts(),
+    })
+  );
+  await assertFails(
+    aliceDoc.update({
+      appVersion: "v".repeat(33),
+      updatedAt: ts(),
     })
   );
 
@@ -271,7 +286,7 @@ test("Bug reports enforce authenticated create, verified-developer read/delete, 
     reporterName: "Alice",
     reporterAvatarUrl: "https://example.com/a.jpg",
     message: "Button alignment issue",
-    appVersion: "3.4.1",
+    appVersion: "3.4.2",
     createdAtMs: 1700000001000,
     createdAt: ts(),
   };

@@ -580,7 +580,7 @@ fun FloatingMiniPlayer(
                     enter = fadeIn(tween(220)),
                     exit = fadeOut(tween(180)),
                     boundsTransform = { _, _ -> spring(dampingRatio = 0.86f, stiffness = 360f) },
-                    resizeMode = SharedTransitionScope.ResizeMode.RemeasureToBounds,
+                    resizeMode = SharedTransitionScope.ResizeMode.ScaleToBounds(),
                 )
             }
         } else {

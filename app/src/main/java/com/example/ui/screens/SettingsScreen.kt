@@ -107,7 +107,9 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -502,20 +504,37 @@ fun SettingsScreen(
                                             modifier = Modifier.testTag("settings_account_avatar"),
                                         )
                                     }
+                                    val compactPlatformStyle = remember { PlatformTextStyle(includeFontPadding = false) }
+                                    val compactLineHeightStyle = remember {
+                                        LineHeightStyle(
+                                            alignment = LineHeightStyle.Alignment.Center,
+                                            trim = LineHeightStyle.Trim.Both,
+                                        )
+                                    }
                                     Column(
-                                        modifier = Modifier.weight(1f),
-                                        verticalArrangement = Arrangement.spacedBy(3.dp),
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .testTag("settings_account_metadata_column"),
+                                        verticalArrangement = Arrangement.spacedBy(0.dp),
                                     ) {
                                         if (accountLabel.isNotBlank()) {
                                             Text(
                                                 text = strings.social.settingsSignedInAsCaption,
-                                                style = MaterialTheme.typography.labelSmall,
+                                                style = MaterialTheme.typography.labelSmall.copy(
+                                                    lineHeight = 12.sp,
+                                                    platformStyle = compactPlatformStyle,
+                                                    lineHeightStyle = compactLineHeightStyle,
+                                                ),
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                                 maxLines = 1,
                                             )
                                             Text(
                                                 text = accountLabel,
-                                                style = MaterialTheme.typography.titleSmall,
+                                                style = MaterialTheme.typography.titleSmall.copy(
+                                                    lineHeight = 16.sp,
+                                                    platformStyle = compactPlatformStyle,
+                                                    lineHeightStyle = compactLineHeightStyle,
+                                                ),
                                                 fontWeight = FontWeight.Bold,
                                                 color = MaterialTheme.colorScheme.onSurface,
                                                 maxLines = 2,
@@ -525,13 +544,17 @@ fun SettingsScreen(
                                         val handle = state.cloudSync.username?.takeIf { it.isNotBlank() }
                                         if (handle != null || state.cloudSync.isVerifiedDeveloper) {
                                             FlowRow(
-                                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                                                verticalArrangement = Arrangement.spacedBy(2.dp),
                                                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                                             ) {
                                                 handle?.let { h ->
                                                     Text(
                                                         text = "${strings.social.settingsUsernamePrefixLabel}: @$h",
-                                                        style = MaterialTheme.typography.labelMedium,
+                                                        style = MaterialTheme.typography.labelMedium.copy(
+                                                            lineHeight = 13.sp,
+                                                            platformStyle = compactPlatformStyle,
+                                                            lineHeightStyle = compactLineHeightStyle,
+                                                        ),
                                                         fontWeight = FontWeight.SemiBold,
                                                         color = accent,
                                                         maxLines = 1,
@@ -549,7 +572,11 @@ fun SettingsScreen(
                                         state.cloudSync.email?.takeIf { it.isNotBlank() && it != accountLabel }?.let { email ->
                                             Text(
                                                 text = email,
-                                                style = MaterialTheme.typography.bodySmall,
+                                                style = MaterialTheme.typography.bodySmall.copy(
+                                                    lineHeight = 14.sp,
+                                                    platformStyle = compactPlatformStyle,
+                                                    lineHeightStyle = compactLineHeightStyle,
+                                                ),
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                                 maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis,
@@ -558,7 +585,11 @@ fun SettingsScreen(
                                         state.cloudSync.bio?.takeIf { it.isNotBlank() }?.let { bio ->
                                             Text(
                                                 text = bio,
-                                                style = MaterialTheme.typography.bodySmall,
+                                                style = MaterialTheme.typography.bodySmall.copy(
+                                                    lineHeight = 14.sp,
+                                                    platformStyle = compactPlatformStyle,
+                                                    lineHeightStyle = compactLineHeightStyle,
+                                                ),
                                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
                                                 maxLines = 2,
                                                 overflow = TextOverflow.Ellipsis,
@@ -569,7 +600,11 @@ fun SettingsScreen(
                                                 state.cloudSync.syncedTracksCount,
                                                 state.cloudSync.syncedPlaylistsCount,
                                             ),
-                                            style = MaterialTheme.typography.bodySmall,
+                                            style = MaterialTheme.typography.bodySmall.copy(
+                                                lineHeight = 14.sp,
+                                                platformStyle = compactPlatformStyle,
+                                                lineHeightStyle = compactLineHeightStyle,
+                                            ),
                                             color = LiquidMint,
                                         )
                                     }

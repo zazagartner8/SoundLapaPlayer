@@ -309,4 +309,96 @@ class FullStreamResolverTest {
             0.001f,
         )
     }
+
+    @Test
+    fun `resolved video stream carries optional paired audio url and muxed state`() {
+        val separateAudioStream = com.example.data.remote.ResolvedVideoStream(
+            videoUrl = "https://example.com/video.mp4",
+            title = "Official Music Video",
+            durationMs = 200_000L,
+            sourcePageUrl = "https://youtube.com/watch?v=dQw4w9WgXcQ",
+            width = 1280,
+            height = 720,
+            audioUrl = "https://example.com/clip-audio.m4a",
+            isMuxed = false,
+        )
+        assertEquals("https://example.com/clip-audio.m4a", separateAudioStream.audioUrl)
+        assertFalse(separateAudioStream.isMuxed)
+
+        val muxedStream = separateAudioStream.copy(audioUrl = null, isMuxed = true)
+        assertTrue(muxedStream.isMuxed)
+        assertEquals(null, muxedStream.audioUrl)
+        assertTrue(muxedStream.hasAudio)
+
+        val canvasStream = muxedStream.copy(
+            isLoopingCanvas = true,
+            sourceKind = com.example.data.remote.VideoStreamSource.SPOTIFY_CANVAS,
+        )
+        assertFalse(canvasStream.hasAudio)
+    }
+
+    @Test
+    fun `spotify clip resolution prioritizes spotify video then canvas and falls back to youtube music`() {
+        val spotifyCanvas = com.example.data.remote.ResolvedVideoStream(
+            videoUrl = "https://canvaz.scdn.co/upload/artist/sample.cnvs.mp4",
+            title = "Canvas",
+            durationMs = 8_000L,
+            sourcePageUrl = "https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT",
+            isLoopingCanvas = true,
+            sourceKind = com.example.data.remote.VideoStreamSource.SPOTIFY_CANVAS,
+        )
+        val youtubeMv = com.example.data.remote.ResolvedVideoStream(
+            videoUrl = "https://example.com/yt-mv.mp4",
+            title = "YT Official Clip",
+            durationMs = 215_000L,
+            sourcePageUrl = "https://youtube.com/watch?v=test",
+            isMuxed = true,
+            isLoopingCanvas = false,
+            sourceKind = com.example.data.remote.VideoStreamSource.YOUTUBE_MUSIC,
+        )
+
+        val chosenSpotifyFirst = FullStreamResolver.resolveMusicVideoWithFallback(
+            spotifyLookup = { spotifyCanvas },
+            youtubeMusicFallback = { youtubeMv },
+        )
+        assertEquals(spotifyCanvas, chosenSpotifyFirst)
+
+        val chosenFallback = FullStreamResolver.resolveMusicVideoWithFallback(
+            spotifyLookup = { null },
+            youtubeMusicFallback = { youtubeMv },
+        )
+        assertEquals(youtubeMv, chosenFallback)
+    }
+
+    @Test
+    fun `spotify catalog parses initialState canvas and music video json plus canvaz protobuf payloads`() {
+        val canvasJson = """{"entities":{"items":{"spotify:track:123":{"canvas":{"url":"https://canvaz.scdn.co/upload/licensor/abc.cnvs.mp4"}}}}}"""
+        val parsedCanvas = com.example.data.remote.SpotifyCatalogClient.parseTrackClipFromInitialStateJson(
+            jsonText = canvasJson,
+            spotifyTrackId = "123",
+            titleHint = "Track",
+            trackDurationMs = 190_000L,
+        )
+        assertTrue(parsedCanvas != null && parsedCanvas.isLoopingCanvas)
+        assertEquals("https://canvaz.scdn.co/upload/licensor/abc.cnvs.mp4", parsedCanvas?.videoUrl)
+
+        val videoJson = """{"entities":{"items":{"spotify:track:123":{"musicVideo":{"url":"https://cdn.spotify.com/video/clip.mp4","durationMs":224000,"width":1920,"height":1080}}}}}"""
+        val parsedVideo = com.example.data.remote.SpotifyCatalogClient.parseTrackClipFromInitialStateJson(
+            jsonText = videoJson,
+            spotifyTrackId = "123",
+            titleHint = "Track",
+            trackDurationMs = 190_000L,
+        )
+        assertTrue(parsedVideo != null && !parsedVideo.isLoopingCanvas && parsedVideo.isMuxed)
+        assertEquals(224_000L, parsedVideo?.durationMs)
+
+        val encodedReq = com.example.data.remote.SpotifyCatalogClient.encodeCanvazRequestProtobuf("spotify:track:4cOdK2wGLETKBW3PvgPWqT")
+        assertTrue(encodedReq.isNotEmpty())
+
+        val canvasUrlBytes = "https://canvaz.scdn.co/upload/artist/test_loop.cnvs.mp4".toByteArray(Charsets.UTF_8)
+        val innerProto = byteArrayOf(0x12, canvasUrlBytes.size.toByte()) + canvasUrlBytes
+        val outerProto = byteArrayOf(0x0A, innerProto.size.toByte()) + innerProto
+        val decodedUrls = com.example.data.remote.SpotifyCatalogClient.extractProtobufVideoUrls(outerProto)
+        assertEquals(listOf("https://canvaz.scdn.co/upload/artist/test_loop.cnvs.mp4"), decodedUrls)
+    }
 }

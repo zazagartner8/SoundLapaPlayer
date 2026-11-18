@@ -569,9 +569,8 @@ private fun SoundLapaAuthenticatedShell(
                 (developerTransition.currentState && developerTransition.targetState && developerTransition.isIdle)
             val playerCovered = settingsCovered ||
                 (settingsTransition.currentState && settingsTransition.targetState && settingsTransition.isIdle)
-            val isMainScreenCovered =
-                (!isPlayerDragging && playerTransition.currentState && playerTransition.targetState && playerTransition.isIdle) ||
-                    (settingsTransition.currentState && settingsTransition.targetState && settingsTransition.isIdle) ||
+            val overlayCovered =
+                (settingsTransition.currentState && settingsTransition.targetState && settingsTransition.isIdle) ||
                     (developerTransition.currentState && developerTransition.targetState && developerTransition.isIdle) ||
                     (aboutTransition.currentState && aboutTransition.targetState && aboutTransition.isIdle) ||
                     (socialTransition.currentState && socialTransition.targetState && socialTransition.isIdle) ||
@@ -592,6 +591,10 @@ private fun SoundLapaAuthenticatedShell(
                 contentColor = MaterialTheme.colorScheme.onBackground,
             ) {
                 SharedTransitionLayout {
+                    val isPlayerMorphing = this@SharedTransitionLayout.isTransitionActive ||
+                        playerTransition.currentState != playerTransition.targetState
+                    val isMainScreenCovered = overlayCovered ||
+                        (!isPlayerDragging && !isPlayerMorphing && playerTransition.currentState && playerTransition.targetState && playerTransition.isIdle)
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -730,6 +733,9 @@ private fun SoundLapaAuthenticatedShell(
                                 },
                             ) {
                                 composable<HomeRoute> {
+                                    val quickPicksQueue = remember(homeState.quickPickRows) {
+                                        homeState.quickPickRows.flatten()
+                                    }
                                     StreamScreen(
                                         state = homeState,
                                         availableFilters = viewModel.availableFilters,
@@ -742,6 +748,22 @@ private fun SoundLapaAuthenticatedShell(
                                             viewModel.playOrToggleTrack(
                                                 track = track,
                                                 contextTitle = appStrings.v34.playbackContextHome,
+                                            )
+                                        },
+                                        onPlayQuickPickTrack = { track ->
+                                            ensureNotificationPermissionOnce()
+                                            viewModel.playOrToggleTrack(
+                                                track = track,
+                                                customQueue = quickPicksQueue,
+                                                contextTitle = appStrings.quickPicks,
+                                            )
+                                        },
+                                        onPlayTrendingTrack = { track ->
+                                            ensureNotificationPermissionOnce()
+                                            viewModel.playOrToggleTrack(
+                                                track = track,
+                                                customQueue = homeState.trendingCarousel,
+                                                contextTitle = appStrings.trending,
                                             )
                                         },
                                         onPlayRecommendedTrack = { track ->
@@ -1017,9 +1039,11 @@ private fun SoundLapaAuthenticatedShell(
                         onProbeMusicVideo = { viewModel.probeMusicVideoAvailability(track) },
                         onSeekToMs = { ms -> viewModel.playbackController.seekTo(ms) },
                         onToggleMusicVideoMode = { enable -> viewModel.toggleMusicVideoMode(track, enable) },
+                        onToggleClipAudio = viewModel::toggleClipAudio,
                         onCollapse = {
                             isPlayerDragging = false
                             pendingScrollToLyrics = false
+                            viewModel.toggleClipAudio(false)
                             viewModel.setPlayerExpanded(false)
                         },
                         onDragStateChange = { isPlayerDragging = it },

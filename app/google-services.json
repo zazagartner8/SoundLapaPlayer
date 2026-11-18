@@ -14,14 +14,6 @@
       },
       "oauth_client": [
         {
-          "client_id": "605566151516-d767qkibg0aer0ihqi95c88tifo54lnb.apps.googleusercontent.com",
-          "client_type": 1,
-          "android_info": {
-            "package_name": "com.aistudio.soundlapa.x7k9m2",
-            "certificate_hash": "ab4a1a01d547fdbb8e1dfbc50175dfc3af41c7f3"
-          }
-        },
-        {
           "client_id": "605566151516-m8eeuncgmu21ipcm4oc17p1kc5lrfnc8.apps.googleusercontent.com",
           "client_type": 1,
           "android_info": {

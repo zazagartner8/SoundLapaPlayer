@@ -22,6 +22,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -60,6 +61,9 @@ fun ArtistCreditPickerDialog(
 ) {
     val strings = LocalAppStrings.current
     val haptics = rememberSoundLapaHaptics()
+    val cardShape = remember { RoundedCornerShape(16.dp) }
+    val cardBg = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f)
+    val avatarBg = remember(accent) { accent.copy(alpha = 0.18f) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -86,54 +90,59 @@ fun ArtistCreditPickerDialog(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 artists.forEachIndexed { index, artistName ->
-                    Surface(
-                        shape = RoundedCornerShape(16.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(16.dp))
-                            .clickable {
+                    androidx.compose.runtime.key(artistName) {
+                        val onArtistClick = androidx.compose.runtime.remember(artistName) {
+                            {
                                 haptics.tick()
                                 onSelectArtist(artistName)
                             }
-                            .minimumInteractiveComponentSize()
-                            .testTag("artist_picker_item_$index"),
-                    ) {
-                        Row(
+                        }
+                        Surface(
+                            shape = cardShape,
+                            color = cardBg,
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(horizontal = 12.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                .clip(cardShape)
+                                .clickable(onClick = onArtistClick)
+                                .minimumInteractiveComponentSize()
+                                .testTag("artist_picker_item_$index"),
                         ) {
-                            Box(
+                            Row(
                                 modifier = Modifier
-                                    .size(34.dp)
-                                    .clip(CircleShape)
-                                    .background(accent.copy(alpha = 0.18f)),
-                                contentAlignment = Alignment.Center,
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
                             ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(34.dp)
+                                        .clip(CircleShape)
+                                        .background(avatarBg),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Person,
+                                        contentDescription = null,
+                                        tint = accent,
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                }
+                                Text(
+                                    text = artistName,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f),
+                                )
                                 Icon(
-                                    imageVector = Icons.Rounded.Person,
-                                    contentDescription = null,
-                                    tint = accent,
-                                    modifier = Modifier.size(18.dp),
+                                    imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                                    contentDescription = strings.artistProfileMenu,
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(20.dp),
                                 )
                             }
-                            Text(
-                                text = artistName,
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f),
-                            )
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
-                                contentDescription = strings.artistProfileMenu,
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(20.dp),
-                            )
                         }
                     }
                 }

@@ -522,7 +522,7 @@ class SoundLapaPreferences(private val context: Context) {
         context.soundLapaDataStore.edit { it[Keys.LAST_SYNC_TIMESTAMP] = timestamp }
     }
 
-    suspend fun savePlaybackState(trackId: String?, positionMs: Long) {
+    fun savePlaybackPositionLightweight(trackId: String?, positionMs: Long) {
         val current = _settings.value
         val nextTrackId = trackId ?: current.lastPlayedTrackId
         if (nextTrackId != current.lastPlayedTrackId) {
@@ -535,6 +535,10 @@ class SoundLapaPreferences(private val context: Context) {
             if (trackId != null) putString("last_played_track_id", trackId)
             putLong("last_played_position_ms", positionMs)
         }.apply()
+    }
+
+    suspend fun savePlaybackState(trackId: String?, positionMs: Long) {
+        savePlaybackPositionLightweight(trackId, positionMs)
         context.soundLapaDataStore.edit { prefs ->
             if (trackId != null) {
                 prefs[Keys.LAST_PLAYED_TRACK_ID] = trackId
@@ -633,7 +637,30 @@ class SoundLapaPreferences(private val context: Context) {
         }
     }
 
-    suspend fun recordTrackPlayed(track: TrackEntity) {
+    suspend fun recordTrackRecentlyPlayed(track: TrackEntity) {
+        val now = System.currentTimeMillis()
+        val current = _settings.value.listeningHistory
+        val existing = current.find { it.trackId == track.id }
+        val nextEntry = ListeningHistoryEntry(
+            trackId = track.id,
+            title = track.title,
+            artist = track.artist,
+            genre = track.genre,
+            playCount = existing?.playCount ?: 0,
+            lastPlayedAtMs = now,
+        )
+        val updated = (listOf(nextEntry) + current.filterNot { it.trackId == track.id }).take(60)
+        val encodedHistory = Json.encodeToString(updated)
+
+        updateSync({ it.copy(listeningHistory = updated) }) {
+            putString("listening_history_json", encodedHistory)
+        }
+        context.soundLapaDataStore.edit {
+            it[Keys.LISTENING_HISTORY] = encodedHistory
+        }
+    }
+
+    suspend fun recordTrackPlayCredit(track: TrackEntity) {
         val now = System.currentTimeMillis()
         val current = _settings.value.listeningHistory
         val existing = current.find { it.trackId == track.id }
@@ -657,7 +684,8 @@ class SoundLapaPreferences(private val context: Context) {
             title = track.title.take(120),
             artist = track.artist.take(120),
             genre = track.genre.take(48),
-            coverArtPath = track.coverArtPath?.takeIf { it.startsWith("http", ignoreCase = true) }?.take(260),
+            coverArtPath = existingEvent?.coverArtPath
+                ?: track.coverArtPath?.takeIf { it.startsWith("http", ignoreCase = true) }?.take(260),
             listenedMs = existingEvent?.listenedMs ?: 0L,
             playCount = (existingEvent?.playCount ?: 0) + 1,
             lastPlayedAtMs = now,
@@ -678,6 +706,10 @@ class SoundLapaPreferences(private val context: Context) {
         }
     }
 
+    suspend fun recordTrackPlayed(track: TrackEntity) {
+        recordTrackPlayCredit(track)
+    }
+
     suspend fun recordListeningProgress(track: TrackEntity, deltaMs: Long) {
         if (deltaMs < 500L) return
         val now = System.currentTimeMillis()
@@ -693,7 +725,7 @@ class SoundLapaPreferences(private val context: Context) {
             coverArtPath = existing?.coverArtPath
                 ?: track.coverArtPath?.takeIf { it.startsWith("http", ignoreCase = true) }?.take(260),
             listenedMs = (existing?.listenedMs ?: 0L) + deltaMs.coerceAtMost(300_000L),
-            playCount = (existing?.playCount ?: 0).coerceAtLeast(1),
+            playCount = existing?.playCount ?: 0,
             lastPlayedAtMs = now,
         )
         val updatedEvents = ListeningStatsAggregator.pruneOldEvents(

@@ -50,6 +50,80 @@ data class PlaybackUiState(
     val playbackContextTitle: String? = null,
 )
 
+/**
+ * Enforces the honest 40-second play count rule:
+ * - A track is immediately added to Recently Played when playback starts without incrementing playCount.
+ * - Play count (+1) is credited at most once per play session when playback naturally reaches
+ *   40,000 ms without forward-seeking past unplayed content or directly onto >= 40s.
+ */
+internal class PlayCountSessionTracker(
+    private val creditThresholdMs: Long = 40_000L,
+    private val minNaturalElapsedMs: Long = 35_000L,
+) {
+    var sessionTrackId: String? = null
+        private set
+    var isCredited: Boolean = false
+        private set
+    var isSeekDisqualified: Boolean = false
+        private set
+    var naturalPlayedMs: Long = 0L
+        private set
+    private var lastSamplePosMs: Long = -1L
+
+    fun onTrackStarted(trackId: String, startPositionMs: Long = 0L) {
+        sessionTrackId = trackId
+        isCredited = false
+        isSeekDisqualified = startPositionMs >= creditThresholdMs
+        naturalPlayedMs = 0L
+        lastSamplePosMs = startPositionMs.coerceAtLeast(0L)
+    }
+
+    fun onUserSeek(fromPosMs: Long, toPosMs: Long) {
+        if (isCredited) return
+        val safeTo = toPosMs.coerceAtLeast(0L)
+        val safeFrom = fromPosMs.coerceAtLeast(0L)
+        if (safeTo < 5_000L) {
+            isSeekDisqualified = false
+            naturalPlayedMs = 0L
+            lastSamplePosMs = safeTo
+            return
+        }
+        if (safeTo >= creditThresholdMs || (safeTo - safeFrom) > 2_500L) {
+            isSeekDisqualified = true
+        }
+        lastSamplePosMs = safeTo
+    }
+
+    fun onProgressSample(
+        trackId: String,
+        posMs: Long,
+        isActuallyPlaying: Boolean,
+        wallDeltaMs: Long,
+        expectPendingSeek: Boolean = false,
+    ): Boolean {
+        if (trackId != sessionTrackId) {
+            onTrackStarted(trackId, posMs)
+        } else if (lastSamplePosMs >= creditThresholdMs && posMs < 3_000L && !expectPendingSeek) {
+            // Natural repeat / loop back to start of track earns a fresh play session
+            onTrackStarted(trackId, posMs)
+        }
+
+        if (isActuallyPlaying && posMs >= 0L) {
+            if (!expectPendingSeek && lastSamplePosMs >= 0L && (posMs - lastSamplePosMs) > 3_500L) {
+                isSeekDisqualified = true
+            }
+            naturalPlayedMs += wallDeltaMs.coerceIn(0L, 1_500L)
+        }
+        lastSamplePosMs = posMs
+
+        if (!isCredited && !isSeekDisqualified && posMs >= creditThresholdMs && naturalPlayedMs >= minNaturalElapsedMs) {
+            isCredited = true
+            return true
+        }
+        return false
+    }
+}
+
 class PlaybackController(
     private val context: Context,
     private val dao: SoundLapaDao,
@@ -83,6 +157,9 @@ class PlaybackController(
     private var lastCrossfadeActivatedAtMs: Long = 0L
     private var rapidSkipTrackId: String? = null
     private var rapidSkipExpiresAtMs: Long = 0L
+    @Volatile
+    private var isClipAudioMuted: Boolean = false
+    private val playCountTracker = PlayCountSessionTracker()
 
     private val _playbackState = MutableStateFlow(PlaybackUiState())
     val playbackState: StateFlow<PlaybackUiState> = _playbackState.asStateFlow()
@@ -101,6 +178,13 @@ class PlaybackController(
         tickerWakeChannel.trySend(Unit)
     }
 
+    fun setClipAudioMuteOverride(muted: Boolean) {
+        if (isClipAudioMuted == muted) return
+        isClipAudioMuted = muted
+        SoundLapaPlaybackService.setClipAudioMuteOverride(muted)
+        mediaController?.volume = if (muted) 0f else 1f
+    }
+
     init {
         scope.launch {
             SoundLapaPlaybackService.audioFocusStatus.collect { focusStatus ->
@@ -116,7 +200,7 @@ class PlaybackController(
                 smoothTransitionDurationSec = settings.smoothTransitionDurationSec.coerceIn(1, 10)
                 if (!smoothTransitionEnabled) {
                     SoundLapaPlaybackService.stopActiveCrossfade(restorePrimaryVolume = true)
-                    mediaController?.volume = 1f
+                    mediaController?.volume = if (isClipAudioMuted) 0f else 1f
                 }
             }
         }
@@ -143,7 +227,7 @@ class PlaybackController(
                 runCatching {
                     val controller = future.get()
                     mediaController = controller
-                    controller.volume = 1f
+                    controller.volume = if (isClipAudioMuted) 0f else 1f
                     attachControllerListener(controller)
                     startPositionTicker()
                     val pending = pendingPlayRequest
@@ -176,6 +260,13 @@ class PlaybackController(
     }
 
     fun disconnect() {
+        val currentId = mediaController?.currentMediaItem?.mediaId ?: _playbackState.value.currentTrackId
+        val currentPos = _positionMs.value
+        if (currentId != null) {
+            scope.launch(Dispatchers.IO) {
+                preferences.savePlaybackState(currentId, currentPos)
+            }
+        }
         SoundLapaPlaybackService.onActiveDeckSwapped = null
         pendingPlayRequest = null
         pendingTogglePlay = false
@@ -298,9 +389,13 @@ class PlaybackController(
         errorRecoveryJob?.cancel()
         errorRetryCounts.remove(track.id)
 
-        val playableQueue = queue.filter { resolveTrackUri(it) != null }.ifEmpty {
-            listOfNotNull(track.takeIf { resolveTrackUri(it) != null })
+        val rawFiltered = queue.filter { resolveTrackUri(it) != null }
+        val normalizedQueue = if (resolveTrackUri(track) != null && rawFiltered.none { it.id == track.id }) {
+            listOf(track) + rawFiltered
+        } else {
+            rawFiltered.ifEmpty { listOfNotNull(track.takeIf { resolveTrackUri(it) != null }) }
         }
+        val playableQueue = normalizedQueue.distinctBy { it.id }
         _queueTracks.value = playableQueue
         val targetIndex = playableQueue.indexOfFirst { it.id == track.id }.coerceAtLeast(0)
         val mediaItems = playableQueue.mapNotNull { toMediaItem(it) }
@@ -322,7 +417,7 @@ class PlaybackController(
             startPositionMs = startPositionMs,
             track = track,
             prefetchQueue = playableQueue,
-            initialVolume = 1f,
+            initialVolume = if (isClipAudioMuted) 0f else 1f,
             contextTitle = resolvedContext,
         )
     }
@@ -378,6 +473,7 @@ class PlaybackController(
         }
         FullStreamResolver.prefetchTracks(surrounding, dao)
 
+        playCountTracker.onTrackStarted(track.id, safeStart)
         _positionMs.value = safeStart
         _playbackState.update {
             it.copy(
@@ -395,9 +491,8 @@ class PlaybackController(
             if (dao.getTrackById(track.id) == null) {
                 dao.upsertTrack(track)
             }
-            dao.incrementPlayCount(track.id)
             preferences.savePlaybackState(track.id, safeStart)
-            preferences.recordTrackPlayed(track)
+            preferences.recordTrackRecentlyPlayed(track)
         }
     }
 
@@ -424,18 +519,27 @@ class PlaybackController(
             controller.playbackState != Player.STATE_IDLE
         if (activelyEngaged) {
             SoundLapaPlaybackService.stopActiveCrossfade(restorePrimaryVolume = true)
-            controller.volume = 1f
+            controller.volume = if (isClipAudioMuted) 0f else 1f
             controller.pause()
             _playbackState.update { it.copy(isPlaying = false, isBuffering = false) }
+            val currentId = controller.currentMediaItem?.mediaId ?: _playbackState.value.currentTrackId
+            val currentPos = _positionMs.value
+            scope.launch(Dispatchers.IO) {
+                preferences.savePlaybackState(currentId, currentPos)
+            }
         } else {
             if (controller.playbackState == Player.STATE_IDLE) {
                 controller.prepare()
             } else if (controller.playbackState == Player.STATE_ENDED) {
                 pendingSeekTargetMs = 0L
                 pendingSeekExpiresAt = System.currentTimeMillis() + 900L
+                val currentId = controller.currentMediaItem?.mediaId ?: _playbackState.value.currentTrackId
+                if (currentId != null) {
+                    playCountTracker.onTrackStarted(currentId, 0L)
+                }
                 controller.seekTo(0L)
             }
-            controller.volume = 1f
+            controller.volume = if (isClipAudioMuted) 0f else 1f
             controller.playWhenReady = true
             controller.play()
             _playbackState.update {
@@ -458,8 +562,11 @@ class PlaybackController(
             positionMs.coerceAtLeast(0L)
         }
 
+        val currentPosBeforeSeek = _positionMs.value.coerceAtLeast(controller.currentPosition.coerceAtLeast(0L))
+        playCountTracker.onUserSeek(fromPosMs = currentPosBeforeSeek, toPosMs = clamped)
+
         SoundLapaPlaybackService.stopActiveCrossfade(restorePrimaryVolume = true)
-        runCatching { controller.volume = 1f }
+        runCatching { controller.volume = if (isClipAudioMuted) 0f else 1f }
         autoCrossfadeTriggeredTrackId = null
         pendingSeekTargetMs = clamped
         pendingSeekExpiresAt = System.currentTimeMillis() + 1200L
@@ -571,6 +678,7 @@ class PlaybackController(
             FullStreamResolver.prefetchTracks(upcomingWindow, dao)
         }
 
+        playCountTracker.onTrackStarted(targetMediaId, 0L)
         _positionMs.value = 0L
         _playbackState.update {
             it.copy(
@@ -584,7 +692,7 @@ class PlaybackController(
         }
 
         SoundLapaPlaybackService.prepareCleanSingleDeckStart()
-        controller.volume = 1f
+        controller.volume = if (isClipAudioMuted) 0f else 1f
         controller.seekTo(nextIdx, 0L)
         controller.playWhenReady = true
         if (controller.playbackState == Player.STATE_IDLE) {
@@ -668,6 +776,7 @@ class PlaybackController(
             FullStreamResolver.prefetchTracks(listOf(prevTrack), dao)
         }
 
+        playCountTracker.onTrackStarted(targetMediaId, 0L)
         _positionMs.value = 0L
         _playbackState.update {
             it.copy(
@@ -681,7 +790,7 @@ class PlaybackController(
         }
 
         SoundLapaPlaybackService.prepareCleanSingleDeckStart()
-        controller.volume = 1f
+        controller.volume = if (isClipAudioMuted) 0f else 1f
         controller.seekTo(prevIdx, 0L)
         controller.playWhenReady = true
         if (controller.playbackState == Player.STATE_IDLE) {
@@ -753,15 +862,15 @@ class PlaybackController(
                 }
 
                 transitioningId?.let { id ->
+                    playCountTracker.onTrackStarted(id, 0L)
                     val knownTrack = knownTracksById[id]
                     scope.launch(Dispatchers.IO) {
                         if (knownTrack != null && dao.getTrackById(id) == null) {
                             dao.upsertTrack(knownTrack)
                         }
-                        dao.incrementPlayCount(id)
                         preferences.savePlaybackState(id, 0L)
                         if (knownTrack != null) {
-                            preferences.recordTrackPlayed(knownTrack)
+                            preferences.recordTrackRecentlyPlayed(knownTrack)
                         }
                     }
                 }
@@ -910,7 +1019,7 @@ class PlaybackController(
 
             fun flushPendingListening(trackId: String?, force: Boolean) {
                 if (trackId == null) return
-                val minThreshold = if (force) 1000L else 5000L
+                val minThreshold = if (force) 1000L else 30_000L
                 if (pendingListeningMs >= minThreshold) {
                     val deltaToFlush = pendingListeningMs
                     pendingListeningMs = 0L
@@ -956,18 +1065,41 @@ class PlaybackController(
                     }
                     isActivelyRunning = playing || buffering
 
-                    // Track actual elapsed wall-clock listening time for Week/Month/Year stats
+                    // Track actual elapsed wall-clock listening time for Week/Month/Year stats + 40s play credit
                     if (controllerMediaId != activeListeningTrackId) {
                         flushPendingListening(activeListeningTrackId, force = true)
                         activeListeningTrackId = controllerMediaId
                         lastListeningWallMs = if (playing && controller.isPlaying) now else 0L
                     } else if (playing && controller.isPlaying && controllerMediaId != null) {
-                        if (lastListeningWallMs > 0L) {
-                            val wallDelta = (now - lastListeningWallMs).coerceIn(0L, 1500L)
-                            pendingListeningMs += wallDelta
+                        val wallDelta = if (lastListeningWallMs > 0L) {
+                            (now - lastListeningWallMs).coerceIn(0L, 1500L)
+                        } else {
+                            0L
                         }
+                        pendingListeningMs += wallDelta
                         lastListeningWallMs = now
                         flushPendingListening(controllerMediaId, force = false)
+
+                        val shouldCreditPlay = playCountTracker.onProgressSample(
+                            trackId = controllerMediaId,
+                            posMs = pos,
+                            isActuallyPlaying = true,
+                            wallDeltaMs = wallDelta,
+                            expectPendingSeek = pendingSeekTargetMs >= 0L && now < pendingSeekExpiresAt,
+                        )
+                        if (shouldCreditPlay) {
+                            val creditedTrack = knownTracksById[controllerMediaId]
+                                ?: cachedQueue.find { it.id == controllerMediaId }
+                            launch(Dispatchers.IO) {
+                                if (creditedTrack != null && dao.getTrackById(controllerMediaId) == null) {
+                                    dao.upsertTrack(creditedTrack)
+                                }
+                                dao.incrementPlayCount(controllerMediaId)
+                                if (creditedTrack != null) {
+                                    preferences.recordTrackPlayCredit(creditedTrack)
+                                }
+                            }
+                        }
                     } else {
                         flushPendingListening(activeListeningTrackId, force = true)
                         lastListeningWallMs = 0L
@@ -1000,13 +1132,11 @@ class PlaybackController(
 
                     val currentId = controller.currentMediaItem?.mediaId
                     if (playing && currentId != null &&
-                        (currentId != lastPersistedTrackId || abs(pos - lastPersistedPosMs) >= 2500L)
+                        (currentId != lastPersistedTrackId || abs(pos - lastPersistedPosMs) >= 4_000L)
                     ) {
                         lastPersistedTrackId = currentId
                         lastPersistedPosMs = pos
-                        launch(Dispatchers.IO) {
-                            preferences.savePlaybackState(currentId, pos)
-                        }
+                        preferences.savePlaybackPositionLightweight(currentId, pos)
                     }
                 } else {
                     flushPendingListening(activeListeningTrackId, force = true)

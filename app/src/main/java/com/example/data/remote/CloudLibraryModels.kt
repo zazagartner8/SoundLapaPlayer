@@ -213,6 +213,7 @@ data class CloudUserProfile(
     @set:PropertyName("currentTrackIsPlaying")
     var currentTrackIsPlaying: Boolean = false,
     val currentTrackUpdatedAtMs: Long = 0L,
+    val appVersion: String? = null,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null,
 ) {
@@ -248,6 +249,7 @@ data class CloudUserProfile(
         settings?.let { raw ->
             CloudUserSettings.fromRawMap(raw)?.let { put("settings", it.toMap()) }
         }
+        appVersion?.trim()?.takeIf { it.isNotEmpty() }?.let { put("appVersion", it.take(32)) }
         put("createdAt", FieldValue.serverTimestamp())
         put("updatedAt", FieldValue.serverTimestamp())
     }
@@ -265,6 +267,7 @@ data class CloudUserProfile(
             put("bio", bio?.trim()?.take(180) ?: "")
         }
         accountUid?.trim()?.takeIf { it.length in 3..32 }?.let { put("accountUid", it) }
+        appVersion?.trim()?.takeIf { it.isNotEmpty() }?.let { put("appVersion", it.take(32)) }
         if (includeSettings) {
             CloudUserSettings.fromRawMap(settings)?.let { put("settings", it.toMap()) }
         }
@@ -442,7 +445,7 @@ data class CloudBugReport(
         put("reporterName", reporterName.trim().ifBlank { "SoundLap User" }.take(64))
         reporterAvatarUrl?.trim()?.takeIf { it.isNotEmpty() }?.let { put("reporterAvatarUrl", it.take(MAX_CLOUD_AVATAR_LEN)) }
         put("message", message.trim().ifBlank { "Bug report" }.take(1000))
-        put("appVersion", appVersion.trim().ifBlank { "3.4.1" }.take(32))
+        put("appVersion", appVersion.trim().ifBlank { "3.4.2" }.take(32))
         put("createdAtMs", createdAtMs.coerceAtLeast(0L))
         put("createdAt", FieldValue.serverTimestamp())
     }
@@ -743,6 +746,7 @@ data class DeveloperUserOverview(
     val searchHistory: List<String> = emptyList(),
     val settings: CloudUserSettings? = null,
     val profileUpdatedAtMs: Long = 0L,
+    val appVersion: String? = null,
     val isBanned: Boolean = false,
     val banReason: String? = null,
     val bannedAtMs: Long = 0L,

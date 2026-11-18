@@ -306,27 +306,10 @@ fun AvatarCropDialog(
 
                 Avatar18PlusWarningBanner()
 
-                Row(
+                Column(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    OutlinedButton(
-                        onClick = onDismiss,
-                        shape = RoundedCornerShape(16.dp),
-                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp),
-                        modifier = Modifier
-                            .weight(0.82f)
-                            .height(48.dp)
-                            .testTag("avatar_crop_cancel_button"),
-                    ) {
-                        Text(
-                            text = strings.cancel,
-                            style = MaterialTheme.typography.labelLarge,
-                            maxLines = 1,
-                            softWrap = false,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
                     Button(
                         onClick = {
                             val src = bmp ?: return@Button
@@ -349,21 +332,38 @@ fun AvatarCropDialog(
                         enabled = bmp != null && !isLoading,
                         shape = RoundedCornerShape(16.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = accent),
-                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 14.dp),
                         modifier = Modifier
-                            .weight(1.75f)
+                            .fillMaxWidth()
                             .height(48.dp)
                             .testTag("avatar_crop_confirm_button"),
                     ) {
                         Icon(
                             imageVector = Icons.Rounded.Check,
                             contentDescription = null,
-                            modifier = Modifier.size(16.dp),
+                            modifier = Modifier.size(18.dp),
                         )
-                        Spacer(Modifier.width(4.dp))
+                        Spacer(Modifier.width(6.dp))
                         Text(
                             text = strings.playerV33.cropAvatarApplyButton,
-                            style = MaterialTheme.typography.labelMedium,
+                            style = MaterialTheme.typography.labelLarge,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    OutlinedButton(
+                        onClick = onDismiss,
+                        shape = RoundedCornerShape(16.dp),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(46.dp)
+                            .testTag("avatar_crop_cancel_button"),
+                    ) {
+                        Text(
+                            text = strings.cancel,
+                            style = MaterialTheme.typography.labelLarge,
                             maxLines = 1,
                             softWrap = false,
                             overflow = TextOverflow.Ellipsis,
