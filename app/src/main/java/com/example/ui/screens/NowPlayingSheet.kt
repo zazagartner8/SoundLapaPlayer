@@ -165,6 +165,8 @@ import com.example.ui.i18n.LocalAppStrings
 import com.example.ui.shaders.FloatingCoverBackdrop
 import com.example.ui.shaders.LiquidGlassCard
 import com.example.ui.shaders.TrackCoverArtwork
+import com.example.ui.theme.SoundLapMotion
+import com.example.ui.theme.expressivePressScale
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -223,7 +225,7 @@ fun NowPlayingSheet(
 
     val artworkScale by animateFloatAsState(
         targetValue = if (playback.isPlaying) 1.0f else 0.94f,
-        animationSpec = spring(dampingRatio = 0.72f),
+        animationSpec = SoundLapMotion.spatialBouncy(),
         label = "artworkScale",
     )
 
@@ -571,8 +573,8 @@ fun NowPlayingSheet(
                         (musicVideoState.isVideoModeEnabled && !musicVideoState.unavailable)
                     androidx.compose.animation.AnimatedVisibility(
                         visible = showCoverClipToggle,
-                        enter = fadeIn(tween(220)) + expandVertically(tween(220)),
-                        exit = fadeOut(tween(180)) + shrinkVertically(tween(180)),
+                        enter = fadeIn(SoundLapMotion.effectsFast()) + expandVertically(SoundLapMotion.spatialDefault()),
+                        exit = fadeOut(SoundLapMotion.effectsFast()) + shrinkVertically(SoundLapMotion.spatialFast()),
                         modifier = Modifier
                             .padding(top = 2.dp, bottom = 4.dp)
                             .testTag("floating_cover_clip_switcher"),
@@ -594,8 +596,8 @@ fun NowPlayingSheet(
                                 stream.hasAudio
                             androidx.compose.animation.AnimatedVisibility(
                                 visible = canSwitchClipAudio,
-                                enter = fadeIn(tween(200)) + expandVertically(tween(200)),
-                                exit = fadeOut(tween(160)) + shrinkVertically(tween(160)),
+                                enter = fadeIn(SoundLapMotion.effectsFast()) + expandVertically(SoundLapMotion.spatialDefault()),
+                                exit = fadeOut(SoundLapMotion.effectsFast()) + shrinkVertically(SoundLapMotion.spatialFast()),
                             ) {
                                 ClipAudioSourceSwitcher(
                                     useClipAudio = musicVideoState.useClipAudio,
@@ -652,7 +654,11 @@ fun NowPlayingSheet(
                                             ratio = animatedMediaAspect,
                                             matchHeightConstraintsFirst = animatedMediaAspect < 1f,
                                         )
-                                        .scale(if (musicVideoState.isVideoModeEnabled) 1f else artworkScale),
+                                        .graphicsLayer {
+                                            val s = if (musicVideoState.isVideoModeEnabled) 1f else artworkScale
+                                            scaleX = s
+                                            scaleY = s
+                                        },
                                     shape = RoundedCornerShape(28.dp),
                                     accentTint = accent,
                                     elevation = 20.dp,
@@ -823,6 +829,7 @@ fun NowPlayingSheet(
                                             },
                                             modifier = Modifier
                                                 .minimumInteractiveComponentSize()
+                                                .expressivePressScale(pressedScale = 0.86f)
                                                 .testTag("player_spotify_add_button"),
                                         ) {
                                             Icon(
@@ -833,18 +840,30 @@ fun NowPlayingSheet(
                                             )
                                         }
 
+                                        val playerLikeScale by animateFloatAsState(
+                                            targetValue = if (track.isLiked) 1.15f else 1.0f,
+                                            animationSpec = SoundLapMotion.spatialBouncy(),
+                                            label = "playerLikeScale",
+                                        )
                                         IconButton(
                                             onClick = {
                                                 haptics.confirm()
                                                 onToggleLike()
                                             },
-                                            modifier = Modifier.minimumInteractiveComponentSize(),
+                                            modifier = Modifier
+                                                .minimumInteractiveComponentSize()
+                                                .expressivePressScale(pressedScale = 0.84f),
                                         ) {
                                             Icon(
                                                 imageVector = if (track.isLiked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
                                                 contentDescription = stringResource(R.string.cd_like_track),
                                                 tint = if (track.isLiked) themeAccent else Color.White,
-                                                modifier = Modifier.size(26.dp),
+                                                modifier = Modifier
+                                                    .size(26.dp)
+                                                    .graphicsLayer {
+                                                        scaleX = playerLikeScale
+                                                        scaleY = playerLikeScale
+                                                    },
                                             )
                                         }
                                     }
@@ -902,6 +921,7 @@ fun NowPlayingSheet(
                                         },
                                         modifier = Modifier
                                             .size(50.dp)
+                                            .expressivePressScale(pressedScale = 0.86f)
                                             .testTag("full_player_previous"),
                                     ) {
                                         Icon(
@@ -915,6 +935,7 @@ fun NowPlayingSheet(
                                     Box(
                                         modifier = Modifier
                                             .size(66.dp)
+                                            .expressivePressScale(pressedScale = 0.88f)
                                             .clip(CircleShape)
                                             .background(Color.White)
                                             .border(1.dp, Color.White.copy(alpha = 0.45f), CircleShape)
@@ -951,6 +972,7 @@ fun NowPlayingSheet(
                                         },
                                         modifier = Modifier
                                             .size(50.dp)
+                                            .expressivePressScale(pressedScale = 0.86f)
                                             .testTag("full_player_next"),
                                     ) {
                                         Icon(

@@ -106,6 +106,8 @@ data class SoundLapaSettings(
     val waveFilterConfig: WaveFilterConfig = WaveFilterConfig(),
     val listeningEvents: List<ListeningPlayEvent> = emptyList(),
     val explicitTrackIds: Set<String> = emptySet(),
+    val lastNotifiedAvatarRequestMs: Long = 0L,
+    val lastNotifiedBugReportMs: Long = 0L,
 )
 
 class SoundLapaPreferences(private val context: Context) {
@@ -149,6 +151,8 @@ class SoundLapaPreferences(private val context: Context) {
         val WAVE_FILTER_JSON = stringPreferencesKey("wave_filter_json")
         val LISTENING_EVENTS_JSON = stringPreferencesKey("listening_events_json")
         val EXPLICIT_TRACK_IDS = stringPreferencesKey("explicit_track_ids_json")
+        val LAST_NOTIFIED_AVATAR_REQ_MS = longPreferencesKey("last_notified_avatar_req_ms")
+        val LAST_NOTIFIED_BUG_REPORT_MS = longPreferencesKey("last_notified_bug_report_ms")
     }
 
     // Synchronous SharedPreferences mirror ensures instant restoration on frame 0
@@ -214,6 +218,8 @@ class SoundLapaPreferences(private val context: Context) {
             waveFilterConfig = decodeWaveFilterConfig(syncPrefs.getString("wave_filter_json", null)),
             listeningEvents = decodeListeningEvents(syncPrefs.getString("listening_events_json", null)),
             explicitTrackIds = decodeStringSet(syncPrefs.getString("explicit_track_ids_json", null)),
+            lastNotifiedAvatarRequestMs = syncPrefs.getLong("last_notified_avatar_req_ms", 0L),
+            lastNotifiedBugReportMs = syncPrefs.getLong("last_notified_bug_report_ms", 0L),
         )
     }
 
@@ -924,5 +930,21 @@ class SoundLapaPreferences(private val context: Context) {
         context.soundLapaDataStore.edit { prefs ->
             prefs[Keys.WAVE_FILTER_JSON] = encoded
         }
+    }
+
+    suspend fun setLastNotifiedAvatarRequestMs(timestampMs: Long) {
+        val clamped = maxOf(timestampMs, _settings.value.lastNotifiedAvatarRequestMs)
+        updateSync({ it.copy(lastNotifiedAvatarRequestMs = clamped) }) {
+            putLong("last_notified_avatar_req_ms", clamped)
+        }
+        context.soundLapaDataStore.edit { it[Keys.LAST_NOTIFIED_AVATAR_REQ_MS] = clamped }
+    }
+
+    suspend fun setLastNotifiedBugReportMs(timestampMs: Long) {
+        val clamped = maxOf(timestampMs, _settings.value.lastNotifiedBugReportMs)
+        updateSync({ it.copy(lastNotifiedBugReportMs = clamped) }) {
+            putLong("last_notified_bug_report_ms", clamped)
+        }
+        context.soundLapaDataStore.edit { it[Keys.LAST_NOTIFIED_BUG_REPORT_MS] = clamped }
     }
 }

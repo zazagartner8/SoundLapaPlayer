@@ -107,6 +107,7 @@ import com.example.data.local.PlaylistEntity
 import com.example.data.local.PlaylistMetadataHelper
 import com.example.data.local.PlaylistWithTracks
 import com.example.data.local.TrackEntity
+import com.example.data.remote.FullStreamResolver
 import com.example.ui.MainUiState
 import com.example.ui.PlaylistSortMode
 import com.example.ui.StatsBackupUiState
@@ -117,9 +118,12 @@ import com.example.ui.components.rememberSoundLapaHaptics
 import com.example.ui.i18n.AppStrings
 import com.example.ui.i18n.LocalAppStrings
 import com.example.ui.shaders.LocalBatterySaverEnabled
+import com.example.ui.shaders.LocalDataSaverEnabled
 import com.example.ui.shaders.TrackCoverArtwork
 import com.example.ui.shaders.rememberIsAppForeground
 import com.example.ui.theme.LiquidRose
+import com.example.ui.theme.expressivePressScale
+import com.example.ui.theme.resolveCoverImageData
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
@@ -635,6 +639,7 @@ fun LibraryScreen(
                                     onOpen = onOpenPl,
                                     onLongPress = onLongPressPl,
                                     onPlay = onPlayPl,
+                                    modifier = Modifier.animateItem(),
                                 )
                             }
                         }
@@ -678,6 +683,7 @@ fun LibraryScreen(
                                     onPlayClick = onPlayClick,
                                     onLikeClick = onLikeClick,
                                     onMoreClick = onMoreClick,
+                                    modifier = Modifier.animateItem(),
                                 )
                             }
                         }
@@ -867,6 +873,7 @@ private fun PlaylistRowCard(
     onOpen: () -> Unit,
     onLongPress: () -> Unit,
     onPlay: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val strings = LocalAppStrings.current
     val context = LocalContext.current
@@ -892,10 +899,21 @@ private fun PlaylistRowCard(
         }
     }
 
-    val shape = RoundedCornerShape(20.dp)
+    val dataSaver = LocalDataSaverEnabled.current
+    val shape = remember { RoundedCornerShape(20.dp) }
+    val backdropModel = remember(backdropCoverUrl, dataSaver) {
+        val data = resolveCoverImageData(backdropCoverUrl, dataSaver = dataSaver) ?: return@remember null
+        ImageRequest.Builder(context)
+            .data(data)
+            .allowHardware(true)
+            .size(160)
+            .crossfade(false)
+            .build()
+    }
     Surface(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
+            .expressivePressScale(pressedScale = 0.975f)
             .clip(shape)
             .combinedClickable(
                 onClick = onOpen,
@@ -908,14 +926,9 @@ private fun PlaylistRowCard(
     ) {
         Box(modifier = Modifier.fillMaxWidth()) {
             // Lightweight translucent cover backdrop (zero SubcomposeAsyncImage / border overhead for 60fps scroll)
-            if (!backdropCoverUrl.isNullOrBlank()) {
+            if (backdropModel != null) {
                 AsyncImage(
-                    model = ImageRequest.Builder(context)
-                        .data(backdropCoverUrl)
-                        .allowHardware(true)
-                        .size(160)
-                        .crossfade(false)
-                        .build(),
+                    model = backdropModel,
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier
@@ -977,6 +990,7 @@ private fun PlaylistRowCard(
                         onClick = onPlay,
                         modifier = Modifier
                             .size(44.dp)
+                            .expressivePressScale(pressedScale = 0.90f)
                             .clip(CircleShape)
                             .background(accent),
                     ) {
@@ -1002,33 +1016,62 @@ private fun PlaylistArtworkMosaic(
     cornerRadius: Dp = 14.dp,
 ) {
     val context = LocalContext.current
-    val shape = RoundedCornerShape(cornerRadius)
-    val firstTrack = tracks.firstOrNull()
+    val dataSaver = LocalDataSaverEnabled.current
+    val shape = remember(cornerRadius) { RoundedCornerShape(cornerRadius) }
+    val firstTrack = remember(tracks) {
+        tracks.firstOrNull { !it.coverArtPath.isNullOrBlank() } ?: tracks.firstOrNull()
+    }
     val distinctArtTracks = remember(tracks) {
         tracks.filter { !it.coverArtPath.isNullOrBlank() }.distinctBy { it.coverArtPath }.take(4)
     }
 
+    var useFallbackUrl by remember(coverArtPath) { mutableStateOf(false) }
     var customCoverFailed by remember(coverArtPath) { mutableStateOf(false) }
-    if (!coverArtPath.isNullOrBlank() && !customCoverFailed) {
-        AsyncImage(
-            model = ImageRequest.Builder(context)
-                .data(coverArtPath)
-                .allowHardware(true)
-                .size(280)
-                .crossfade(false)
-                .build(),
-            contentDescription = null,
-            contentScale = ContentScale.Crop,
-            onError = { customCoverFailed = true },
-            modifier = modifier.clip(shape),
+
+    val resolvedData = remember(coverArtPath, dataSaver, useFallbackUrl, customCoverFailed) {
+        if (customCoverFailed) null
+        else resolveCoverImageData(coverArtPath, dataSaver = dataSaver, useFallbackUrl = useFallbackUrl)
+    }
+
+    val imageModel = remember(resolvedData, dataSaver) {
+        val data = resolvedData ?: return@remember null
+        ImageRequest.Builder(context)
+            .data(data)
+            .allowHardware(true)
+            .size(if (dataSaver) 240 else 360)
+            .crossfade(140)
+            .build()
+    }
+
+    Box(modifier = modifier.clip(shape)) {
+        // Always keep fallback mosaic/gradient underneath so covers never flash blank while loading
+        PlaylistArtworkMosaicFallback(
+            distinctArtTracks = distinctArtTracks,
+            fallbackTrack = firstTrack,
+            accentColor = accentColor,
+            cornerRadius = cornerRadius,
         )
-    } else {
-        Box(modifier = modifier.clip(shape)) {
-            PlaylistArtworkMosaicFallback(
-                distinctArtTracks = distinctArtTracks,
-                fallbackTrack = firstTrack,
-                accentColor = accentColor,
-                cornerRadius = cornerRadius,
+
+        if (imageModel != null && !customCoverFailed) {
+            AsyncImage(
+                model = imageModel,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                onError = {
+                    val hasUrlFallback = !useFallbackUrl &&
+                        !coverArtPath.isNullOrBlank() &&
+                        (coverArtPath.startsWith("http://", ignoreCase = true) ||
+                            coverArtPath.startsWith("https://", ignoreCase = true)) &&
+                        FullStreamResolver.fallbackArtworkUrl(
+                            FullStreamResolver.upgradeArtworkUrl(coverArtPath, dataSaver = dataSaver) ?: coverArtPath,
+                        ) != null
+                    if (hasUrlFallback) {
+                        useFallbackUrl = true
+                    } else {
+                        customCoverFailed = true
+                    }
+                },
+                modifier = Modifier.fillMaxSize(),
             )
         }
     }
@@ -1653,16 +1696,25 @@ private fun PlaylistFloatingCoverBackdrop(
                     )
                 },
         ) {
-            if (!coverArtUrl.isNullOrBlank()) {
+            val resolvedBackdropData = remember(coverArtUrl) {
+                resolveCoverImageData(coverArtUrl, dataSaver = true)
+            }
+            var backdropFailed by remember(coverArtUrl) { mutableStateOf(false) }
+            val backdropRequest = remember(resolvedBackdropData, backdropFailed) {
+                if (backdropFailed || resolvedBackdropData == null) null
+                else ImageRequest.Builder(context)
+                    .data(resolvedBackdropData)
+                    .allowHardware(true)
+                    .size(160)
+                    .crossfade(false)
+                    .build()
+            }
+            if (backdropRequest != null) {
                 AsyncImage(
-                    model = ImageRequest.Builder(context)
-                        .data(coverArtUrl)
-                        .allowHardware(true)
-                        .size(140)
-                        .crossfade(false)
-                        .build(),
+                    model = backdropRequest,
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
+                    onError = { backdropFailed = true },
                     modifier = Modifier.fillMaxSize(),
                 )
             } else if (fallbackTrack != null) {

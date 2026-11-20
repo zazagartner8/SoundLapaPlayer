@@ -37,6 +37,7 @@ import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.PauseCircleOutline
 import androidx.compose.material.icons.rounded.Person
+import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.PlaylistPlay
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
@@ -104,9 +105,11 @@ internal fun DeveloperUsersTabContent(
     users: List<DeveloperUserOverview>,
     isLoadingUsers: Boolean,
     usersErrorMessage: String?,
+    playingUserTrackUid: String? = null,
     accent: Color,
     onRefreshUsers: () -> Unit,
     onSelectUser: (String) -> Unit,
+    onPlayUserTrack: (DeveloperUserOverview) -> Unit = {},
 ) {
     val strings = LocalAppStrings.current
     val haptics = rememberSoundLapaHaptics()
@@ -292,6 +295,11 @@ internal fun DeveloperUsersTabContent(
                 accent = accent,
                 strings = strings,
                 dateFormatter = dateFormatter,
+                isResolvingUserTrack = playingUserTrackUid == user.userId,
+                onPlayUserTrack = {
+                    haptics.tap()
+                    onPlayUserTrack(user)
+                },
                 onClick = {
                     haptics.tick()
                     onSelectUser(user.userId)
@@ -331,6 +339,8 @@ private fun DeveloperUserOverviewCard(
     accent: Color,
     strings: AppStrings,
     dateFormatter: SimpleDateFormat,
+    isResolvingUserTrack: Boolean,
+    onPlayUserTrack: () -> Unit,
     onClick: () -> Unit,
 ) {
     val totalMinutes = remember(user.listeningEvents) {
@@ -407,6 +417,9 @@ private fun DeveloperUserOverviewCard(
                                 overflow = TextOverflow.Ellipsis,
                             )
                         }
+                        if (user.isModerator) {
+                            ModeratorVerifiedPill(label = strings.v35.moderatorBadge)
+                        }
                         if (user.isBanned) {
                             Box(
                                 modifier = Modifier
@@ -457,12 +470,15 @@ private fun DeveloperUserOverviewCard(
 
             if (!user.currentTrackTitle.isNullOrBlank()) {
                 UserNowPlayingBanner(
+                    userId = user.userId,
                     title = user.currentTrackTitle,
                     artist = user.currentTrackArtist.orEmpty(),
                     coverUrl = user.currentTrackCoverUrl,
                     isPlaying = user.currentTrackIsPlaying,
+                    isResolvingTrack = isResolvingUserTrack,
                     accent = accent,
                     strings = strings,
+                    onPlayTrack = onPlayUserTrack,
                 )
             }
 
@@ -484,12 +500,15 @@ private fun DeveloperUserOverviewCard(
 
 @Composable
 private fun UserNowPlayingBanner(
+    userId: String,
     title: String,
     artist: String,
     coverUrl: String?,
     isPlaying: Boolean,
+    isResolvingTrack: Boolean,
     accent: Color,
     strings: AppStrings,
+    onPlayTrack: () -> Unit,
 ) {
     val statusColor = if (isPlaying) LiquidCyan else MaterialTheme.colorScheme.onSurfaceVariant
     Row(
@@ -497,23 +516,36 @@ private fun UserNowPlayingBanner(
             .fillMaxWidth()
             .clip(RoundedCornerShape(14.dp))
             .background(MaterialTheme.colorScheme.background.copy(alpha = 0.6f))
-            .padding(horizontal = 10.dp, vertical = 8.dp),
+            .padding(start = 10.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         RemoteSquareThumb(
             url = coverUrl,
             contentDescription = title,
-            size = 36.dp,
+            size = 38.dp,
             cornerRadius = 10.dp,
         )
         Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = if (isPlaying) strings.devExtras.nowListeningLabel else strings.devExtras.lastTrackPausedLabel,
-                style = MaterialTheme.typography.labelSmall,
-                color = statusColor,
-                fontWeight = FontWeight.SemiBold,
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Icon(
+                    imageVector = if (isPlaying) Icons.Rounded.GraphicEq else Icons.Rounded.PauseCircleOutline,
+                    contentDescription = null,
+                    tint = if (isPlaying) accent else statusColor,
+                    modifier = Modifier.size(14.dp),
+                )
+                Text(
+                    text = if (isPlaying) strings.devExtras.nowListeningLabel else strings.devExtras.lastTrackPausedLabel,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = statusColor,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
             Text(
                 text = if (artist.isNotBlank()) "$artist — $title" else title,
                 style = MaterialTheme.typography.bodySmall,
@@ -522,12 +554,29 @@ private fun UserNowPlayingBanner(
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        Icon(
-            imageVector = if (isPlaying) Icons.Rounded.GraphicEq else Icons.Rounded.PauseCircleOutline,
-            contentDescription = null,
-            tint = if (isPlaying) accent else statusColor,
-            modifier = Modifier.size(20.dp),
-        )
+        IconButton(
+            onClick = onPlayTrack,
+            enabled = !isResolvingTrack,
+            modifier = Modifier
+                .clip(CircleShape)
+                .background(accent.copy(alpha = 0.18f))
+                .testTag("dev_play_user_track_$userId"),
+        ) {
+            if (isResolvingTrack) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(18.dp),
+                    strokeWidth = 2.dp,
+                    color = accent,
+                )
+            } else {
+                Icon(
+                    imageVector = Icons.Rounded.PlayArrow,
+                    contentDescription = strings.v35.playUserTrackCd,
+                    tint = accent,
+                    modifier = Modifier.size(22.dp),
+                )
+            }
+        }
     }
 }
 
@@ -556,7 +605,9 @@ internal fun DeveloperUserDetailOverlay(
     currentDeveloperUid: String?,
     isActionInProgress: Boolean,
     actionStatusMessage: String?,
+    playingUserTrackUid: String? = null,
     accent: Color,
+    onPlayUserTrack: (DeveloperUserOverview) -> Unit = {},
     onBanUser: (targetUid: String, reason: String?) -> Unit,
     onUnbanUser: (targetUid: String) -> Unit,
     onDeleteUserFromServer: (targetUid: String) -> Unit,
@@ -691,11 +742,22 @@ internal fun DeveloperUserDetailOverlay(
                                     size = 54.dp,
                                 )
                                 Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                    Text(
-                                        text = overview.displayName,
-                                        style = MaterialTheme.typography.titleMedium,
-                                        fontWeight = FontWeight.Bold,
-                                    )
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    ) {
+                                        Text(
+                                            text = overview.displayName,
+                                            style = MaterialTheme.typography.titleMedium,
+                                            fontWeight = FontWeight.Bold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f, fill = false),
+                                        )
+                                        if (overview.isModerator) {
+                                            ModeratorVerifiedPill(label = strings.v35.moderatorBadge)
+                                        }
+                                    }
                                     overview.username?.let { h ->
                                         Text(
                                             text = "@$h",
@@ -719,12 +781,18 @@ internal fun DeveloperUserDetailOverlay(
 
                             if (!overview.currentTrackTitle.isNullOrBlank()) {
                                 UserNowPlayingBanner(
+                                    userId = overview.userId,
                                     title = overview.currentTrackTitle,
                                     artist = overview.currentTrackArtist.orEmpty(),
                                     coverUrl = overview.currentTrackCoverUrl,
                                     isPlaying = overview.currentTrackIsPlaying,
+                                    isResolvingTrack = playingUserTrackUid == overview.userId,
                                     accent = accent,
                                     strings = strings,
+                                    onPlayTrack = {
+                                        haptics.tap()
+                                        onPlayUserTrack(overview)
+                                    },
                                 )
                             }
 

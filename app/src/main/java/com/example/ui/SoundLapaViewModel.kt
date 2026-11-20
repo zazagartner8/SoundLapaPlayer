@@ -26,9 +26,10 @@ import com.example.data.local.SoundLapaSettings
 import com.example.data.local.TrackEntity
 import com.example.data.local.WaveFilterConfig
 import com.example.data.remote.ArtistAlbumItem
-import com.example.data.remote.AvatarModerationService
-import com.example.data.remote.AvatarModerationVerdict
+import com.example.data.remote.AvatarModerationStatus
+import com.example.data.remote.BugReportStatus
 import com.example.data.remote.CloudArtistSubscription
+import com.example.data.remote.CloudAvatarModerationRequest
 import com.example.data.remote.CloudBanRecord
 import com.example.data.remote.CloudBugReport
 import com.example.data.remote.CloudFriend
@@ -42,6 +43,7 @@ import com.example.data.remote.DEFAULT_CLOUD_QUOTA_BYTES
 import com.example.data.remote.DeveloperUserFullDetails
 import com.example.data.remote.DeveloperUserOverview
 import com.example.data.remote.FullStreamResolver
+import com.example.data.remote.LocalDeviceCacheStats
 import com.example.data.remote.LyricsLine
 import com.example.data.remote.LyricsRepository
 import com.example.data.remote.NetworkConnectivityObserver
@@ -54,12 +56,15 @@ import com.example.data.remote.estimateUserCloudStorageBytes
 import com.example.data.remote.isTrackPlayableOffline
 import com.example.data.remote.isValidUsernameHandle
 import com.example.data.remote.normalizeUsernameHandle
+import com.example.notifications.AdminNotificationHelper
+import com.example.player.AudioPrefetchCache
 import com.example.player.PlaybackUiState
 import com.example.player.SoundLapaPlaybackService
-import com.example.ui.auth.isAllowedDeveloperEmail
+import com.example.ui.auth.isAdminPanelAccount
+import com.example.ui.auth.isVerifiedDeveloperAccount
+import com.example.ui.auth.isVerifiedModeratorUid
 import com.example.ui.auth.provisionDeveloperBiometricKey
 import com.example.ui.auth.revokeDeveloperBiometricKey
-import com.example.ui.components.bitmapToModerationBitmap
 import com.example.ui.components.bitmapToWebpDataUrl
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -152,7 +157,9 @@ data class AudiusUiState(
 data class HomeUiState(
     val quickPickRows: List<List<TrackEntity>> = emptyList(),
     val trendingCarousel: List<TrackEntity> = emptyList(),
+    val trendingAllTracks: List<TrackEntity> = emptyList(),
     val recommendedTracks: List<TrackEntity> = emptyList(),
+    val recommendedAllTracks: List<TrackEntity> = emptyList(),
     val recommendationSeedArtists: List<String> = emptyList(),
     val isRefreshingRecommendations: Boolean = false,
     val filteredTracks: List<TrackEntity> = emptyList(),
@@ -181,13 +188,18 @@ data class CloudSyncUiState(
     val banRecord: CloudBanRecord? = null,
     val isGuest: Boolean = false,
     val isVerifiedDeveloper: Boolean = false,
+    val isVerifiedModerator: Boolean = false,
+    val ownAvatarRequest: CloudAvatarModerationRequest? = null,
     val isSyncing: Boolean = false,
     val isSavingProfile: Boolean = false,
     val syncedTracksCount: Int = 0,
     val syncedPlaylistsCount: Int = 0,
     val statusMessage: String? = null,
     val profileStatusMessage: String? = null,
-)
+) {
+    val canOpenAdminPanel: Boolean
+        get() = isVerifiedDeveloper || isVerifiedModerator
+}
 
 @Immutable
 data class LyricsUiState(
@@ -250,10 +262,12 @@ data class SocialUiState(
 data class BugReportItemUi(
     val reportId: String,
     val docId: String = "",
+    val userId: String = "",
     val reporterName: String,
     val reporterAvatarUrl: String? = null,
     val message: String,
     val appVersion: String,
+    val status: BugReportStatus = BugReportStatus.OPEN,
     val createdAtMs: Long,
 )
 
@@ -264,23 +278,46 @@ data class BugReportUiState(
     val savedOfflineOnly: Boolean = false,
 )
 
+enum class AdminAccessLevel {
+    LOCKED,
+    MODERATOR,
+    DEVELOPER,
+}
+
 @Immutable
 data class DeveloperModeUiState(
-    val isUnlocked: Boolean = false,
+    val accessLevel: AdminAccessLevel = AdminAccessLevel.LOCKED,
     val isLoadingReports: Boolean = false,
     val isLoadingStorageStats: Boolean = false,
     val isLoadingUsers: Boolean = false,
     val isLoadingUserDetails: Boolean = false,
     val isManagingUserAction: Boolean = false,
+    val isLoadingAvatarRequests: Boolean = false,
+    val isClearingLocalCache: Boolean = false,
     val deletingReportIds: Set<String> = emptySet(),
+    val updatingReportIds: Set<String> = emptySet(),
+    val processingAvatarRequestIds: Set<String> = emptySet(),
+    val playingUserTrackUid: String? = null,
     val reports: List<BugReportItemUi> = emptyList(),
     val users: List<DeveloperUserOverview> = emptyList(),
+    val avatarRequests: List<CloudAvatarModerationRequest> = emptyList(),
     val selectedUserDetails: DeveloperUserFullDetails? = null,
     val cloudStorageStats: CloudStorageStats = CloudStorageStats(),
+    val localCacheStats: LocalDeviceCacheStats = LocalDeviceCacheStats(),
     val errorMessage: String? = null,
     val usersErrorMessage: String? = null,
     val userActionMessage: String? = null,
-)
+    val localCacheMessage: String? = null,
+) {
+    val isUnlocked: Boolean
+        get() = accessLevel != AdminAccessLevel.LOCKED
+
+    val isDeveloperUnlocked: Boolean
+        get() = accessLevel == AdminAccessLevel.DEVELOPER
+
+    val isModeratorUnlocked: Boolean
+        get() = accessLevel == AdminAccessLevel.MODERATOR || accessLevel == AdminAccessLevel.DEVELOPER
+}
 
 @Immutable
 data class MainUiState(
@@ -373,7 +410,11 @@ class SoundLapaViewModel(
         isGuest = isGuestMode,
         isVerifiedDeveloper = !isGuestMode && (
             cloudRepository?.isCurrentUserVerifiedDeveloper() == true ||
-                isAllowedDeveloperEmail(cloudEmail)
+                isVerifiedDeveloperAccount(cloudUserId, cloudEmail)
+            ),
+        isVerifiedModerator = !isGuestMode && (
+            cloudRepository?.isCurrentUserVerifiedModerator() == true ||
+                isVerifiedModeratorUid(cloudUserId)
             ),
     )
     private val _cloudSyncState = MutableStateFlow(initialCloudState)
@@ -388,6 +429,7 @@ class SoundLapaViewModel(
                     photoUrl = initialCloudState.photoUrl,
                     bio = initialCloudState.bio,
                     isDeveloper = initialCloudState.isVerifiedDeveloper,
+                    isModerator = initialCloudState.isVerifiedModerator,
                     isPublic = true,
                 )
             } else {
@@ -453,8 +495,15 @@ class SoundLapaViewModel(
 
     private val _waveIsLoading = MutableStateFlow(false)
     private val _waveSessionActive = MutableStateFlow(false)
+    private val _isLocalLibraryHydrated = MutableStateFlow(false)
+    val isLocalLibraryHydrated: StateFlow<Boolean> = _isLocalLibraryHydrated.asStateFlow()
+    private val _isInitialFeedSettled = MutableStateFlow(false)
+    val isInitialFeedSettled: StateFlow<Boolean> = _isInitialFeedSettled.asStateFlow()
     private var statsBackupJob: Job? = null
     private var explicitPrewarmJob: Job? = null
+    private val checkedLocalExplicitIds = java.util.Collections.newSetFromMap(
+        java.util.concurrent.ConcurrentHashMap<String, Boolean>(),
+    )
     private val checkedUpfrontExplicitIds = java.util.Collections.newSetFromMap(
         java.util.concurrent.ConcurrentHashMap<String, Boolean>(),
     )
@@ -489,7 +538,9 @@ class SoundLapaViewModel(
         val allTracks: List<TrackEntity>,
         val quickPickRows: List<List<TrackEntity>>,
         val trendingCarousel: List<TrackEntity>,
+        val trendingAllTracks: List<TrackEntity>,
         val recommendedTracks: List<TrackEntity>,
+        val recommendedAllTracks: List<TrackEntity>,
         val recommendationSeedArtists: List<String>,
         val filteredTracks: List<TrackEntity>,
         val searchScreenResults: List<TrackEntity>,
@@ -559,23 +610,41 @@ class SoundLapaViewModel(
     private data class RecommendationSnapshot(
         val quickPickRows: List<List<TrackEntity>>,
         val trendingCarousel: List<TrackEntity>,
+        val trendingAllTracks: List<TrackEntity>,
         val recommendedTracks: List<TrackEntity>,
+        val recommendedAllTracks: List<TrackEntity>,
         val recommendationSeedArtists: List<String>,
         val homeRecTracks: List<TrackEntity>,
     )
 
+    private data class RecSettingsSignal(
+        val listeningHistory: List<com.example.data.local.ListeningHistoryEntry>,
+        val listeningEvents: List<ListeningPlayEvent>,
+        val searchHistory: List<String>,
+        val appLanguage: String,
+    )
+
     private val recommendationsFlow = combine(
-        dao.observeAllTracks(),
+        dao.observeAllTracks().distinctUntilChanged(),
         preferences.settings
             .distinctUntilChangedBy { s ->
-                Triple(
+                listOf(
                     s.listeningHistory,
                     s.listeningEvents.map { Triple(it.dayEpoch, it.trackId, it.playCount) },
                     s.searchHistory,
+                    s.appLanguage,
                 )
             }
-            .map { Triple(it.listeningHistory, it.listeningEvents, it.searchHistory) },
-    ) { tracks, (listeningHistory, listeningEvents, searchHistory) ->
+            .map { s ->
+                RecSettingsSignal(
+                    listeningHistory = s.listeningHistory,
+                    listeningEvents = s.listeningEvents,
+                    searchHistory = s.searchHistory,
+                    appLanguage = s.appLanguage,
+                )
+            },
+    ) { tracks, signal ->
+        val (listeningHistory, listeningEvents, searchHistory, appLanguage) = signal
         val persistedById = tracks.associateBy { it.id }
         val recentTracks = listeningHistory
             .sortedByDescending { it.lastPlayedAtMs }
@@ -585,28 +654,30 @@ class SoundLapaViewModel(
                 "${it.title.trim().lowercase().replace('ё', 'е')}|${it.artist.trim().lowercase().replace('ё', 'е')}"
             }
             .take(4)
-        val trendingCarousel = RecommendationEngine.computeTrendingSimilarTracks(
+        val trendingAll = RecommendationEngine.computeTrendingSimilarTracks(
             allTracks = tracks,
             listeningHistory = listeningHistory,
             searchHistory = searchHistory,
-            limit = 6,
+            limit = 30,
         ).distinctBy {
             "${it.title.trim().lowercase().replace('ё', 'е')}|${it.artist.trim().lowercase().replace('ё', 'е')}"
         }
+        val trendingCarousel = trendingAll.take(6)
         val quickAndTrendIds = (recentTracks.map { it.id } + trendingCarousel.map { it.id }).toHashSet()
         val recResult = RecommendationEngine.computeRecommendations(
             allTracks = tracks,
             listeningHistory = listeningHistory,
             searchHistory = searchHistory,
-            limit = 12,
+            limit = 36,
             listeningEvents = listeningEvents,
             excludeIds = quickAndTrendIds,
+            appLanguage = appLanguage,
         )
-        val recommendedTop = recResult.tracks
+        val recommendedAll = recResult.tracks
             .distinctBy {
                 "${it.title.trim().lowercase().replace('ё', 'е')}|${it.artist.trim().lowercase().replace('ё', 'е')}"
             }
-            .take(12)
+        val recommendedTop = recommendedAll.take(12)
         val recAndShownIds = quickAndTrendIds + recommendedTop.map { it.id }
         val forYouTracks = RecommendationEngine.computeForYouTracks(
             allTracks = tracks,
@@ -615,11 +686,14 @@ class SoundLapaViewModel(
             searchHistory = searchHistory,
             excludeIds = recAndShownIds,
             limit = tracks.size.coerceAtLeast(24),
+            appLanguage = appLanguage,
         )
         RecommendationSnapshot(
             quickPickRows = recentTracks.chunked(2),
             trendingCarousel = trendingCarousel,
+            trendingAllTracks = trendingAll,
             recommendedTracks = recommendedTop,
+            recommendedAllTracks = recommendedAll,
             recommendationSeedArtists = recResult.topSeedArtists,
             homeRecTracks = forYouTracks,
         )
@@ -694,6 +768,8 @@ class SoundLapaViewModel(
 
         val finalHomeTracks = if (!searchActive && filter == "Все") {
             recs.homeRecTracks
+        } else if (!searchActive && filter != "Мои треки") {
+            mergedHome.filterNot { !it.isUserUpload && !it.isLiked && RecommendationEngine.isBlockedRecommendationTrack(it) }
         } else {
             mergedHome
         }
@@ -702,7 +778,9 @@ class SoundLapaViewModel(
             allTracks = tracks,
             quickPickRows = recs.quickPickRows,
             trendingCarousel = recs.trendingCarousel,
+            trendingAllTracks = recs.trendingAllTracks,
             recommendedTracks = recs.recommendedTracks,
+            recommendedAllTracks = recs.recommendedAllTracks,
             recommendationSeedArtists = recs.recommendationSeedArtists,
             filteredTracks = finalHomeTracks,
             searchScreenResults = searchScreenMatches,
@@ -733,7 +811,9 @@ class SoundLapaViewModel(
         HomeUiState(
             quickPickRows = snapshot.quickPickRows,
             trendingCarousel = snapshot.trendingCarousel,
+            trendingAllTracks = snapshot.trendingAllTracks,
             recommendedTracks = snapshot.recommendedTracks,
+            recommendedAllTracks = snapshot.recommendedAllTracks,
             recommendationSeedArtists = snapshot.recommendationSeedArtists,
             isRefreshingRecommendations = refreshingRecs,
             filteredTracks = snapshot.filteredTracks,
@@ -945,29 +1025,119 @@ class SoundLapaViewModel(
                 }
             }
             viewModelScope.launch {
+                cloudRepository.observeOwnAvatarModerationRequest(cloudUserId).collect { req ->
+                    _cloudSyncState.update { it.copy(ownAvatarRequest = req) }
+                    if (req != null &&
+                        req.parsedStatus() == AvatarModerationStatus.APPROVED &&
+                        req.proposedPhotoUrl.isNotBlank() &&
+                        _cloudSyncState.value.photoUrl != req.proposedPhotoUrl
+                    ) {
+                        val approvedUrl = req.proposedPhotoUrl
+                        preferences.setCustomProfile(
+                            displayName = _cloudSyncState.value.displayName,
+                            bio = _cloudSyncState.value.bio,
+                            avatarData = approvedUrl,
+                        )
+                        _cloudSyncState.update { it.copy(photoUrl = approvedUrl, avatarBlocked = false) }
+                        _socialState.update { s ->
+                            s.copy(
+                                currentPublicProfile = s.currentPublicProfile?.copy(photoUrl = approvedUrl),
+                            )
+                        }
+                    }
+                }
+            }
+            if (initialCloudState.canOpenAdminPanel) {
+                AdminNotificationHelper.scheduleBackgroundPolling(app)
+                viewModelScope.launch {
+                    var initializedAvatarWatcher = false
+                    cloudRepository.observePendingAvatarModerationRequests().collect { list ->
+                        _developerModeState.update { it.copy(avatarRequests = list) }
+                        val pending = list.filter { it.parsedStatus() == AvatarModerationStatus.PENDING }
+                        val lastNotified = preferences.currentSettings().lastNotifiedAvatarRequestMs
+                        if (pending.isNotEmpty()) {
+                            val newestTs = pending.maxOf { it.createdAtMs }
+                            if (lastNotified == 0L && !initializedAvatarWatcher) {
+                                preferences.setLastNotifiedAvatarRequestMs(newestTs)
+                            } else {
+                                val brandNew = pending.filter { it.createdAtMs > lastNotified }
+                                if (brandNew.isNotEmpty()) {
+                                    val head = brandNew.first()
+                                    AdminNotificationHelper.notifyNewAvatarRequest(
+                                        context = app,
+                                        requesterName = head.displayName,
+                                        accountUid = head.accountUid,
+                                        pendingCount = brandNew.size,
+                                    )
+                                    preferences.setLastNotifiedAvatarRequestMs(newestTs)
+                                }
+                            }
+                        }
+                        initializedAvatarWatcher = true
+                    }
+                }
+                if (initialCloudState.isVerifiedDeveloper) {
+                    viewModelScope.launch {
+                        var initializedReportWatcher = false
+                        cloudRepository.observeDeveloperBugReports().collect { cloudReports ->
+                            if (_developerModeState.value.isUnlocked) {
+                                val merged = mergeBugReportsForUi(cloudReports)
+                                _developerModeState.update { it.copy(reports = merged) }
+                            }
+                            val lastNotified = preferences.currentSettings().lastNotifiedBugReportMs
+                            if (cloudReports.isNotEmpty()) {
+                                val newestTs = cloudReports.maxOf { it.createdAtMs }
+                                if (lastNotified == 0L && !initializedReportWatcher) {
+                                    preferences.setLastNotifiedBugReportMs(newestTs)
+                                } else {
+                                    val brandNew = cloudReports.filter { it.createdAtMs > lastNotified }
+                                    if (brandNew.isNotEmpty()) {
+                                        val head = brandNew.first()
+                                        AdminNotificationHelper.notifyNewBugReport(
+                                            context = app,
+                                            reporterName = head.reporterName,
+                                            previewMessage = head.message,
+                                            newCount = brandNew.size,
+                                        )
+                                        preferences.setLastNotifiedBugReportMs(newestTs)
+                                    }
+                                }
+                            }
+                            initializedReportWatcher = true
+                        }
+                    }
+                }
+            } else {
+                AdminNotificationHelper.cancelBackgroundPolling(app)
+            }
+            viewModelScope.launch {
                 var initialPresenceSkipped = false
                 playbackController.playbackState
                     .map { it.currentTrackId to it.isPlaying }
                     .distinctUntilChanged()
                     .collect { (trackId, isPlaying) ->
+                        val activeOnline = isAppForeground || isPlaying
                         if (!initialPresenceSkipped) {
                             initialPresenceSkipped = true
                             if (trackId != null || isPlaying) {
-                                publishPresenceAndNowPlaying(isOnline = isAppForeground)
+                                publishPresenceAndNowPlaying(isOnline = activeOnline)
                             }
                         } else {
-                            publishPresenceAndNowPlaying(isOnline = isAppForeground)
+                            publishPresenceAndNowPlaying(isOnline = activeOnline)
                         }
                     }
             }
             presenceHeartbeatJob = viewModelScope.launch {
                 while (true) {
-                    delay(90_000L)
-                    if (isAppForeground) {
+                    delay(60_000L)
+                    val isPlayingNow = playbackController.playbackState.value.isPlaying
+                    if (isAppForeground || isPlayingNow) {
                         publishPresenceAndNowPlaying(isOnline = true, force = true)
                     }
                 }
             }
+        } else {
+            AdminNotificationHelper.cancelBackgroundPolling(app)
         }
         viewModelScope.launch {
             networkObserver.isOnline.collect { online ->
@@ -1004,14 +1174,23 @@ class SoundLapaViewModel(
                 .distinctUntilChanged()
                 .collect { tracks ->
                     playbackController.updateAvailableTracks(tracks)
-                    val detectedExplicit = kotlinx.coroutines.withContext(Dispatchers.Default) {
-                        tracks.filter { ExplicitContentDetector.isExplicit(it, emptySet()) }.map { it.id }
+                    if (!_isLocalLibraryHydrated.value) {
+                        _isLocalLibraryHydrated.value = true
                     }
-                    if (detectedExplicit.isNotEmpty()) {
-                        preferences.markTracksExplicit(detectedExplicit)
+                    if (!_isInitialFeedSettled.value && tracks.size >= 4) {
+                        _isInitialFeedSettled.value = true
+                    }
+                    val uncheckedTracks = tracks.filter { checkedLocalExplicitIds.add(it.id) }
+                    if (uncheckedTracks.isNotEmpty()) {
+                        val detectedExplicit = kotlinx.coroutines.withContext(Dispatchers.Default) {
+                            uncheckedTracks.filter { ExplicitContentDetector.isExplicit(it, emptySet()) }.map { it.id }
+                        }
+                        if (detectedExplicit.isNotEmpty()) {
+                            preferences.markTracksExplicit(detectedExplicit)
+                        }
                     }
                     if (!preferences.currentSettings().dataSaverEnabled && networkObserver.refresh()) {
-                        prewarmExplicitBadges(tracks.take(18))
+                        prewarmExplicitBadges(tracks.take(14))
                     }
                     if (!initialPrefetchDone && tracks.isNotEmpty() && !preferences.currentSettings().dataSaverEnabled) {
                         initialPrefetchDone = true
@@ -1019,9 +1198,10 @@ class SoundLapaViewModel(
                             val lastId = preferences.currentSettings().lastPlayedTrackId
                             val priorityTracks = buildList {
                                 tracks.find { it.id == lastId }?.let { add(it) }
-                                tracks.filterNot { it.id == lastId }.take(2).forEach { add(it) }
+                                tracks.filterNot { it.id == lastId }.take(3).forEach { add(it) }
                             }
                             FullStreamResolver.prefetchTracks(priorityTracks, dao)
+                            AudioPrefetchCache.prefetchUpcomingTracks(app, priorityTracks.take(3), dao)
                         }
                     }
                 }
@@ -1164,7 +1344,9 @@ class SoundLapaViewModel(
                         it.copy(
                             userId = cloudUserId,
                             isVerifiedDeveloper = cloudRepository.isCurrentUserVerifiedDeveloper() ||
-                                isAllowedDeveloperEmail(it.email),
+                                isVerifiedDeveloperAccount(cloudUserId, it.email),
+                            isVerifiedModerator = cloudRepository.isCurrentUserVerifiedModerator() ||
+                                isVerifiedModeratorUid(cloudUserId),
                             syncedTracksCount = savedCount,
                             syncedPlaylistsCount = playlistsCount,
                         )
@@ -1177,13 +1359,27 @@ class SoundLapaViewModel(
                 dao.getTrackCount() to preferences.currentSettings().lastTrendingRefreshMs
             }
             val twelveHoursMs = 12L * 3600_000L
+            if (existingCount >= 6) {
+                _isInitialFeedSettled.value = true
+            }
             if (existingCount >= 18 && System.currentTimeMillis() - lastRefreshMs < twelveHoursMs) {
+                _isInitialFeedSettled.value = true
                 return@launch
             }
-            if (existingCount > 6) {
-                delay(1800L)
+            if (!networkObserver.refresh()) {
+                _isInitialFeedSettled.value = true
+                return@launch
             }
-            refreshAudiusTrending()
+            if (existingCount >= 6) {
+                delay(1500L)
+                refreshAudiusTrending()
+            } else {
+                try {
+                    fetchTrendingTracksBlocking()
+                } finally {
+                    _isInitialFeedSettled.value = true
+                }
+            }
         }
     }
 
@@ -1351,20 +1547,34 @@ class SoundLapaViewModel(
         }
     }
 
-    fun refreshAudiusTrending() {
+    private suspend fun fetchTrendingTracksBlocking() {
         if (_audiusState.value.isRefreshingTrending) return
         if (!networkObserver.refresh()) return
-        viewModelScope.launch {
-            _audiusState.update { it.copy(isRefreshingTrending = true) }
-            val seedArtists = preferences.currentSettings().listeningHistory
+        _audiusState.update { it.copy(isRefreshingTrending = true) }
+        try {
+            val currentSettings = preferences.currentSettings()
+            val seedArtists = currentSettings.listeningHistory
                 .take(3)
                 .map { it.artist }
                 .filter { it.isNotBlank() }
                 .distinct()
-            audiusRepository.fetchTrendingTracks(seedArtists = seedArtists)
+            audiusRepository.fetchTrendingTracks(
+                seedArtists = seedArtists,
+                appLanguage = currentSettings.appLanguage,
+            )
             preferences.setLastTrendingRefreshMs(System.currentTimeMillis())
+        } finally {
             _audiusState.update { it.copy(isRefreshingTrending = false) }
             refreshCacheSize()
+        }
+    }
+
+    fun refreshAudiusTrending() {
+        if (_audiusState.value.isRefreshingTrending) return
+        if (!networkObserver.refresh()) return
+        viewModelScope.launch {
+            fetchTrendingTracksBlocking()
+            _isInitialFeedSettled.value = true
         }
     }
 
@@ -1386,7 +1596,10 @@ class SoundLapaViewModel(
                     .filter { it.isNotBlank() }
                     .distinct()
                 runCatching {
-                    audiusRepository.fetchTrendingTracks(seedArtists = seedArtists)
+                    audiusRepository.fetchTrendingTracks(
+                        seedArtists = seedArtists,
+                        appLanguage = settings.appLanguage,
+                    )
                 }
                 runCatching {
                     val tracks = dao.getAllTracksOnce()
@@ -1395,6 +1608,7 @@ class SoundLapaViewModel(
                         listeningHistory = settings.listeningHistory,
                         searchHistory = settings.searchHistory,
                         limit = 12,
+                        appLanguage = settings.appLanguage,
                     )
                     if (rec.onlineSeedQueries.isNotEmpty() && !settings.dataSaverEnabled) {
                         audiusRepository.fetchSimilarTracksForQueries(
@@ -1450,7 +1664,9 @@ class SoundLapaViewModel(
         val resolvedAccountUid = profile.accountUid?.takeIf { it.isNotBlank() }
             ?: (cloudUserId ?: profile.userId).takeIf { it.isNotBlank() }?.let(SoundLapUidFormatter::format)
         val isVerifiedDev = cloudRepository?.isCurrentUserVerifiedDeveloper() == true ||
-            isAllowedDeveloperEmail(resolvedEmail)
+            isVerifiedDeveloperAccount(cloudUserId ?: profile.userId, resolvedEmail)
+        val isVerifiedMod = cloudRepository?.isCurrentUserVerifiedModerator() == true ||
+            isVerifiedModeratorUid(cloudUserId ?: profile.userId)
         _cloudSyncState.update {
             it.copy(
                 accountUid = resolvedAccountUid ?: it.accountUid,
@@ -1461,6 +1677,7 @@ class SoundLapaViewModel(
                 avatarBlocked = isBlocked,
                 email = resolvedEmail,
                 isVerifiedDeveloper = isVerifiedDev,
+                isVerifiedModerator = isVerifiedMod,
             )
         }
         preferences.mergeCloudSearchAndListening(
@@ -1479,6 +1696,7 @@ class SoundLapaViewModel(
                         photoUrl = resolvedPhoto,
                         bio = resolvedBio,
                         isDeveloper = isVerifiedDev,
+                        isModerator = isVerifiedMod,
                         isPublic = true,
                     ),
                 )
@@ -1643,71 +1861,44 @@ class SoundLapaViewModel(
                 return@launch
             }
 
-            if (croppedAvatarBitmap != null) {
-                _cloudSyncState.update { it.copy(isSavingProfile = true, profileStatusMessage = "moderating") }
-                val moderationBitmap = kotlinx.coroutines.withContext(Dispatchers.Default) {
-                    bitmapToModerationBitmap(croppedAvatarBitmap, maxDimPx = 256)
-                }
-                val verdict = try {
-                    AvatarModerationService.checkAvatarSafety(moderationBitmap)
-                } finally {
-                    if (moderationBitmap !== croppedAvatarBitmap) {
-                        runCatching { moderationBitmap.recycle() }
-                    }
-                }
-                when (verdict) {
-                    is AvatarModerationVerdict.Flagged18Plus -> {
-                        runCatching { croppedAvatarBitmap.recycle() }
-                        preferences.setAvatarModerationBlocked(true)
-                        preferences.setCustomProfile(
-                            displayName = _cloudSyncState.value.displayName,
-                            bio = _cloudSyncState.value.bio,
-                            avatarData = null,
-                        )
-                        repo.revokeBlockedAvatar(
-                            email = _cloudSyncState.value.email,
-                            displayName = _cloudSyncState.value.displayName,
-                        )
-                        _cloudSyncState.update {
-                            it.copy(
-                                photoUrl = null,
-                                avatarBlocked = true,
-                                isSavingProfile = false,
-                                profileStatusMessage = "blocked_18plus",
-                            )
-                        }
-                        return@launch
-                    }
-                    is AvatarModerationVerdict.Error -> {
-                        runCatching { croppedAvatarBitmap.recycle() }
-                        _cloudSyncState.update {
-                            it.copy(
-                                isSavingProfile = false,
-                                profileStatusMessage = verdict.message.ifBlank { "moderation_error" },
-                            )
-                        }
-                        return@launch
-                    }
-                    AvatarModerationVerdict.Safe -> Unit
-                }
-            }
-
             _cloudSyncState.update { it.copy(isSavingProfile = true, profileStatusMessage = "saving") }
-            val effectiveClear = clearAvatar || alreadyBlocked
-            val nextAvatarData = when {
-                effectiveClear -> null
-                croppedAvatarBitmap != null -> kotlinx.coroutines.withContext(Dispatchers.IO) {
+
+            var submittedAvatarForManualReview = false
+            if (croppedAvatarBitmap != null) {
+                val encodedProposed = kotlinx.coroutines.withContext(Dispatchers.IO) {
                     bitmapToWebpDataUrl(croppedAvatarBitmap, targetPx = 128, maxBytes = 16_000).also {
                         runCatching { croppedAvatarBitmap.recycle() }
                     }
                 }
-                else -> _cloudSyncState.value.photoUrl
+                val submitRes = repo.submitAvatarModerationRequest(
+                    displayName = cleanName,
+                    username = _cloudSyncState.value.username,
+                    currentPhotoUrl = _cloudSyncState.value.photoUrl,
+                    proposedPhotoUrl = encodedProposed,
+                )
+                if (submitRes.isFailure) {
+                    _cloudSyncState.update {
+                        it.copy(
+                            isSavingProfile = false,
+                            profileStatusMessage = submitRes.exceptionOrNull()?.localizedMessage ?: "moderation_error",
+                        )
+                    }
+                    return@launch
+                }
+                submitRes.getOrNull()?.let { pendingReq ->
+                    _cloudSyncState.update { it.copy(ownAvatarRequest = pendingReq) }
+                }
+                submittedAvatarForManualReview = true
             }
+
+            // Keep existing avatar untouched while new avatar awaits manual moderator approval
+            val effectiveClear = clearAvatar || alreadyBlocked
+            val preservedPhoto = if (effectiveClear) null else _cloudSyncState.value.photoUrl
             val currentUsername = _cloudSyncState.value.username
             val res = repo.updateUserCustomProfile(
                 displayName = cleanName,
                 bio = cleanBio,
-                photoUrl = nextAvatarData,
+                photoUrl = preservedPhoto,
                 email = _cloudSyncState.value.email,
                 clearAvatar = effectiveClear,
                 username = currentUsername,
@@ -1732,7 +1923,11 @@ class SoundLapaViewModel(
                         photoUrl = finalPhoto,
                         avatarBlocked = effectiveBlocked,
                         isSavingProfile = false,
-                        profileStatusMessage = if (effectiveBlocked) "blocked_18plus" else "✓",
+                        profileStatusMessage = when {
+                            effectiveBlocked -> "blocked_18plus"
+                            submittedAvatarForManualReview -> "avatar_pending_review"
+                            else -> "✓"
+                        },
                     )
                 }
                 val uid = cloudUserId
@@ -1747,6 +1942,7 @@ class SoundLapaViewModel(
                                 photoUrl = finalPhoto,
                                 bio = updated.bio,
                                 isDeveloper = _cloudSyncState.value.isVerifiedDeveloper,
+                                isModerator = _cloudSyncState.value.isVerifiedModerator,
                                 isPublic = true,
                             ),
                         )
@@ -1759,6 +1955,16 @@ class SoundLapaViewModel(
                         profileStatusMessage = err.localizedMessage ?: "Error",
                     )
                 }
+            }
+        }
+    }
+
+    fun cancelOwnAvatarModerationRequest() {
+        val repo = cloudRepository ?: return
+        if (isGuestMode || cloudUserId.isNullOrBlank()) return
+        viewModelScope.launch {
+            repo.cancelOwnAvatarModerationRequest().onSuccess {
+                _cloudSyncState.update { it.copy(ownAvatarRequest = null, profileStatusMessage = null) }
             }
         }
     }
@@ -1834,21 +2040,56 @@ class SoundLapaViewModel(
     fun unlockDeveloperWithBiometrics() {
         val uid = cloudUserId
         val email = _cloudSyncState.value.email
-        val isVerifiedDev = !isGuestMode &&
+        val isDev = !isGuestMode &&
             !uid.isNullOrBlank() &&
-            (cloudRepository?.isCurrentUserVerifiedDeveloper() == true || isAllowedDeveloperEmail(email))
-        if (!isVerifiedDev) {
+            (cloudRepository?.isCurrentUserVerifiedDeveloper() == true || isVerifiedDeveloperAccount(uid, email))
+        if (isDev) {
+            unlockDeveloperAreaWithBiometrics()
+        } else {
+            unlockModeratorAreaWithBiometrics()
+        }
+    }
+
+    fun unlockDeveloperAreaWithBiometrics() {
+        val uid = cloudUserId
+        val email = _cloudSyncState.value.email
+        val isDev = !isGuestMode &&
+            !uid.isNullOrBlank() &&
+            (cloudRepository?.isCurrentUserVerifiedDeveloper() == true || isVerifiedDeveloperAccount(uid, email))
+        if (!isDev) {
             return
         }
         provisionDeveloperBiometricKey(uid!!, email)
         _developerModeState.update {
             it.copy(
-                isUnlocked = true,
+                accessLevel = AdminAccessLevel.DEVELOPER,
                 errorMessage = null,
                 usersErrorMessage = null,
             )
         }
         refreshDeveloperDashboard()
+    }
+
+    fun unlockModeratorAreaWithBiometrics() {
+        val uid = cloudUserId
+        val email = _cloudSyncState.value.email
+        val canModerate = !isGuestMode &&
+            !uid.isNullOrBlank() &&
+            (cloudRepository?.isCurrentUserAvatarReviewer() == true || isAdminPanelAccount(uid, email))
+        if (!canModerate) {
+            return
+        }
+        provisionDeveloperBiometricKey(uid!!, email)
+        _developerModeState.update {
+            it.copy(
+                accessLevel = AdminAccessLevel.MODERATOR,
+                selectedUserDetails = null,
+                isLoadingUserDetails = false,
+                errorMessage = null,
+                usersErrorMessage = null,
+            )
+        }
+        refreshAvatarModerationRequests()
     }
 
     fun lockDeveloperSection() {
@@ -1860,7 +2101,7 @@ class SoundLapaViewModel(
         }
         _developerModeState.update {
             it.copy(
-                isUnlocked = false,
+                accessLevel = AdminAccessLevel.LOCKED,
                 selectedUserDetails = null,
                 isLoadingUserDetails = false,
                 errorMessage = null,
@@ -1870,9 +2111,200 @@ class SoundLapaViewModel(
     }
 
     fun refreshDeveloperDashboard() {
-        refreshDeveloperUsers()
-        refreshDeveloperReports()
-        refreshCloudStorageUsage()
+        refreshAvatarModerationRequests()
+        if (_cloudSyncState.value.isVerifiedDeveloper && _developerModeState.value.isDeveloperUnlocked) {
+            refreshDeveloperUsers()
+            refreshDeveloperReports()
+            refreshCloudStorageUsage()
+            refreshLocalCacheStats()
+        }
+    }
+
+    fun refreshAvatarModerationRequests() {
+        val repo = cloudRepository ?: return
+        if (!_developerModeState.value.isUnlocked) return
+        if (isGuestMode || cloudUserId.isNullOrBlank()) return
+        viewModelScope.launch {
+            _developerModeState.update { it.copy(isLoadingAvatarRequests = true) }
+            val result = repo.fetchAllAvatarModerationRequests()
+            _developerModeState.update { state ->
+                result.fold(
+                    onSuccess = { list ->
+                        state.copy(isLoadingAvatarRequests = false, avatarRequests = list)
+                    },
+                    onFailure = { err ->
+                        state.copy(
+                            isLoadingAvatarRequests = false,
+                            userActionMessage = err.localizedMessage ?: state.userActionMessage,
+                        )
+                    },
+                )
+            }
+        }
+    }
+
+    fun approveAvatarModerationRequest(request: CloudAvatarModerationRequest) {
+        val repo = cloudRepository ?: return
+        if (!_developerModeState.value.isUnlocked) return
+        val targetUid = request.userId.ifBlank { request.docId }
+        if (targetUid in _developerModeState.value.processingAvatarRequestIds) return
+        viewModelScope.launch {
+            _developerModeState.update {
+                it.copy(
+                    processingAvatarRequestIds = it.processingAvatarRequestIds + targetUid,
+                    userActionMessage = null,
+                )
+            }
+            val reviewerName = _cloudSyncState.value.displayName
+                ?: _cloudSyncState.value.username?.let { "@$it" }
+                ?: "Moderator"
+            val result = repo.approveAvatarModerationRequest(request, reviewerName)
+            val v35 = com.example.ui.i18n.stringsForLanguage(preferences.currentSettings().appLanguage).v35
+            _developerModeState.update { state ->
+                result.fold(
+                    onSuccess = {
+                        state.copy(
+                            processingAvatarRequestIds = state.processingAvatarRequestIds - targetUid,
+                            avatarRequests = state.avatarRequests.map { item ->
+                                if ((item.userId.ifBlank { item.docId }) == targetUid) {
+                                    item.copy(
+                                        status = AvatarModerationStatus.APPROVED.wireValue,
+                                        rejectReason = null,
+                                        reviewedByUid = cloudUserId,
+                                        reviewedByName = reviewerName,
+                                        reviewedAtMs = System.currentTimeMillis(),
+                                    )
+                                } else {
+                                    item
+                                }
+                            },
+                            userActionMessage = v35.avatarApprovedSuccessNotice,
+                        )
+                    },
+                    onFailure = { err ->
+                        state.copy(
+                            processingAvatarRequestIds = state.processingAvatarRequestIds - targetUid,
+                            userActionMessage = err.localizedMessage ?: "Error",
+                        )
+                    },
+                )
+            }
+        }
+    }
+
+    fun rejectAvatarModerationRequest(request: CloudAvatarModerationRequest, reason: String?) {
+        val repo = cloudRepository ?: return
+        if (!_developerModeState.value.isUnlocked) return
+        val targetUid = request.userId.ifBlank { request.docId }
+        if (targetUid in _developerModeState.value.processingAvatarRequestIds) return
+        viewModelScope.launch {
+            _developerModeState.update {
+                it.copy(
+                    processingAvatarRequestIds = it.processingAvatarRequestIds + targetUid,
+                    userActionMessage = null,
+                )
+            }
+            val reviewerName = _cloudSyncState.value.displayName
+                ?: _cloudSyncState.value.username?.let { "@$it" }
+                ?: "Moderator"
+            val result = repo.rejectAvatarModerationRequest(request, reason, reviewerName)
+            val v35 = com.example.ui.i18n.stringsForLanguage(preferences.currentSettings().appLanguage).v35
+            _developerModeState.update { state ->
+                result.fold(
+                    onSuccess = {
+                        state.copy(
+                            processingAvatarRequestIds = state.processingAvatarRequestIds - targetUid,
+                            avatarRequests = state.avatarRequests.map { item ->
+                                if ((item.userId.ifBlank { item.docId }) == targetUid) {
+                                    item.copy(
+                                        status = AvatarModerationStatus.REJECTED.wireValue,
+                                        rejectReason = reason?.trim()?.takeIf { it.isNotEmpty() },
+                                        reviewedByUid = cloudUserId,
+                                        reviewedByName = reviewerName,
+                                        reviewedAtMs = System.currentTimeMillis(),
+                                    )
+                                } else {
+                                    item
+                                }
+                            },
+                            userActionMessage = v35.avatarRejectedSuccessNotice,
+                        )
+                    },
+                    onFailure = { err ->
+                        state.copy(
+                            processingAvatarRequestIds = state.processingAvatarRequestIds - targetUid,
+                            userActionMessage = err.localizedMessage ?: "Error",
+                        )
+                    },
+                )
+            }
+        }
+    }
+
+    fun playDeveloperUserCurrentTrack(overview: DeveloperUserOverview) {
+        val trackTitle = overview.currentTrackTitle?.trim().orEmpty()
+        val trackArtist = overview.currentTrackArtist?.trim().orEmpty()
+        val trackId = overview.currentTrackId?.trim()
+        if (trackId.isNullOrBlank() && trackTitle.isBlank()) return
+        if (_developerModeState.value.playingUserTrackUid == overview.userId) return
+
+        viewModelScope.launch {
+            _developerModeState.update { it.copy(playingUserTrackUid = overview.userId) }
+            try {
+                // 1. Check active local library & selected user's saved tracks
+                val localTracks = kotlinx.coroutines.withContext(Dispatchers.IO) { dao.getAllTracksOnce() }
+                val directMatch = trackId?.let { id ->
+                    localTracks.find { it.id == id }
+                        ?: playbackController.findTrackById(id)
+                }
+                if (directMatch != null) {
+                    playOrToggleTrack(directMatch, listOf(directMatch) + localTracks.filterNot { it.id == directMatch.id }.take(20), contextTitle = overview.displayName)
+                    return@launch
+                }
+
+                // 2. Check inspected user's cloud saved tracks
+                val inspectedSaved = _developerModeState.value.selectedUserDetails
+                    ?.takeIf { it.overview.userId == overview.userId }
+                    ?.tracks
+                    ?.find { it.trackId == trackId || (trackTitle.isNotBlank() && it.title.equals(trackTitle, ignoreCase = true)) }
+                if (inspectedSaved != null) {
+                    val entity = inspectedSaved.toLocalTrackEntity(existing = null)
+                    playOrToggleTrack(entity, listOf(entity) + localTracks.take(20), contextTitle = overview.displayName)
+                    return@launch
+                }
+
+                // 3. Fuzzy local match by title + artist
+                if (trackTitle.isNotBlank()) {
+                    val fuzzyLocal = localTracks.find { t ->
+                        t.title.equals(trackTitle, ignoreCase = true) &&
+                            (trackArtist.isBlank() || t.artist.contains(trackArtist, ignoreCase = true) || trackArtist.contains(t.artist, ignoreCase = true))
+                    }
+                    if (fuzzyLocal != null) {
+                        playOrToggleTrack(fuzzyLocal, listOf(fuzzyLocal) + localTracks.filterNot { it.id == fuzzyLocal.id }.take(20), contextTitle = overview.displayName)
+                        return@launch
+                    }
+                }
+
+                // 4. Online search resolution
+                val query = listOf(trackArtist, trackTitle).filter { it.isNotBlank() }.joinToString(" ").trim()
+                if (query.isNotBlank() && networkObserver.refresh()) {
+                    val remote = audiusRepository.searchTracksProgressive(query) {}.getOrDefault(emptyList())
+                    val best = remote.firstOrNull { it.id == trackId }
+                        ?: remote.firstOrNull {
+                            it.title.equals(trackTitle, ignoreCase = true) &&
+                                (trackArtist.isBlank() || it.artist.contains(trackArtist, ignoreCase = true))
+                        }
+                        ?: remote.firstOrNull()
+                    if (best != null) {
+                        playOrToggleTrack(best, remote, contextTitle = overview.displayName)
+                    }
+                }
+            } finally {
+                _developerModeState.update {
+                    if (it.playingUserTrackUid == overview.userId) it.copy(playingUserTrackUid = null) else it
+                }
+            }
+        }
     }
 
     fun refreshDeveloperUsers() {
@@ -2117,7 +2549,11 @@ class SoundLapaViewModel(
             playbackController.setClipAudioMuteOverride(false)
             _musicVideoState.update { it.copy(useClipAudio = false) }
         }
-        publishPresenceAndNowPlaying(isOnline = isForeground, force = true)
+        val isPlayingNow = playbackController.playbackState.value.isPlaying
+        publishPresenceAndNowPlaying(
+            isOnline = isForeground || isPlayingNow,
+            force = true,
+        )
     }
 
     private fun publishPresenceAndNowPlaying(
@@ -2129,24 +2565,37 @@ class SoundLapaViewModel(
         if (isGuestMode || _cloudSyncState.value.banRecord != null) return
 
         val playback = playbackController.playbackState.value
-        val track = playback.currentTrackId?.let { tid ->
+        val activeTrackId = playback.currentTrackId?.takeIf { it.isNotBlank() }
+        val track = activeTrackId?.let { tid ->
             playbackController.findTrackById(tid)
                 ?: uiState.value.tracks.find { it.id == tid }
                 ?: _audiusState.value.searchResults.find { it.id == tid }
         }
-        val key = "$isOnline|${playback.isPlaying}|${track?.id}"
+        val mediaMetaFallback = if (track == null && activeTrackId != null) {
+            playbackController.currentMediaMetadataFallback()
+        } else {
+            null
+        }
+        val resolvedTrackId = track?.id ?: activeTrackId
+        val resolvedTitle = track?.title ?: mediaMetaFallback?.first
+        val resolvedArtist = track?.artist ?: mediaMetaFallback?.second
+        val resolvedCover = track?.coverArtPath ?: mediaMetaFallback?.third
+        val effectiveIsPlaying = playback.isPlaying && resolvedTrackId != null
+        val effectiveOnline = isOnline || effectiveIsPlaying
+
+        val key = "$effectiveOnline|$effectiveIsPlaying|$resolvedTrackId|$resolvedTitle"
         if (!force && key == lastPublishedPresenceKey) return
         lastPublishedPresenceKey = key
 
         presenceSyncJob?.cancel()
         presenceSyncJob = app.appScope.launch(NonCancellable) {
             repo.updateUserPresenceAndNowPlaying(
-                isOnline = isOnline,
-                trackId = track?.id,
-                trackTitle = track?.title,
-                trackArtist = track?.artist,
-                trackCoverUrl = track?.coverArtPath,
-                isPlaying = playback.isPlaying && track != null,
+                isOnline = effectiveOnline,
+                trackId = resolvedTrackId,
+                trackTitle = resolvedTitle,
+                trackArtist = resolvedArtist,
+                trackCoverUrl = resolvedCover,
+                isPlaying = effectiveIsPlaying,
             )
         }
         if (uid.isBlank()) return
@@ -2246,52 +2695,94 @@ class SoundLapaViewModel(
         )
     }
 
+    private fun mergeBugReportsForUi(cloudList: List<CloudBugReport>): List<BugReportItemUi> {
+        val merged = LinkedHashMap<String, BugReportItemUi>()
+        cloudList.forEach { c ->
+            merged[c.reportId] = BugReportItemUi(
+                reportId = c.reportId,
+                docId = c.docId.ifBlank { c.reportId },
+                userId = c.userId,
+                reporterName = c.reporterName.ifBlank { "User" },
+                reporterAvatarUrl = c.reporterAvatarUrl,
+                message = c.message,
+                appVersion = c.appVersion,
+                status = c.parsedStatus(),
+                createdAtMs = c.createdAtMs,
+            )
+        }
+        preferences.currentSettings().pendingBugReports.forEach { local ->
+            if (!merged.containsKey(local.reportId)) {
+                merged[local.reportId] = BugReportItemUi(
+                    reportId = local.reportId,
+                    docId = local.reportId,
+                    userId = cloudUserId.orEmpty(),
+                    reporterName = local.reporterName,
+                    reporterAvatarUrl = local.reporterAvatarUrl,
+                    message = local.message,
+                    appVersion = local.appVersion,
+                    status = BugReportStatus.OPEN,
+                    createdAtMs = local.createdAtMs,
+                )
+            }
+        }
+        return merged.values.sortedByDescending { it.createdAtMs }
+    }
+
     fun refreshDeveloperReports() {
         viewModelScope.launch {
             _developerModeState.update { it.copy(isLoadingReports = true, errorMessage = null) }
-            val merged = LinkedHashMap<String, BugReportItemUi>()
-
             val repo = cloudRepository
             var cloudError: String? = null
+            var cloudList: List<CloudBugReport> = emptyList()
             if (!isGuestMode && repo != null && !cloudUserId.isNullOrBlank()) {
                 val res = repo.fetchDeveloperBugReports()
-                res.onSuccess { cloudList ->
-                    cloudList.forEach { c ->
-                        merged[c.reportId] = BugReportItemUi(
-                            reportId = c.reportId,
-                            docId = c.docId.ifBlank { c.reportId },
-                            reporterName = c.reporterName.ifBlank { "User" },
-                            reporterAvatarUrl = c.reporterAvatarUrl,
-                            message = c.message,
-                            appVersion = c.appVersion,
-                            createdAtMs = c.createdAtMs,
-                        )
-                    }
+                res.onSuccess { list ->
+                    cloudList = list
                 }.onFailure { err ->
                     cloudError = err.localizedMessage
                 }
             }
-
-            preferences.currentSettings().pendingBugReports.forEach { local ->
-                if (!merged.containsKey(local.reportId)) {
-                    merged[local.reportId] = BugReportItemUi(
-                        reportId = local.reportId,
-                        docId = local.reportId,
-                        reporterName = local.reporterName,
-                        reporterAvatarUrl = local.reporterAvatarUrl,
-                        message = local.message,
-                        appVersion = local.appVersion,
-                        createdAtMs = local.createdAtMs,
-                    )
-                }
-            }
-
-            val sorted = merged.values.sortedByDescending { it.createdAtMs }
+            val sorted = mergeBugReportsForUi(cloudList)
             _developerModeState.update {
                 it.copy(
                     isLoadingReports = false,
                     reports = sorted,
                     errorMessage = cloudError,
+                )
+            }
+        }
+    }
+
+    fun updateDeveloperBugReportStatus(report: BugReportItemUi, status: BugReportStatus) {
+        if (report.reportId in _developerModeState.value.updatingReportIds) return
+        if (report.status == status) return
+        viewModelScope.launch {
+            _developerModeState.update {
+                it.copy(
+                    updatingReportIds = it.updatingReportIds + report.reportId,
+                    errorMessage = null,
+                )
+            }
+            val repo = cloudRepository
+            if (!isGuestMode && repo != null && !cloudUserId.isNullOrBlank()) {
+                val targetDocId = report.docId.ifBlank { report.reportId }
+                val res = repo.updateDeveloperBugReportStatus(targetDocId, status)
+                if (res.isFailure) {
+                    _developerModeState.update {
+                        it.copy(
+                            updatingReportIds = it.updatingReportIds - report.reportId,
+                            errorMessage = res.exceptionOrNull()?.localizedMessage ?: "Failed to update report",
+                        )
+                    }
+                    return@launch
+                }
+            }
+            _developerModeState.update { state ->
+                state.copy(
+                    updatingReportIds = state.updatingReportIds - report.reportId,
+                    reports = state.reports.map { item ->
+                        if (item.reportId == report.reportId) item.copy(status = status) else item
+                    },
                 )
             }
         }
@@ -2329,6 +2820,109 @@ class SoundLapaViewModel(
             }
             refreshCloudStorageUsage()
         }
+    }
+
+    fun refreshLocalCacheStats() {
+        viewModelScope.launch {
+            val stats = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                val prefetch = AudioPrefetchCache.inspectStats(app)
+                val imageDir = java.io.File(app.cacheDir, "image_cache")
+                val imageBytes = computeDirBytes(imageDir)
+                val dbFile = app.getDatabasePath("soundlapa.db")
+                val roomBytes = listOf(
+                    dbFile,
+                    java.io.File("${dbFile.path}-wal"),
+                    java.io.File("${dbFile.path}-shm"),
+                ).sumOf { f -> if (f.exists()) f.length().coerceAtLeast(0L) else 0L }
+                val allTracks = dao.getAllTracksOnce()
+                val offlineTracks = allTracks.filter { !it.cachedFilePath.isNullOrBlank() || it.isUserUpload }
+                val offlineBytes = offlineTracks.sumOf { t ->
+                    val path = t.cachedFilePath
+                    if (!path.isNullOrBlank()) {
+                        val f = java.io.File(path)
+                        if (f.exists()) f.length().coerceAtLeast(0L) else t.fileSizeBytes.coerceAtLeast(0L)
+                    } else {
+                        t.fileSizeBytes.coerceAtLeast(0L)
+                    }
+                }
+                LocalDeviceCacheStats(
+                    audioPrefetchBytes = prefetch.usedBytes,
+                    audioPrefetchTracksCount = prefetch.cachedTracksCount,
+                    audioPrefetchMaxBytes = prefetch.maxBytes,
+                    imageCacheBytes = imageBytes,
+                    roomDatabaseBytes = roomBytes,
+                    offlineAudioBytes = offlineBytes,
+                    offlineTracksCount = offlineTracks.size,
+                )
+            }
+            _developerModeState.update { it.copy(localCacheStats = stats) }
+        }
+    }
+
+    fun clearAudioPrefetchCacheOnly() {
+        if (_developerModeState.value.isClearingLocalCache) return
+        viewModelScope.launch {
+            _developerModeState.update { it.copy(isClearingLocalCache = true, localCacheMessage = null) }
+            val freed = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                AudioPrefetchCache.clearCache(app)
+            }
+            refreshCacheSize()
+            refreshLocalCacheStats()
+            _developerModeState.update {
+                it.copy(
+                    isClearingLocalCache = false,
+                    localCacheMessage = formatFileSize(freed),
+                )
+            }
+        }
+    }
+
+    fun clearImageCoverCacheOnly() {
+        if (_developerModeState.value.isClearingLocalCache) return
+        viewModelScope.launch {
+            _developerModeState.update { it.copy(isClearingLocalCache = true, localCacheMessage = null) }
+            val freed = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                val imageDir = java.io.File(app.cacheDir, "image_cache")
+                val before = computeDirBytes(imageDir)
+                runCatching { imageDir.deleteRecursively() }
+                before
+            }
+            refreshCacheSize()
+            refreshLocalCacheStats()
+            _developerModeState.update {
+                it.copy(
+                    isClearingLocalCache = false,
+                    localCacheMessage = formatFileSize(freed),
+                )
+            }
+        }
+    }
+
+    fun clearAllLocalCachesFromDev() {
+        if (_developerModeState.value.isClearingLocalCache) return
+        viewModelScope.launch {
+            _developerModeState.update { it.copy(isClearingLocalCache = true, localCacheMessage = null) }
+            val freedPrefetch = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                AudioPrefetchCache.clearCache(app)
+            }
+            val freedApp = cacheManager.clearAppCache()
+            audiusRepository.clearSearchCache()
+            val remaining = cacheManager.calculateCacheSizeBytes()
+            _cacheSizeBytes.value = remaining
+            refreshLocalCacheStats()
+            _developerModeState.update {
+                it.copy(
+                    isClearingLocalCache = false,
+                    localCacheMessage = formatFileSize(freedPrefetch + freedApp),
+                )
+            }
+        }
+    }
+
+    private fun computeDirBytes(dir: java.io.File): Long {
+        if (!dir.exists()) return 0L
+        if (dir.isFile) return dir.length().coerceAtLeast(0L)
+        return dir.walkTopDown().filter { it.isFile }.sumOf { it.length().coerceAtLeast(0L) }
     }
 
     private fun scheduleCloudSettingsSync() {
@@ -2531,45 +3125,27 @@ class SoundLapaViewModel(
         albumLoadJob?.cancel()
 
         val online = networkObserver.refresh()
-        val openedAtMs = android.os.SystemClock.elapsedRealtime()
+        val allTracksSnapshot = uiState.value.tracks
+        val instantLocalMatches = buildList {
+            if (seedTrack != null) add(seedTrack)
+            allTracksSnapshot.forEach { t ->
+                if (t.id != seedTrack?.id && audiusRepository.isTrackByArtist(t, listOf(cleanName, artistName))) {
+                    add(t)
+                }
+            }
+        }
         _artistProfileState.value = ArtistProfileUiState(
             isVisible = true,
             artistName = cleanName,
-            avatarUrl = seedTrack?.coverArtPath,
+            avatarUrl = seedTrack?.coverArtPath ?: instantLocalMatches.firstOrNull()?.coverArtPath,
             accentColorHex = seedTrack?.accentColorHex ?: 0xFF8B5CF6L,
             secondaryColorHex = seedTrack?.secondaryColorHex ?: 0xFF5CE1E6L,
             isLoading = online,
-            tracks = listOfNotNull(seedTrack),
+            tracks = instantLocalMatches,
             albums = emptyList(),
         )
 
         artistProfileJob = viewModelScope.launch {
-            val allTracksSnapshot = uiState.value.tracks
-            val localMatches = kotlinx.coroutines.withContext(Dispatchers.Default) {
-                buildList {
-                    if (seedTrack != null) add(seedTrack)
-                    allTracksSnapshot.forEach { t ->
-                        if (t.id != seedTrack?.id && audiusRepository.isTrackByArtist(t, listOf(cleanName, artistName))) {
-                            add(t)
-                        }
-                    }
-                }
-            }
-            val elapsedOnLocal = android.os.SystemClock.elapsedRealtime() - openedAtMs
-            if (elapsedOnLocal < 300L) {
-                delay(300L - elapsedOnLocal)
-            }
-            _artistProfileState.update { current ->
-                if (!current.isVisible || !current.artistName.equals(cleanName, ignoreCase = true)) {
-                    current
-                } else {
-                    current.copy(
-                        avatarUrl = current.avatarUrl ?: localMatches.firstOrNull()?.coverArtPath,
-                        tracks = if (localMatches.isNotEmpty()) localMatches else current.tracks,
-                    )
-                }
-            }
-
             if (!online) return@launch
 
             val catalog = runCatching {
@@ -2579,13 +3155,13 @@ class SoundLapaViewModel(
                     knownSpotifyArtistId = spotifyId,
                     knownSoundCloudUrl = soundCloudUrl,
                     onPartialResult = { partial ->
-                        val elapsed = android.os.SystemClock.elapsedRealtime() - openedAtMs
-                        if (elapsed < 320L) return@fetchArtistCatalog
+                        val hasRichContent = partial.tracks.size >= 4 || partial.albums.isNotEmpty()
                         _artistProfileState.update { current ->
                             if (!current.isVisible || !current.artistName.equals(cleanName, ignoreCase = true)) {
                                 current
                             } else {
                                 current.copy(
+                                    isLoading = if (hasRichContent) false else current.isLoading,
                                     artistName = partial.artistName.ifBlank { current.artistName },
                                     avatarUrl = partial.avatarUrl ?: current.avatarUrl,
                                     tracks = partial.tracks.ifEmpty { current.tracks },
@@ -3198,6 +3774,18 @@ class SoundLapaViewModel(
         }
     }
 
+    fun removeFromQueue(trackId: String) {
+        playbackController.removeFromQueue(trackId)
+    }
+
+    fun moveQueueItem(fromIndex: Int, toIndex: Int) {
+        playbackController.moveQueueItem(fromIndex, toIndex)
+    }
+
+    fun clearUpcomingQueue() {
+        playbackController.clearUpcomingQueue()
+    }
+
     fun toggleArtistSubscription(
         artistName: String,
         avatarUrl: String? = null,
@@ -3777,10 +4365,14 @@ class SoundLapaViewModel(
         viewModelScope.launch {
             _isClearingCache.value = true
             _cacheStatusMessage.value = null
-            val freed = cacheManager.clearAppCache()
+            val freedPrefetch = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                AudioPrefetchCache.clearCache(app)
+            }
+            val freed = cacheManager.clearAppCache() + freedPrefetch
             audiusRepository.clearSearchCache()
             val remaining = cacheManager.calculateCacheSizeBytes()
             _cacheSizeBytes.value = remaining
+            refreshLocalCacheStats()
             _isClearingCache.value = false
             _cacheStatusMessage.value = formatFileSize(freed)
         }

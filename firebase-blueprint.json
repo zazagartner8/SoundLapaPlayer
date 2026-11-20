@@ -31,7 +31,7 @@
         },
         "avatarBlocked": {
           "type": "boolean",
-          "description": "Whether custom avatar uploads are permanently blocked for this account due to 18+ moderation violation"
+          "description": "Whether custom avatar uploads are blocked for this account"
         },
         "accountUid": {
           "type": "string",
@@ -100,7 +100,7 @@
     },
     "BugReport": {
       "title": "BugReport",
-      "description": "User-submitted bug report with reporter display name, avatar, message, and timestamp",
+      "description": "User-submitted bug report with reporter display name, avatar, message, triage status, and timestamp",
       "type": "object",
       "properties": {
         "reportId": {
@@ -127,6 +127,11 @@
           "type": "string",
           "description": "SoundLapa app version string"
         },
+        "status": {
+          "type": "string",
+          "enum": ["open", "in_progress", "resolved"],
+          "description": "Developer triage status for the report"
+        },
         "createdAtMs": {
           "type": "integer",
           "description": "Client epoch milliseconds when report was sent"
@@ -134,7 +139,12 @@
         "createdAt": {
           "type": "string",
           "format": "date-time",
-          "description": "Server timestamp when report was created"
+          "description": "Server timestamp when report was created (FieldValue.serverTimestamp)"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Optional server timestamp when developer updated report status (FieldValue.serverTimestamp)"
         }
       },
       "required": [
@@ -145,6 +155,82 @@
         "appVersion",
         "createdAtMs",
         "createdAt"
+      ]
+    },
+    "AvatarModerationRequest": {
+      "title": "AvatarModerationRequest",
+      "description": "Manual avatar change request reviewed by developer (SL-D1E6-EE60) or moderator (SL-C526-964C)",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Requester Firebase Auth UID (matches document ID)"
+        },
+        "accountUid": {
+          "type": "string",
+          "description": "Formatted SoundLap account UID (SL-XXXX-XXXX)"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Requester display name"
+        },
+        "username": {
+          "type": "string",
+          "description": "Optional requester @username handle"
+        },
+        "currentPhotoUrl": {
+          "type": "string",
+          "description": "Optional current active avatar URL or data URI before approval"
+        },
+        "proposedPhotoUrl": {
+          "type": "string",
+          "description": "Proposed cropped avatar JPEG data URI awaiting manual moderation"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "approved", "rejected"],
+          "description": "Current moderation state"
+        },
+        "rejectReason": {
+          "type": "string",
+          "description": "Optional reason provided by moderator when rejecting the avatar"
+        },
+        "reviewedByUid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the moderator or developer who reviewed the request"
+        },
+        "reviewedByName": {
+          "type": "string",
+          "description": "Display label of the moderator or developer who reviewed the request"
+        },
+        "createdAtMs": {
+          "type": "integer",
+          "description": "Client epoch milliseconds when request was submitted"
+        },
+        "reviewedAtMs": {
+          "type": "integer",
+          "description": "Client epoch milliseconds when request was reviewed"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when request was created (FieldValue.serverTimestamp)"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when request was updated (FieldValue.serverTimestamp)"
+        }
+      },
+      "required": [
+        "userId",
+        "accountUid",
+        "displayName",
+        "proposedPhotoUrl",
+        "status",
+        "createdAtMs",
+        "createdAt",
+        "updatedAt"
       ]
     },
     "SavedTrack": {
@@ -402,6 +488,7 @@
         "photoUrl": { "type": "string" },
         "bio": { "type": "string" },
         "isDeveloper": { "type": "boolean" },
+        "isModerator": { "type": "boolean" },
         "isPublic": { "type": "boolean" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -417,6 +504,7 @@
         "displayName": { "type": "string" },
         "photoUrl": { "type": "string" },
         "isDeveloper": { "type": "boolean" },
+        "isModerator": { "type": "boolean" },
         "isPublic": { "type": "boolean" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -433,6 +521,7 @@
         "displayName": { "type": "string" },
         "photoUrl": { "type": "string" },
         "isDeveloper": { "type": "boolean" },
+        "isModerator": { "type": "boolean" },
         "addedAtMs": { "type": "integer" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
@@ -505,7 +594,11 @@
     },
     "/bug_reports/{reportId}": {
       "schema": { "$ref": "#/entities/BugReport" },
-      "description": "User bug reports queried by verified developer"
+      "description": "User bug reports queried and triaged by verified developer"
+    },
+    "/avatar_requests/{userId}": {
+      "schema": { "$ref": "#/entities/AvatarModerationRequest" },
+      "description": "Manual avatar moderation requests reviewed by developer (SL-D1E6-EE60) and moderator (SL-C526-964C)"
     },
     "/cloud_metrics/{userId}": {
       "schema": { "$ref": "#/entities/CloudMetrics" },

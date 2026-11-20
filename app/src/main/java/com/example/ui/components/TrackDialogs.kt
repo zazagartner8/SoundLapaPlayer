@@ -35,11 +35,14 @@ import androidx.compose.material.icons.rounded.ArrowDownward
 import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.AudioFile
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.Image
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.Lyrics
 import androidx.compose.material.icons.rounded.OndemandVideo
 import androidx.compose.material.icons.rounded.Person
@@ -57,6 +60,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
@@ -81,6 +85,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.documentfile.provider.DocumentFile
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.example.data.local.PlaylistEntity
 import com.example.data.local.PlaylistMetadataHelper
 import com.example.data.local.PlaylistWithTracks
@@ -91,9 +96,12 @@ import com.example.ui.formatBytesMb
 import com.example.ui.formatDuration
 import com.example.ui.i18n.LocalAppStrings
 import com.example.ui.i18n.filterDisplayLabel
+import com.example.ui.shaders.LocalDataSaverEnabled
 import com.example.ui.shaders.TrackCoverArtwork
 import com.example.ui.theme.LiquidCyan
 import com.example.ui.theme.LiquidMint
+import com.example.ui.theme.expressivePressScale
+import com.example.ui.theme.resolveCoverImageData
 import com.example.ui.theme.LiquidRose
 
 @Composable
@@ -327,9 +335,27 @@ fun EditPlaylistDialog(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
+                    val editContext = LocalContext.current
+                    val dataSaver = LocalDataSaverEnabled.current
+                    var useExistingFallback by remember(playlist.coverArtPath) { mutableStateOf(false) }
+                    var existingLoadFailed by remember(playlist.coverArtPath) { mutableStateOf(false) }
+                    val existingCoverRequest = remember(playlist.coverArtPath, dataSaver, useExistingFallback) {
+                        val resolved = resolveCoverImageData(
+                            rawPath = playlist.coverArtPath,
+                            dataSaver = dataSaver,
+                            useFallbackUrl = useExistingFallback,
+                        ) ?: return@remember null
+                        ImageRequest.Builder(editContext)
+                            .data(resolved)
+                            .allowHardware(true)
+                            .size(288)
+                            .crossfade(false)
+                            .build()
+                    }
                     Box(
                         modifier = Modifier
                             .size(72.dp)
+                            .expressivePressScale(pressedScale = 0.94f)
                             .clip(RoundedCornerShape(18.dp))
                             .background(accent.copy(alpha = 0.16f))
                             .clickable {
@@ -340,38 +366,45 @@ fun EditPlaylistDialog(
                             .testTag("edit_playlist_cover_preview"),
                         contentAlignment = Alignment.Center,
                     ) {
-                        when {
-                            pickedCoverUri != null && !clearCover -> {
-                                AsyncImage(
-                                    model = pickedCoverUri,
-                                    contentDescription = strings.changeCover,
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier.matchParentSize(),
-                                )
-                            }
-                            !clearCover && !playlist.coverArtPath.isNullOrBlank() -> {
-                                AsyncImage(
-                                    model = playlist.coverArtPath,
-                                    contentDescription = strings.changeCover,
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier.matchParentSize(),
-                                )
-                            }
-                            fallbackTrack != null -> {
-                                TrackCoverArtwork(
-                                    track = fallbackTrack,
-                                    modifier = Modifier.matchParentSize(),
-                                    cornerRadius = 18.dp,
-                                )
-                            }
-                            else -> {
-                                Icon(
-                                    imageVector = Icons.Rounded.QueueMusic,
-                                    contentDescription = null,
-                                    tint = accent,
-                                    modifier = Modifier.size(30.dp),
-                                )
-                            }
+                        // Always render fallback behind custom cover so invalid/loading covers never flash blank
+                        if (fallbackTrack != null) {
+                            TrackCoverArtwork(
+                                track = fallbackTrack,
+                                modifier = Modifier.matchParentSize(),
+                                cornerRadius = 18.dp,
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Rounded.QueueMusic,
+                                contentDescription = null,
+                                tint = accent,
+                                modifier = Modifier.size(30.dp),
+                            )
+                        }
+
+                        if (pickedCoverUri != null && !clearCover) {
+                            AsyncImage(
+                                model = pickedCoverUri,
+                                contentDescription = strings.changeCover,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.matchParentSize(),
+                            )
+                        } else if (!clearCover && existingCoverRequest != null && !existingLoadFailed) {
+                            AsyncImage(
+                                model = existingCoverRequest,
+                                contentDescription = strings.changeCover,
+                                contentScale = ContentScale.Crop,
+                                onError = {
+                                    if (!useExistingFallback &&
+                                        playlist.coverArtPath?.startsWith("http", ignoreCase = true) == true
+                                    ) {
+                                        useExistingFallback = true
+                                    } else {
+                                        existingLoadFailed = true
+                                    }
+                                },
+                                modifier = Modifier.matchParentSize(),
+                            )
                         }
                     }
 
@@ -1464,11 +1497,32 @@ fun QueueBottomSheet(
     queueTracks: List<TrackEntity>,
     currentTrackId: String?,
     onSelectTrack: (TrackEntity) -> Unit,
+    onRemoveFromQueue: (String) -> Unit = {},
+    onMoveQueueItem: (Int, Int) -> Unit = { _, _ -> },
+    onClearUpcomingQueue: () -> Unit = {},
     onDismiss: () -> Unit,
 ) {
     val strings = LocalAppStrings.current
+    val v35 = strings.v35
     val haptics = rememberSoundLapaHaptics()
     val accent = MaterialTheme.colorScheme.primary
+
+    val currentIndex = remember(queueTracks, currentTrackId) {
+        if (currentTrackId.isNullOrBlank()) -1
+        else queueTracks.indexOfFirst { it.id == currentTrackId }
+    }
+    val currentTrack = remember(queueTracks, currentIndex) {
+        if (currentIndex in queueTracks.indices) queueTracks[currentIndex] else null
+    }
+    val upcomingEntries = remember(queueTracks, currentIndex) {
+        if (currentIndex >= 0) {
+            queueTracks.mapIndexedNotNull { idx, item ->
+                if (idx > currentIndex) idx to item else null
+            }
+        } else {
+            queueTracks.mapIndexed { idx, item -> idx to item }
+        }
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -1487,78 +1541,219 @@ fun QueueBottomSheet(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                Text(
-                    text = strings.queueSheetTitle,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                )
-                Text(
-                    text = strings.tracksCountLabel(queueTracks.size),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = strings.queueSheetTitle,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Text(
+                        text = strings.tracksCountLabel(queueTracks.size),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (upcomingEntries.isNotEmpty()) {
+                    TextButton(
+                        onClick = {
+                            haptics.tick()
+                            onClearUpcomingQueue()
+                        },
+                        modifier = Modifier.testTag("queue_clear_upcoming_button"),
+                    ) {
+                        Text(
+                            text = v35.queueClearUpcomingButton,
+                            color = MaterialTheme.colorScheme.error,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                        )
+                    }
+                }
             }
 
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 420.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                items(
-                    items = queueTracks,
-                    key = { it.id },
-                ) { item ->
-                    val isCurrent = item.id == currentTrackId
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(
-                                if (isCurrent) accent.copy(alpha = 0.14f) else Color.Transparent,
-                            )
-                            .clickable {
-                                haptics.tap()
-                                onSelectTrack(item)
-                                onDismiss()
-                            }
-                            .padding(horizontal = 8.dp, vertical = 8.dp)
-                            .testTag("queue_item_${item.id}"),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+            if (currentTrack != null) {
+                Text(
+                    text = v35.queueNowPlayingSection,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = accent,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(accent.copy(alpha = 0.14f))
+                        .padding(horizontal = 10.dp, vertical = 8.dp)
+                        .testTag("queue_current_${currentTrack.id}"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    TrackCoverArtwork(
+                        track = currentTrack,
+                        modifier = Modifier.size(50.dp),
+                        cornerRadius = 12.dp,
+                        targetSizePx = 200,
+                    )
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
                     ) {
-                        TrackCoverArtwork(
-                            track = item,
-                            modifier = Modifier.size(54.dp),
-                            cornerRadius = 14.dp,
-                            targetSizePx = 220,
+                        Text(
+                            text = currentTrack.title,
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = accent,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                         )
-                        Column(
-                            modifier = Modifier.weight(1f),
-                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                        Text(
+                            text = "${currentTrack.artist} • ${formatDuration(currentTrack.durationMs)}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Icon(
+                        imageVector = Icons.Rounded.GraphicEq,
+                        contentDescription = null,
+                        tint = accent,
+                        modifier = Modifier.size(22.dp),
+                    )
+                }
+            }
+
+            Text(
+                text = v35.queueUpNextSection,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontWeight = FontWeight.SemiBold,
+            )
+
+            if (upcomingEntries.isEmpty()) {
+                Text(
+                    text = v35.queueEmptyUpcomingHint,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .padding(vertical = 12.dp)
+                        .testTag("queue_empty_upcoming_hint"),
+                )
+            } else {
+                val firstUpcomingQueueIdx = upcomingEntries.first().first
+                val lastUpcomingQueueIdx = upcomingEntries.last().first
+
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 380.dp)
+                        .testTag("queue_upcoming_list"),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    items(
+                        items = upcomingEntries,
+                        key = { (_, item) -> item.id },
+                        contentType = { "queue_upcoming_row" },
+                    ) { (queueIdx, item) ->
+                        val canMoveUp = queueIdx > firstUpcomingQueueIdx
+                        val canMoveDown = queueIdx < lastUpcomingQueueIdx
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .animateItem()
+                                .expressivePressScale(pressedScale = 0.98f)
+                                .clip(RoundedCornerShape(16.dp))
+                                .clickable {
+                                    haptics.tap()
+                                    onSelectTrack(item)
+                                    onDismiss()
+                                }
+                                .padding(start = 8.dp, end = 2.dp, top = 6.dp, bottom = 6.dp)
+                                .testTag("queue_item_${item.id}"),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
-                            Text(
-                                text = item.title,
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Medium,
-                                color = if (isCurrent) accent else MaterialTheme.colorScheme.onSurface,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
+                            TrackCoverArtwork(
+                                track = item,
+                                modifier = Modifier.size(46.dp),
+                                cornerRadius = 12.dp,
+                                targetSizePx = 180,
                             )
-                            Text(
-                                text = "${item.artist} • ${formatDuration(item.durationMs)}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(2.dp),
+                            ) {
+                                Text(
+                                    text = item.title,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Medium,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Text(
+                                    text = "${item.artist} • ${formatDuration(item.durationMs)}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                IconButton(
+                                    onClick = {
+                                        haptics.tick()
+                                        onMoveQueueItem(queueIdx, queueIdx - 1)
+                                    },
+                                    enabled = canMoveUp,
+                                    modifier = Modifier.testTag("queue_move_up_${item.id}"),
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.KeyboardArrowUp,
+                                        contentDescription = v35.queueMoveUpCd,
+                                        tint = if (canMoveUp) {
+                                            MaterialTheme.colorScheme.onSurface
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f)
+                                        },
+                                    )
+                                }
+                                IconButton(
+                                    onClick = {
+                                        haptics.tick()
+                                        onMoveQueueItem(queueIdx, queueIdx + 1)
+                                    },
+                                    enabled = canMoveDown,
+                                    modifier = Modifier.testTag("queue_move_down_${item.id}"),
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.KeyboardArrowDown,
+                                        contentDescription = v35.queueMoveDownCd,
+                                        tint = if (canMoveDown) {
+                                            MaterialTheme.colorScheme.onSurface
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f)
+                                        },
+                                    )
+                                }
+                                IconButton(
+                                    onClick = {
+                                        haptics.tick()
+                                        onRemoveFromQueue(item.id)
+                                    },
+                                    modifier = Modifier.testTag("queue_remove_${item.id}"),
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Close,
+                                        contentDescription = v35.queueRemoveCd,
+                                        tint = MaterialTheme.colorScheme.error,
+                                    )
+                                }
+                            }
                         }
-                        Icon(
-                            imageVector = if (isCurrent) Icons.Rounded.GraphicEq else Icons.Rounded.PlayArrow,
-                            contentDescription = null,
-                            tint = if (isCurrent) accent else MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(22.dp),
-                        )
                     }
                 }
             }
@@ -1567,3 +1762,4 @@ fun QueueBottomSheet(
         }
     }
 }
+

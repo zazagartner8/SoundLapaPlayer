@@ -6,8 +6,6 @@ import android.net.Uri
 import android.view.TextureView
 import android.view.ViewGroup
 import androidx.annotation.OptIn
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -24,28 +22,28 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import com.example.R
 import com.example.ui.shaders.LocalBatterySaverEnabled
 import com.example.ui.shaders.LocalIsMainUiVisible
 
 /**
- * Ambient muted looped video banner rendered seamlessly behind the top utility bar.
- * Uses TextureView + SurfaceTextureListener + explicit CENTER_CROP transform + automatic
- * decoder/error recovery so returning after long navigation or off-screen pauses never leaves
- * a blank surface.
+ * Lightweight 15 FPS muted looped video banner rendered seamlessly behind the top utility bar.
+ * Disables audio track decoding, uses a compact LoadControl for the compressed local raw asset,
+ * reuses its center-crop Matrix, and pauses automatically when occluded or backgrounded.
  */
 @OptIn(UnstableApi::class)
 @Composable
@@ -64,17 +62,35 @@ fun TopBannerVideo(
 
     val videoWidthState = remember { mutableIntStateOf(0) }
     val videoHeightState = remember { mutableIntStateOf(0) }
+    val transformMatrix = remember { Matrix() }
     var attachedTextureView by remember { mutableStateOf<TextureView?>(null) }
 
     val exoPlayer = remember(context) {
-        ExoPlayer.Builder(context).build().apply {
-            val videoUri = Uri.parse("android.resource://${context.packageName}/${R.raw.banner_soundlap}")
-            setMediaItem(MediaItem.fromUri(videoUri))
-            repeatMode = Player.REPEAT_MODE_ALL
-            volume = 0f
-            playWhenReady = !batterySaver && isUiVisible
-            prepare()
-        }
+        val compactLoadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                /* minBufferMs = */ 1_200,
+                /* maxBufferMs = */ 2_500,
+                /* bufferForPlaybackMs = */ 250,
+                /* bufferForPlaybackAfterRebufferMs = */ 500,
+            )
+            .setPrioritizeTimeOverSizeThresholds(false)
+            .build()
+
+        ExoPlayer.Builder(context)
+            .setLoadControl(compactLoadControl)
+            .build()
+            .apply {
+                trackSelectionParameters = trackSelectionParameters
+                    .buildUpon()
+                    .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true)
+                    .build()
+                val videoUri = Uri.parse("android.resource://${context.packageName}/${R.raw.banner_soundlap}")
+                setMediaItem(MediaItem.fromUri(videoUri))
+                repeatMode = Player.REPEAT_MODE_ALL
+                volume = 0f
+                playWhenReady = !batterySaver && isUiVisible
+                prepare()
+            }
     }
 
     fun applyCenterCropMatrix(view: TextureView, videoW: Int, videoH: Int) {
@@ -86,16 +102,15 @@ fun TopBannerVideo(
         val maxScale = maxOf(scaleX, scaleY)
         val dx = (viewW - videoW * maxScale) / 2f
         val dy = (viewH - videoH * maxScale) / 2f
-        val matrix = Matrix().apply {
-            setScale(
-                (videoW * maxScale) / viewW,
-                (videoH * maxScale) / viewH,
-                0f,
-                0f,
-            )
-            postTranslate(dx, dy)
-        }
-        view.setTransform(matrix)
+        transformMatrix.reset()
+        transformMatrix.setScale(
+            (videoW * maxScale) / viewW,
+            (videoH * maxScale) / viewH,
+            0f,
+            0f,
+        )
+        transformMatrix.postTranslate(dx, dy)
+        view.setTransform(transformMatrix)
     }
 
     fun ensurePlayingBanner() {
@@ -168,7 +183,11 @@ fun TopBannerVideo(
             when (event) {
                 Lifecycle.Event.ON_START,
                 Lifecycle.Event.ON_RESUME -> ensurePlayingBanner()
-                Lifecycle.Event.ON_STOP -> exoPlayer.pause()
+                Lifecycle.Event.ON_PAUSE,
+                Lifecycle.Event.ON_STOP -> {
+                    exoPlayer.playWhenReady = false
+                    exoPlayer.pause()
+                }
                 else -> Unit
             }
         }

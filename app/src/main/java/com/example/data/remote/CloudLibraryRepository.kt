@@ -6,7 +6,8 @@ import com.example.data.local.PlaylistEntity
 import com.example.data.local.PlaylistTrackCrossRef
 import com.example.data.local.SoundLapaDao
 import com.example.data.local.TrackEntity
-import com.example.ui.auth.isAllowedDeveloperEmail
+import com.example.ui.auth.isVerifiedDeveloperAccount
+import com.example.ui.auth.isVerifiedModeratorUid
 import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.auth
@@ -70,10 +71,23 @@ class CloudLibraryRepository(
     private fun playlistItemsCollection(uid: String, playlistId: String) =
         playlistsCollection(uid).document(safeFirestoreDocId(playlistId)).collection("items")
 
+    private fun avatarRequestsCollection() = db.collection("avatar_requests")
+
     fun isCurrentUserVerifiedDeveloper(): Boolean {
         val user = auth.currentUser ?: return false
-        return isAllowedDeveloperEmail(user.email) && user.isEmailVerified
+        return isVerifiedDeveloperAccount(
+            firebaseUid = user.uid,
+            email = user.email.takeIf { user.isEmailVerified },
+        )
     }
+
+    fun isCurrentUserVerifiedModerator(): Boolean {
+        val user = auth.currentUser ?: return false
+        return isVerifiedModeratorUid(user.uid)
+    }
+
+    fun isCurrentUserAvatarReviewer(): Boolean =
+        isCurrentUserVerifiedDeveloper() || isCurrentUserVerifiedModerator()
 
     suspend fun upsertUserProfile(
         displayName: String?,
@@ -499,6 +513,68 @@ class CloudLibraryRepository(
             }
         }
 
+    suspend fun updateDeveloperBugReportStatus(
+        docIdOrReportId: String,
+        status: BugReportStatus,
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            requireUserId()
+        } catch (e: Exception) {
+            return@withContext Result.failure(e)
+        }
+        if (!isCurrentUserVerifiedDeveloper()) {
+            return@withContext Result.failure(IllegalAccessException("Verified developer account required"))
+        }
+        val cleanId = docIdOrReportId.trim()
+        if (cleanId.isEmpty()) {
+            return@withContext Result.failure(IllegalArgumentException("Empty report ID"))
+        }
+        val docRef = db.collection("bug_reports").document(cleanId)
+        try {
+            docRef.update(
+                mapOf(
+                    "status" to status.wireValue,
+                    "updatedAt" to FieldValue.serverTimestamp(),
+                ),
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docRef.path)
+            Result.failure(e)
+        }
+    }
+
+    fun observeDeveloperBugReports(): Flow<List<CloudBugReport>> = flow {
+        val uid = requireUserId()
+        if (!isCurrentUserVerifiedDeveloper()) {
+            emit(emptyList())
+            return@flow
+        }
+        emitAll(
+            db.collection("bug_reports")
+                .snapshots()
+                .map { snapshot ->
+                    snapshot.toObjects(
+                        CloudBugReport::class.java,
+                        DocumentSnapshot.ServerTimestampBehavior.ESTIMATE,
+                    ).sortedByDescending { it.createdAtMs }
+                }
+                .catch { error ->
+                    val firestoreError = generateSequence(error) { it.cause }
+                        .filterIsInstance<FirebaseFirestoreException>()
+                        .firstOrNull()
+                    if (firestoreError == null && error is CancellationException) throw error
+                    val exceptionToLog = firestoreError ?: (error as? Exception)
+                    if (exceptionToLog != null && auth.currentUser?.uid == uid) {
+                        handleFirestoreError(exceptionToLog, OperationType.LIST, "bug_reports")
+                    }
+                    emit(emptyList())
+                },
+        )
+    }
+
     suspend fun deleteDeveloperBugReport(
         docIdOrReportId: String,
     ): Result<Unit> = withContext(Dispatchers.IO) {
@@ -522,6 +598,378 @@ class CloudLibraryRepository(
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.DELETE, docRef.path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun submitAvatarModerationRequest(
+        displayName: String,
+        username: String?,
+        currentPhotoUrl: String?,
+        proposedPhotoUrl: String,
+    ): Result<CloudAvatarModerationRequest> = withContext(Dispatchers.IO) {
+        val uid = try {
+            requireUserId()
+        } catch (e: Exception) {
+            return@withContext Result.failure(e)
+        }
+        val cleanProposed = proposedPhotoUrl.trim().take(MAX_CLOUD_AVATAR_LEN)
+        if (cleanProposed.isBlank()) {
+            return@withContext Result.failure(IllegalArgumentException("Empty proposed avatar"))
+        }
+        val cleanName = displayName.trim().ifBlank { "SoundLap User" }.take(64)
+        val cleanHandle = username?.let(::normalizeUsernameHandle)?.takeIf(::isValidUsernameHandle)
+        val cleanCurrent = currentPhotoUrl?.trim()?.takeIf { it.isNotEmpty() }?.take(MAX_CLOUD_AVATAR_LEN)
+        val accountUid = com.example.data.local.SoundLapUidFormatter.format(uid)
+        val now = System.currentTimeMillis()
+        val docRef = avatarRequestsCollection().document(uid)
+        val model = CloudAvatarModerationRequest(
+            docId = uid,
+            userId = uid,
+            accountUid = accountUid,
+            displayName = cleanName,
+            username = cleanHandle,
+            currentPhotoUrl = cleanCurrent,
+            proposedPhotoUrl = cleanProposed,
+            status = AvatarModerationStatus.PENDING.wireValue,
+            rejectReason = null,
+            reviewedByUid = null,
+            reviewedByName = null,
+            createdAtMs = now,
+            reviewedAtMs = 0L,
+        )
+        try {
+            val existing = docRef.get().await()
+            if (existing.exists()) {
+                val updateMap = buildMap<String, Any> {
+                    put("accountUid", accountUid)
+                    put("displayName", cleanName)
+                    if (cleanHandle != null) {
+                        put("username", cleanHandle)
+                    } else if (existing.contains("username")) {
+                        put("username", FieldValue.delete())
+                    }
+                    if (cleanCurrent != null) {
+                        put("currentPhotoUrl", cleanCurrent)
+                    } else if (existing.contains("currentPhotoUrl")) {
+                        put("currentPhotoUrl", FieldValue.delete())
+                    }
+                    put("proposedPhotoUrl", cleanProposed)
+                    put("status", AvatarModerationStatus.PENDING.wireValue)
+                    put("createdAtMs", now)
+                    put("updatedAt", FieldValue.serverTimestamp())
+                    if (existing.contains("rejectReason")) put("rejectReason", FieldValue.delete())
+                    if (existing.contains("reviewedByUid")) put("reviewedByUid", FieldValue.delete())
+                    if (existing.contains("reviewedByName")) put("reviewedByName", FieldValue.delete())
+                    if (existing.contains("reviewedAtMs")) put("reviewedAtMs", FieldValue.delete())
+                }
+                docRef.update(updateMap).await()
+            } else {
+                docRef.set(model.toCreateMap(uid)).await()
+            }
+            Result.success(model)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, docRef.path)
+            Result.failure(e)
+        }
+    }
+
+    fun observeOwnAvatarModerationRequest(uid: String): Flow<CloudAvatarModerationRequest?> = flow {
+        val safeUid = safeFirestoreDocId(uid)
+        if (safeUid.isBlank()) {
+            emit(null)
+            return@flow
+        }
+        val docRef = avatarRequestsCollection().document(safeUid)
+        emitAll(
+            docRef.snapshots()
+                .map { snapshot ->
+                    if (snapshot.exists()) {
+                        snapshot.toObject(
+                            CloudAvatarModerationRequest::class.java,
+                            DocumentSnapshot.ServerTimestampBehavior.ESTIMATE,
+                        )
+                    } else {
+                        null
+                    }
+                }
+                .catch { error ->
+                    val firestoreError = generateSequence(error) { it.cause }
+                        .filterIsInstance<FirebaseFirestoreException>()
+                        .firstOrNull()
+                    if (firestoreError == null && error is CancellationException) throw error
+                    emit(null)
+                },
+        )
+    }
+
+    suspend fun cancelOwnAvatarModerationRequest(): Result<Unit> = withContext(Dispatchers.IO) {
+        val uid = try {
+            requireUserId()
+        } catch (e: Exception) {
+            return@withContext Result.failure(e)
+        }
+        val docRef = avatarRequestsCollection().document(uid)
+        try {
+            docRef.delete().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, docRef.path)
+            Result.failure(e)
+        }
+    }
+
+    fun observePendingAvatarModerationRequests(): Flow<List<CloudAvatarModerationRequest>> = flow {
+        val uid = requireUserId()
+        if (!isCurrentUserAvatarReviewer()) {
+            emit(emptyList())
+            return@flow
+        }
+        emitAll(
+            avatarRequestsCollection()
+                .snapshots()
+                .map { snapshot ->
+                    snapshot.toObjects(
+                        CloudAvatarModerationRequest::class.java,
+                        DocumentSnapshot.ServerTimestampBehavior.ESTIMATE,
+                    ).sortedWith(
+                        compareByDescending<CloudAvatarModerationRequest> {
+                            it.parsedStatus() == AvatarModerationStatus.PENDING
+                        }.thenByDescending { it.createdAtMs },
+                    )
+                }
+                .catch { error ->
+                    val firestoreError = generateSequence(error) { it.cause }
+                        .filterIsInstance<FirebaseFirestoreException>()
+                        .firstOrNull()
+                    if (firestoreError == null && error is CancellationException) throw error
+                    val exceptionToLog = firestoreError ?: (error as? Exception)
+                    if (exceptionToLog != null && auth.currentUser?.uid == uid) {
+                        handleFirestoreError(exceptionToLog, OperationType.LIST, "avatar_requests")
+                    }
+                    emit(emptyList())
+                },
+        )
+    }
+
+    suspend fun fetchAllAvatarModerationRequests(): Result<List<CloudAvatarModerationRequest>> =
+        withContext(Dispatchers.IO) {
+            try {
+                requireUserId()
+            } catch (e: Exception) {
+                return@withContext Result.failure(e)
+            }
+            if (!isCurrentUserAvatarReviewer()) {
+                return@withContext Result.failure(IllegalAccessException("Moderator or developer account required"))
+            }
+            try {
+                val snapshot = avatarRequestsCollection().get().await()
+                val list = snapshot.toObjects(
+                    CloudAvatarModerationRequest::class.java,
+                    DocumentSnapshot.ServerTimestampBehavior.ESTIMATE,
+                ).sortedWith(
+                    compareByDescending<CloudAvatarModerationRequest> {
+                        it.parsedStatus() == AvatarModerationStatus.PENDING
+                    }.thenByDescending { it.createdAtMs },
+                )
+                Result.success(list)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                handleFirestoreError(e, OperationType.LIST, "avatar_requests")
+                Result.failure(e)
+            }
+        }
+
+    suspend fun approveAvatarModerationRequest(
+        request: CloudAvatarModerationRequest,
+        reviewerName: String,
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        val reviewerUid = try {
+            requireUserId()
+        } catch (e: Exception) {
+            return@withContext Result.failure(e)
+        }
+        if (!isCurrentUserAvatarReviewer()) {
+            return@withContext Result.failure(IllegalAccessException("Moderator or developer account required"))
+        }
+        val targetUid = safeFirestoreDocId(request.userId.ifBlank { request.docId })
+        val cleanPhoto = request.proposedPhotoUrl.trim().take(MAX_CLOUD_AVATAR_LEN)
+        if (targetUid.isBlank() || cleanPhoto.isBlank()) {
+            return@withContext Result.failure(IllegalArgumentException("Invalid avatar request"))
+        }
+        val now = System.currentTimeMillis()
+        val reqRef = avatarRequestsCollection().document(targetUid)
+        try {
+            // 1. Apply the approved avatar to the user's profile (reviewer-only allowed patch)
+            userDocRef(targetUid).update(
+                mapOf(
+                    "photoUrl" to cleanPhoto,
+                    "avatarBlocked" to false,
+                    "updatedAt" to FieldValue.serverTimestamp(),
+                ),
+            ).await()
+
+            // 2. Patch public_profiles/{targetUid} if it exists
+            runCatching {
+                val pubSnap = publicProfilesCollection().document(targetUid).get().await()
+                if (pubSnap.exists()) {
+                    publicProfilesCollection().document(targetUid).update(
+                        mapOf(
+                            "photoUrl" to cleanPhoto,
+                            "updatedAt" to FieldValue.serverTimestamp(),
+                        ),
+                    ).await()
+                }
+            }
+
+            // 3. Patch usernames/{handle} if handle is present
+            val handle = request.username?.let(::normalizeUsernameHandle)?.takeIf(::isValidUsernameHandle)
+                ?: runCatching {
+                    publicProfilesCollection().document(targetUid).get().await()
+                        .getString("username")?.let(::normalizeUsernameHandle)?.takeIf(::isValidUsernameHandle)
+                }.getOrNull()
+            if (handle != null) {
+                runCatching {
+                    val handleSnap = usernamesCollection().document(handle).get().await()
+                    if (handleSnap.exists() && handleSnap.getString("userId") == targetUid) {
+                        usernamesCollection().document(handle).update(
+                            mapOf(
+                                "photoUrl" to cleanPhoto,
+                                "updatedAt" to FieldValue.serverTimestamp(),
+                            ),
+                        ).await()
+                    }
+                }
+            }
+
+            // 4. Mark moderation request as approved
+            reqRef.update(
+                mapOf(
+                    "status" to AvatarModerationStatus.APPROVED.wireValue,
+                    "rejectReason" to FieldValue.delete(),
+                    "reviewedByUid" to reviewerUid,
+                    "reviewedByName" to reviewerName.trim().ifBlank { "Moderator" }.take(64),
+                    "reviewedAtMs" to now,
+                    "updatedAt" to FieldValue.serverTimestamp(),
+                ),
+            ).await()
+
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, reqRef.path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun rejectAvatarModerationRequest(
+        request: CloudAvatarModerationRequest,
+        reason: String?,
+        reviewerName: String,
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        val reviewerUid = try {
+            requireUserId()
+        } catch (e: Exception) {
+            return@withContext Result.failure(e)
+        }
+        if (!isCurrentUserAvatarReviewer()) {
+            return@withContext Result.failure(IllegalAccessException("Moderator or developer account required"))
+        }
+        val targetUid = safeFirestoreDocId(request.userId.ifBlank { request.docId })
+        if (targetUid.isBlank()) {
+            return@withContext Result.failure(IllegalArgumentException("Invalid target UID"))
+        }
+        val cleanReason = reason?.trim()?.takeIf { it.isNotEmpty() }?.take(300)
+        val reqRef = avatarRequestsCollection().document(targetUid)
+        try {
+            val updateMap = buildMap<String, Any> {
+                put("status", AvatarModerationStatus.REJECTED.wireValue)
+                if (cleanReason != null) {
+                    put("rejectReason", cleanReason)
+                } else {
+                    put("rejectReason", FieldValue.delete())
+                }
+                put("reviewedByUid", reviewerUid)
+                put("reviewedByName", reviewerName.trim().ifBlank { "Moderator" }.take(64))
+                put("reviewedAtMs", System.currentTimeMillis())
+                put("updatedAt", FieldValue.serverTimestamp())
+            }
+            reqRef.update(updateMap).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, reqRef.path)
+            Result.failure(e)
+        }
+    }
+
+    data class AdminPollResult(
+        val newPendingAvatarRequests: List<CloudAvatarModerationRequest> = emptyList(),
+        val newBugReports: List<CloudBugReport> = emptyList(),
+    )
+
+    suspend fun fetchAdminNewEventsSince(
+        sinceAvatarMs: Long,
+        sinceReportMs: Long,
+    ): Result<AdminPollResult> = withContext(Dispatchers.IO) {
+        try {
+            requireUserId()
+        } catch (e: Exception) {
+            return@withContext Result.failure(e)
+        }
+        val isDev = isCurrentUserVerifiedDeveloper()
+        val isMod = isCurrentUserVerifiedModerator()
+        if (!isDev && !isMod) {
+            return@withContext Result.success(AdminPollResult())
+        }
+        try {
+            coroutineScope {
+                val avatarsDeferred = async {
+                    runCatching {
+                        avatarRequestsCollection().get().await()
+                            .toObjects(
+                                CloudAvatarModerationRequest::class.java,
+                                DocumentSnapshot.ServerTimestampBehavior.ESTIMATE,
+                            )
+                            .filter {
+                                it.parsedStatus() == AvatarModerationStatus.PENDING &&
+                                    it.createdAtMs > sinceAvatarMs
+                            }
+                            .sortedByDescending { it.createdAtMs }
+                    }.getOrDefault(emptyList())
+                }
+                val reportsDeferred = async {
+                    if (!isDev) {
+                        emptyList()
+                    } else {
+                        runCatching {
+                            db.collection("bug_reports").get().await()
+                                .toObjects(
+                                    CloudBugReport::class.java,
+                                    DocumentSnapshot.ServerTimestampBehavior.ESTIMATE,
+                                )
+                                .filter { it.createdAtMs > sinceReportMs }
+                                .sortedByDescending { it.createdAtMs }
+                        }.getOrDefault(emptyList())
+                    }
+                }
+                Result.success(
+                    AdminPollResult(
+                        newPendingAvatarRequests = avatarsDeferred.await(),
+                        newBugReports = reportsDeferred.await(),
+                    ),
+                )
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
             Result.failure(e)
         }
     }
@@ -672,14 +1120,64 @@ class CloudLibraryRepository(
                     estimateFirestoreDocBytes(doc.reference.path, doc.data)
                 }
 
+                val avatarReqsSnap = runCatching { avatarRequestsCollection().get().await() }.getOrNull()
+                val avatarRequestsBytes = avatarReqsSnap?.documents?.sumOf { doc ->
+                    estimateFirestoreDocBytes(doc.reference.path, doc.data)
+                } ?: 0L
+                val totalAvatarRequests = avatarReqsSnap?.size() ?: 0
+
+                val usersNamesByUid = runCatching {
+                    db.collection("users").get().await().documents.associate { doc ->
+                        val name = doc.getString("displayName")?.takeIf { it.isNotBlank() } ?: "SoundLap User"
+                        val accUid = doc.getString("accountUid")?.takeIf { it.isNotBlank() }
+                            ?: com.example.data.local.SoundLapUidFormatter.format(doc.id)
+                        doc.id to (name to accUid)
+                    }
+                }.getOrDefault(emptyMap())
+
                 val otherUsersBytes = otherMetrics.sumOf { it.storageBytes.coerceAtLeast(0L) }
-                val totalUsed = (effectiveUserBytes + otherUsersBytes + metricsDocsBytes + reportsBytes).coerceAtLeast(0L)
+                val accountsBytes = (effectiveUserBytes + otherUsersBytes + metricsDocsBytes).coerceAtLeast(0L)
+                val totalUsed = (accountsBytes + reportsBytes + avatarRequestsBytes).coerceAtLeast(0L)
 
                 val hasCurrentUserData = userSnap.exists() || effectiveUserTracks > 0 || effectiveUserPlaylists > 0
                 val distinctUsers = buildSet {
                     otherMetrics.forEach { if (it.userId.isNotBlank()) add(it.userId) }
                     if (hasCurrentUserData) add(uid)
                 }
+
+                val topUsers = buildList {
+                    if (hasCurrentUserData) {
+                        val (name, accUid) = usersNamesByUid[uid]
+                            ?: (auth.currentUser?.displayName.orEmpty().ifBlank { "Developer" } to com.example.data.local.SoundLapUidFormatter.format(uid))
+                        add(
+                            CloudStorageUserSlice(
+                                userId = uid,
+                                displayName = name,
+                                accountUid = accUid,
+                                storageBytes = effectiveUserBytes,
+                                tracksCount = effectiveUserTracks,
+                                playlistsCount = effectiveUserPlaylists,
+                            ),
+                        )
+                    }
+                    otherMetrics.forEach { m ->
+                        val targetUid = m.userId.ifBlank { m.docId }
+                        if (targetUid.isNotBlank()) {
+                            val (name, accUid) = usersNamesByUid[targetUid]
+                                ?: ("SoundLap User" to com.example.data.local.SoundLapUidFormatter.format(targetUid))
+                            add(
+                                CloudStorageUserSlice(
+                                    userId = targetUid,
+                                    displayName = name,
+                                    accountUid = accUid,
+                                    storageBytes = m.storageBytes.coerceAtLeast(0L),
+                                    tracksCount = m.tracksCount.coerceAtLeast(0),
+                                    playlistsCount = m.playlistsCount.coerceAtLeast(0),
+                                ),
+                            )
+                        }
+                    }
+                }.sortedByDescending { it.storageBytes }.take(8)
 
                 Result.success(
                     CloudStorageStats(
@@ -689,6 +1187,11 @@ class CloudLibraryRepository(
                         totalTracks = effectiveUserTracks + otherMetrics.sumOf { it.tracksCount.coerceAtLeast(0) },
                         totalPlaylists = effectiveUserPlaylists + otherMetrics.sumOf { it.playlistsCount.coerceAtLeast(0) },
                         totalBugReports = reportsSnapshot.size(),
+                        totalAvatarRequests = totalAvatarRequests,
+                        accountsBytes = accountsBytes,
+                        reportsBytes = reportsBytes,
+                        avatarRequestsBytes = avatarRequestsBytes,
+                        topUsers = topUsers,
                         isCloudLive = true,
                     ),
                 )
@@ -1238,6 +1741,7 @@ class CloudLibraryRepository(
         bio: String?,
     ): CloudPublicProfile {
         val isDev = isCurrentUserVerifiedDeveloper()
+        val isMod = isCurrentUserVerifiedModerator()
         val cleanHandle = username?.let(::normalizeUsernameHandle)?.takeIf(::isValidUsernameHandle)
         val model = CloudPublicProfile(
             docId = uid,
@@ -1247,10 +1751,11 @@ class CloudLibraryRepository(
             photoUrl = photoUrl?.trim()?.takeIf { it.isNotEmpty() }?.take(24_000),
             bio = bio?.trim()?.takeIf { it.isNotEmpty() }?.take(180),
             isDeveloper = isDev,
+            isModerator = isMod,
             isPublic = true,
         )
         publicProfilesCollection().document(uid)
-            .set(model.toWriteMap(uid, allowDeveloperFlag = isDev))
+            .set(model.toWriteMap(uid, allowDeveloperFlag = isDev, allowModeratorFlag = isMod))
             .await()
         if (cleanHandle != null) {
             val handleDocRef = usernamesCollection().document(cleanHandle)
@@ -1263,9 +1768,10 @@ class CloudLibraryRepository(
                     displayName = model.displayName,
                     photoUrl = model.photoUrl,
                     isDeveloper = isDev,
+                    isModerator = isMod,
                     isPublic = true,
                 )
-                handleDocRef.set(handleModel.toWriteMap(uid, allowDeveloperFlag = isDev)).await()
+                handleDocRef.set(handleModel.toWriteMap(uid, allowDeveloperFlag = isDev, allowModeratorFlag = isMod)).await()
             }
         }
         return model
@@ -1324,6 +1830,7 @@ class CloudLibraryRepository(
                 ?.takeIf(::isValidUsernameHandle)
 
             val isDev = isCurrentUserVerifiedDeveloper()
+            val isMod = isCurrentUserVerifiedModerator()
             val cleanName = displayName.trim().ifBlank { "SoundLap User" }.take(64)
             val cleanPhoto = photoUrl?.trim()?.takeIf { it.isNotEmpty() }?.take(24_000)
 
@@ -1334,9 +1841,10 @@ class CloudLibraryRepository(
                 displayName = cleanName,
                 photoUrl = cleanPhoto,
                 isDeveloper = isDev,
+                isModerator = isMod,
                 isPublic = true,
             )
-            handleDocRef.set(handleModel.toWriteMap(uid, allowDeveloperFlag = isDev)).await()
+            handleDocRef.set(handleModel.toWriteMap(uid, allowDeveloperFlag = isDev, allowModeratorFlag = isMod)).await()
 
             if (userSnap.exists()) {
                 userDocRef(uid).update(
@@ -1541,6 +2049,7 @@ class CloudLibraryRepository(
             displayName = friend.displayName.ifBlank { "SoundLap User" },
             photoUrl = friend.photoUrl,
             isDeveloper = friend.isDeveloper,
+            isModerator = friend.isModerator || isVerifiedModeratorUid(safeFriendUid),
             addedAtMs = System.currentTimeMillis(),
         )
         try {
@@ -1948,9 +2457,10 @@ class CloudLibraryRepository(
     ): DeveloperUserOverview {
         val uid = profile.userId.ifBlank { fallbackUid }
         val nowMs = System.currentTimeMillis()
-        val effectiveIsOnline = profile.isOnline &&
-            profile.lastActiveAtMs > 0L &&
-            (nowMs - profile.lastActiveAtMs) <= 4L * 60_000L
+        val (effectiveIsOnline, effectiveTrackIsPlaying) = resolveDeveloperPresenceStatus(
+            profile = profile,
+            nowMs = nowMs,
+        )
         return DeveloperUserOverview(
             userId = uid,
             accountUid = profile.accountUid?.takeIf { it.isNotBlank() }
@@ -1966,7 +2476,7 @@ class CloudLibraryRepository(
             currentTrackTitle = profile.currentTrackTitle?.takeIf { it.isNotBlank() },
             currentTrackArtist = profile.currentTrackArtist?.takeIf { it.isNotBlank() },
             currentTrackCoverUrl = profile.currentTrackCoverUrl?.takeIf { it.isNotBlank() },
-            currentTrackIsPlaying = effectiveIsOnline && profile.currentTrackIsPlaying,
+            currentTrackIsPlaying = effectiveTrackIsPlaying,
             currentTrackUpdatedAtMs = profile.currentTrackUpdatedAtMs,
             storageBytes = metrics?.storageBytes?.coerceAtLeast(0L) ?: 0L,
             tracksCount = metrics?.tracksCount?.coerceAtLeast(0) ?: 0,
@@ -1979,6 +2489,7 @@ class CloudLibraryRepository(
             isBanned = banRecord != null,
             banReason = banRecord?.reason,
             bannedAtMs = banRecord?.bannedAtMs ?: 0L,
+            isModerator = isVerifiedModeratorUid(uid),
         )
     }
 
@@ -2166,4 +2677,37 @@ class CloudLibraryRepository(
                 Result.failure(e)
             }
         }
+
+    companion object {
+        private const val ONLINE_FRESHNESS_MS = 4L * 60_000L
+        private const val ACTIVE_PLAYBACK_FRESHNESS_MS = 5L * 60_000L
+
+        /**
+         * Resolves effective (isOnline, currentTrackIsPlaying) for the Developer Users Inspector.
+         * Active background playback with a fresh heartbeat keeps currentTrackIsPlaying = true
+         * even when the app window is minimized, while an explicit pause immediately sets
+         * profile.currentTrackIsPlaying = false.
+         */
+        fun resolveDeveloperPresenceStatus(
+            profile: CloudUserProfile,
+            nowMs: Long = System.currentTimeMillis(),
+        ): Pair<Boolean, Boolean> {
+            val hasTrackMeta = !profile.currentTrackTitle.isNullOrBlank() ||
+                !profile.currentTrackId.isNullOrBlank()
+            val playbackTimestampMs = profile.currentTrackUpdatedAtMs
+                .takeIf { it > 0L }
+                ?: profile.lastActiveAtMs
+            val activePlaybackFresh = profile.currentTrackIsPlaying &&
+                hasTrackMeta &&
+                playbackTimestampMs > 0L &&
+                (nowMs - playbackTimestampMs) <= ACTIVE_PLAYBACK_FRESHNESS_MS
+
+            val foregroundOnlineFresh = profile.isOnline &&
+                profile.lastActiveAtMs > 0L &&
+                (nowMs - profile.lastActiveAtMs) <= ONLINE_FRESHNESS_MS
+
+            val effectiveIsOnline = foregroundOnlineFresh || activePlaybackFresh
+            return effectiveIsOnline to activePlaybackFresh
+        }
+    }
 }

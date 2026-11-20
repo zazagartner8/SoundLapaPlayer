@@ -1,6 +1,6 @@
 {
-  "summary":  "Architectural and UX plan for Spotify-first clip resolution (Canvas & music videos with YouTube Music fallback), exclusive player seekbar duration adaptation for clips, automatic clip-audio playback from 0:00 with two-way Track/Clip audio switching and position sync, and tight vertical text grouping in the Settings account card.",
-  "updatedAt":  "2026-11-18T17:00:36.215435726Z",
+  "summary":  "План обновления SoundLap v3.4.3: логотип на экране загрузки, раздельный биометрический доступ для разработчика и модераторов, добавление модератора SL-6721-BEED, исправление обложек плейлистов, лимит импорта до 500 треков, глубокая оптимизация и плавные пружинные анимации Material Expressive.",
+  "updatedAt":  "2026-11-20T22:05:19.684479570Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

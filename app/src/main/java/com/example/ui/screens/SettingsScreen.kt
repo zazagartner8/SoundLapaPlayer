@@ -115,6 +115,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.documentfile.provider.DocumentFile
 import com.example.data.local.AudioFocusMode
+import com.example.data.remote.AvatarModerationStatus
 import com.example.ui.MainUiState
 import com.example.ui.StatsBackupUiState
 import com.example.ui.components.AccountAvatarImage
@@ -127,6 +128,7 @@ import com.example.ui.components.rememberSoundLapaHaptics
 import com.example.ui.formatFileSize
 import com.example.ui.i18n.AppLanguage
 import com.example.ui.i18n.LocalAppStrings
+import com.example.ui.theme.LiquidCyan
 import com.example.ui.theme.LiquidMint
 import com.example.ui.theme.LiquidRose
 import kotlin.math.roundToInt
@@ -182,6 +184,7 @@ fun SettingsScreen(
     isSigningInGoogleFromGuest: Boolean = false,
     guestGoogleSignInError: String? = null,
     onUpdateProfile: (displayName: String, bio: String, croppedAvatarBitmap: Bitmap?, clearAvatar: Boolean) -> Unit = { _, _, _, _ -> },
+    onCancelOwnAvatarRequest: () -> Unit = {},
     onClearProfileStatus: () -> Unit = {},
     onOpenFriendsScreen: () -> Unit = {},
     onOpenDeveloperScreen: () -> Unit = {},
@@ -222,6 +225,13 @@ fun SettingsScreen(
             pendingCropAvatarUri = null
             croppedAvatarBitmap = null
             clearProfileAvatar = true
+        }
+    }
+
+    LaunchedEffect(state.cloudSync.profileStatusMessage) {
+        if (state.cloudSync.profileStatusMessage == "avatar_pending_review") {
+            croppedAvatarBitmap = null
+            clearProfileAvatar = false
         }
     }
 
@@ -542,10 +552,11 @@ fun SettingsScreen(
                                             )
                                         }
                                         val handle = state.cloudSync.username?.takeIf { it.isNotBlank() }
-                                        if (handle != null || state.cloudSync.isVerifiedDeveloper) {
-                                            FlowRow(
-                                                verticalArrangement = Arrangement.spacedBy(2.dp),
+                                        if (handle != null || state.cloudSync.isVerifiedDeveloper || state.cloudSync.isVerifiedModerator) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
                                                 horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                                modifier = Modifier.fillMaxWidth(),
                                             ) {
                                                 handle?.let { h ->
                                                     Text(
@@ -559,12 +570,18 @@ fun SettingsScreen(
                                                         color = accent,
                                                         maxLines = 1,
                                                         overflow = TextOverflow.Ellipsis,
+                                                        modifier = Modifier.weight(1f, fill = false),
                                                     )
                                                 }
                                                 if (state.cloudSync.isVerifiedDeveloper) {
                                                     DeveloperVerifiedPill(
                                                         label = strings.social.developerBadge,
                                                         accent = accent,
+                                                    )
+                                                }
+                                                if (state.cloudSync.isVerifiedModerator) {
+                                                    ModeratorVerifiedPill(
+                                                        label = strings.v35.moderatorBadge,
                                                     )
                                                 }
                                             }
@@ -823,6 +840,94 @@ fun SettingsScreen(
                                         } else {
                                             Avatar18PlusWarningBanner()
 
+                                            val ownAvatarReq = state.cloudSync.ownAvatarRequest
+                                            val ownReqStatus = ownAvatarReq?.parsedStatus()
+                                            if (ownAvatarReq != null && ownReqStatus == AvatarModerationStatus.PENDING) {
+                                                Row(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .clip(RoundedCornerShape(16.dp))
+                                                        .background(LiquidCyan.copy(alpha = 0.12f))
+                                                        .border(1.dp, LiquidCyan.copy(alpha = 0.45f), RoundedCornerShape(16.dp))
+                                                        .padding(12.dp)
+                                                        .testTag("settings_avatar_pending_banner"),
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                                ) {
+                                                    AccountAvatarImage(
+                                                        avatarUrlOrData = ownAvatarReq.proposedPhotoUrl,
+                                                        contentDescription = strings.v35.avatarPendingUserTitle,
+                                                        isGuest = false,
+                                                        size = 44.dp,
+                                                        accent = LiquidCyan,
+                                                    )
+                                                    Column(
+                                                        modifier = Modifier.weight(1f),
+                                                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                                                    ) {
+                                                        Text(
+                                                            text = strings.v35.avatarPendingUserTitle,
+                                                            style = MaterialTheme.typography.labelLarge,
+                                                            fontWeight = FontWeight.Bold,
+                                                            color = LiquidCyan,
+                                                        )
+                                                        Text(
+                                                            text = strings.v35.avatarPendingUserBody,
+                                                            style = MaterialTheme.typography.bodySmall,
+                                                            color = MaterialTheme.colorScheme.onSurface,
+                                                        )
+                                                        TextButton(
+                                                            onClick = {
+                                                                haptics.tick()
+                                                                onCancelOwnAvatarRequest()
+                                                            },
+                                                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
+                                                            modifier = Modifier.testTag("settings_cancel_avatar_request_button"),
+                                                        ) {
+                                                            Text(
+                                                                text = strings.v35.avatarPendingCancelButton,
+                                                                color = LiquidRose,
+                                                                style = MaterialTheme.typography.labelMedium,
+                                                                fontWeight = FontWeight.SemiBold,
+                                                            )
+                                                        }
+                                                    }
+                                                }
+                                            } else if (ownAvatarReq != null && ownReqStatus == AvatarModerationStatus.REJECTED) {
+                                                Row(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .clip(RoundedCornerShape(16.dp))
+                                                        .background(LiquidRose.copy(alpha = 0.12f))
+                                                        .border(1.dp, LiquidRose.copy(alpha = 0.42f), RoundedCornerShape(16.dp))
+                                                        .padding(12.dp)
+                                                        .testTag("settings_avatar_rejected_banner"),
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Rounded.Block,
+                                                        contentDescription = null,
+                                                        tint = LiquidRose,
+                                                        modifier = Modifier.size(20.dp),
+                                                    )
+                                                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                                        Text(
+                                                            text = strings.v35.avatarRejectedUserTitle,
+                                                            style = MaterialTheme.typography.labelLarge,
+                                                            fontWeight = FontWeight.Bold,
+                                                            color = LiquidRose,
+                                                        )
+                                                        Text(
+                                                            text = ownAvatarReq.rejectReason?.takeIf { it.isNotBlank() }
+                                                                ?: strings.v35.avatarRejectedUserFallback,
+                                                            style = MaterialTheme.typography.bodySmall,
+                                                            color = MaterialTheme.colorScheme.onSurface,
+                                                        )
+                                                    }
+                                                }
+                                            }
+
                                             FlowRow(
                                                 modifier = Modifier.fillMaxWidth(),
                                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -914,6 +1019,7 @@ fun SettingsScreen(
                                         state.cloudSync.profileStatusMessage?.let { status ->
                                             val resolvedStatusText = when (status) {
                                                 "✓" -> strings.settingsProfileSavedSuccess
+                                                "avatar_pending_review" -> strings.v35.avatarSubmittedForReviewNotice
                                                 "moderating" -> strings.settingsProfileModeratingLabel
                                                 "blocked_18plus" -> strings.settingsProfileAvatarBlockedNotice
                                                 com.example.data.remote.AvatarModerationService.ERR_APPCHECK ->
@@ -928,6 +1034,7 @@ fun SettingsScreen(
                                             }
                                             val statusColor = when (status) {
                                                 "✓" -> LiquidMint
+                                                "avatar_pending_review" -> LiquidCyan
                                                 "moderating" -> accent
                                                 else -> LiquidRose
                                             }
@@ -1975,16 +2082,14 @@ fun SettingsScreen(
                                         modifier = Modifier.size(22.dp),
                                     )
                                 }
-                                Column(
+                                Text(
+                                    text = strings.settingsDeveloperSection,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 2,
                                     modifier = Modifier.weight(1f),
-                                ) {
-                                    Text(
-                                        text = strings.settingsDeveloperSection,
-                                        style = MaterialTheme.typography.titleMedium,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.onSurface,
-                                    )
-                                }
+                                )
                                 Icon(
                                     imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
                                     contentDescription = strings.settingsDeveloperSection,

@@ -233,21 +233,34 @@ class AudiusRepository(
     suspend fun fetchTrendingTracks(
         limit: Int = 36,
         seedArtists: List<String> = emptyList(),
+        appLanguage: String = "ru",
     ): Result<List<TrackEntity>> = withContext(Dispatchers.IO) {
         runCatching {
             runCatching { dao.deleteUnreferencedPreviewTracks() }
+            val normalizedLang = appLanguage.trim().lowercase()
+            val ytSeedQueries = when (normalizedLang) {
+                "ru" -> listOf("miyagi", "три дня дождя")
+                "it" -> listOf("lazza", "annalisa")
+                else -> listOf("the weeknd", "billie eilish")
+            }
+            val scSeedQueries = when (normalizedLang) {
+                "ru" -> listOf("macan", "miyagi")
+                "it" -> listOf("geolier", "mahmood")
+                else -> listOf("sabrina carpenter", "bruno mars")
+            }
             coroutineScope {
                 val spotifyTrendingDeferred = async {
-                    withTimeoutOrNull(7000L) {
+                    withTimeoutOrNull(5200L) {
                         SpotifyCatalogClient.fetchSpotifyTrendingTracks(
                             seedArtists = seedArtists,
-                            limit = 18,
+                            limit = 20,
+                            appLanguage = normalizedLang,
                         )
                     }.orEmpty()
                 }
 
                 val audiusWeekDeferred = async {
-                    withTimeoutOrNull(6500L) {
+                    withTimeoutOrNull(4500L) {
                         runCatching {
                             val body = executeGet("/tracks/trending?app_name=$appName&time=week&limit=$limit")
                             json.decodeFromString<AudiusTrackListResponse>(body).data
@@ -258,10 +271,10 @@ class AudiusRepository(
                 }
 
                 val audiusHipHopDeferred = async {
-                    withTimeoutOrNull(6500L) {
+                    withTimeoutOrNull(4500L) {
                         runCatching {
                             val genreEncoded = URLEncoder.encode("Hip-Hop/Rap", "UTF-8")
-                            val body = executeGet("/tracks/trending?app_name=$appName&genre=$genreEncoded&time=month&limit=16")
+                            val body = executeGet("/tracks/trending?app_name=$appName&genre=$genreEncoded&time=month&limit=14")
                             json.decodeFromString<AudiusTrackListResponse>(body).data
                                 .filter { it.id.isNotBlank() && it.title.isNotBlank() && it.duration >= 45 }
                                 .map { dtoToEntity(it, forceLiked = false) }
@@ -270,10 +283,10 @@ class AudiusRepository(
                 }
 
                 val audiusElectronicDeferred = async {
-                    withTimeoutOrNull(6500L) {
+                    withTimeoutOrNull(4500L) {
                         runCatching {
                             val genreEncoded = URLEncoder.encode("Electronic", "UTF-8")
-                            val body = executeGet("/tracks/trending?app_name=$appName&genre=$genreEncoded&time=month&limit=16")
+                            val body = executeGet("/tracks/trending?app_name=$appName&genre=$genreEncoded&time=month&limit=14")
                             json.decodeFromString<AudiusTrackListResponse>(body).data
                                 .filter { it.id.isNotBlank() && it.title.isNotBlank() && it.duration >= 45 }
                                 .map { dtoToEntity(it, forceLiked = false) }
@@ -281,16 +294,16 @@ class AudiusRepository(
                     }.orEmpty()
                 }
 
-                val ytPopularDeferred = listOf("the weeknd", "miyagi").map { q ->
+                val ytPopularDeferred = ytSeedQueries.map { q ->
                     async {
-                        withTimeoutOrNull(6500L) {
+                        withTimeoutOrNull(4500L) {
                             FullStreamResolver.searchYouTubeMusic(query = q, limit = 4)
                         }.orEmpty()
                     }
                 }
-                val scPopularDeferred = listOf("madk1d", "miyagi").map { q ->
+                val scPopularDeferred = scSeedQueries.map { q ->
                     async {
-                        withTimeoutOrNull(6000L) {
+                        withTimeoutOrNull(4200L) {
                             FullStreamResolver.searchSoundCloud(query = q, limit = 4)
                         }.orEmpty()
                     }
@@ -308,7 +321,7 @@ class AudiusRepository(
                 }
 
                 val rawEntities = combined.values.toList()
-                val entities = enrichTracksArtwork(rawEntities, maxNetworkLookups = 10)
+                val entities = enrichTracksArtwork(rawEntities, maxNetworkLookups = 8)
                 upsertPreservingLocalState(entities)
                 entities
             }
@@ -727,9 +740,10 @@ class AudiusRepository(
             normalizeStrictToken(expanded.ifBlank { cleanName }),
         ).joinToString("|")
         val now = System.currentTimeMillis()
+        val artistCacheTtlMs = 20L * 60_000L
         if (cacheKey.isNotBlank()) {
             artistCatalogCache[cacheKey]?.let { (ts, cached) ->
-                if (now - ts < searchCacheTtlMs && (cached.tracks.isNotEmpty() || cached.albums.isNotEmpty())) {
+                if (now - ts < artistCacheTtlMs && (cached.tracks.isNotEmpty() || cached.albums.isNotEmpty())) {
                     onPartialResult(cached)
                     return@withContext cached
                 }
@@ -853,7 +867,7 @@ class AudiusRepository(
             }
 
             val spotifyJob = launch {
-                val res = withTimeoutOrNull(7000L) {
+                val res = withTimeoutOrNull(4200L) {
                     SpotifyCatalogClient.fetchArtistCatalog(
                         artistQuery = expanded,
                         preferredDisplayName = cleanName,
@@ -879,10 +893,10 @@ class AudiusRepository(
             }
 
             val scCatalogJob = launch {
-                val res = withTimeoutOrNull(7000L) {
+                val res = withTimeoutOrNull(4000L) {
                     FullStreamResolver.fetchSoundCloudArtistCatalog(
                         artistName = expanded,
-                        limit = 25,
+                        limit = 22,
                         knownUserUrl = scSeedUrl,
                     )
                 }
@@ -906,13 +920,13 @@ class AudiusRepository(
 
             val scSearchJob = launch {
                 val baseDeferred = async {
-                    withTimeoutOrNull(4500L) {
-                        FullStreamResolver.searchSoundCloud(query = expanded, limit = 16)
+                    withTimeoutOrNull(2500L) {
+                        FullStreamResolver.searchSoundCloud(query = expanded, limit = 14)
                     }.orEmpty()
                 }
                 val collabDeferred = async {
-                    withTimeoutOrNull(4500L) {
-                        FullStreamResolver.searchSoundCloud(query = "$expanded feat", limit = 10)
+                    withTimeoutOrNull(2200L) {
+                        FullStreamResolver.searchSoundCloud(query = "$expanded feat", limit = 8)
                     }.orEmpty()
                 }
                 val res = (baseDeferred.await() + collabDeferred.await()).distinctBy { it.id }
@@ -929,7 +943,7 @@ class AudiusRepository(
             }
 
             val audiusJob = launch {
-                val res = withTimeoutOrNull(4000L) {
+                val res = withTimeoutOrNull(2200L) {
                     runCatching {
                         val encoded = URLEncoder.encode(expanded, "UTF-8")
                         val usersBody = executeGet(
@@ -949,7 +963,7 @@ class AudiusRepository(
                                 val tracksDef = async {
                                     runCatching {
                                         val tBody = executeGet(
-                                            "/users/${matchedUser.id}/tracks?app_name=$appName&limit=20",
+                                            "/users/${matchedUser.id}/tracks?app_name=$appName&limit=18",
                                             httpClient = searchClient,
                                         )
                                         json.decodeFromString<AudiusTrackListResponse>(tBody).data
@@ -960,7 +974,7 @@ class AudiusRepository(
                                 val albumsDef = async {
                                     runCatching {
                                         val plBody = executeGet(
-                                            "/users/${matchedUser.id}/playlists?app_name=$appName&limit=10",
+                                            "/users/${matchedUser.id}/playlists?app_name=$appName&limit=8",
                                             httpClient = searchClient,
                                         )
                                         json.decodeFromString<AudiusPlaylistListResponse>(plBody).data
@@ -1008,9 +1022,9 @@ class AudiusRepository(
             spotifyJob.join()
             scCatalogJob.join()
 
-            // Cross-link: if SoundCloud web-profile includes a Spotify artist URL and Spotify search missed it, load Spotify now!
+            // Cross-link: if SoundCloud web-profile includes a Spotify artist URL and Spotify search missed it, load Spotify now
             if (spTracks.isEmpty() && !scProfile?.linkedSpotifyArtistId.isNullOrBlank() && knownSpotifyArtistId == null) {
-                val linked = withTimeoutOrNull(5500L) {
+                val linked = withTimeoutOrNull(3200L) {
                     SpotifyCatalogClient.fetchArtistCatalog(
                         artistQuery = expanded,
                         preferredDisplayName = scProfile?.name ?: cleanName,
@@ -1031,8 +1045,16 @@ class AudiusRepository(
                 }
             }
 
-            scSearchJob.join()
-            audiusJob.join()
+            // If primary sources already gave a rich discography (tracks + albums), don't block on slow secondary jobs
+            val primaryRich = (spTracks.size + scChannelTracks.size) >= 10 &&
+                (spAlbums.isNotEmpty() || scChannelAlbums.isNotEmpty())
+            if (primaryRich) {
+                scSearchJob.cancel()
+                audiusJob.cancel()
+            } else {
+                scSearchJob.join()
+                audiusJob.join()
+            }
 
             val targetNames = listOfNotNull(
                 cleanName,
@@ -1042,17 +1064,10 @@ class AudiusRepository(
             ).map { it.trim() }.filter { it.isNotBlank() }.distinct()
 
             val strictScSearchTracks = scSearchTracks.filter { isTrackByArtist(it, targetNames) }
-            val hasCollabTracks = (spTracks + scChannelTracks + strictScSearchTracks).any { t ->
-                t.artist.contains(",") ||
-                    t.artist.contains("&") ||
-                    t.title.contains("feat", ignoreCase = true) ||
-                    t.title.contains("ft.", ignoreCase = true)
-            }
             val preCount = spTracks.size + scChannelTracks.size + strictScSearchTracks.size + audiusTracks.size
-            val strictYtFallbackTracks = if (preCount < 4 || !hasCollabTracks) {
-                withTimeoutOrNull(4500L) {
-                    val query = if (preCount < 4) expanded else "$expanded feat"
-                    FullStreamResolver.searchYouTubeMusic(query = query, limit = 12)
+            val strictYtFallbackTracks = if (preCount < 4) {
+                withTimeoutOrNull(2800L) {
+                    FullStreamResolver.searchYouTubeMusic(query = expanded, limit = 10)
                         .filter { isTrackByArtist(it, targetNames) }
                 }.orEmpty()
             } else {
@@ -1063,7 +1078,7 @@ class AudiusRepository(
             val rawCatalog = buildMutex.withLock {
                 buildMergedSnapshot(localTracks, strictYtFallbackTracks)
             }
-            val enrichedTracks = enrichTracksArtwork(rawCatalog.tracks, maxNetworkLookups = 10)
+            val enrichedTracks = enrichTracksArtwork(rawCatalog.tracks, maxNetworkLookups = 4)
             val finalCatalog = rawCatalog.copy(tracks = enrichedTracks)
             if (cacheKey.isNotBlank() && (finalCatalog.tracks.isNotEmpty() || finalCatalog.albums.isNotEmpty())) {
                 artistCatalogCache[cacheKey] = System.currentTimeMillis() to finalCatalog

@@ -602,54 +602,55 @@ class SoundLapaPlaybackService : MediaSessionService() {
     private fun prefetchUpcomingForActiveDeck(player: Player) {
         val dao = sharedDao ?: return
         val count = player.mediaItemCount
-        if (count <= 0) return
+        if (count <= 1) return
 
-        fun triggerPrefetchAt(index: Int, markPrimary: Boolean) {
-            if (index !in 0 until count) return
-            val item = player.getMediaItemAt(index)
-            val id = item.mediaId
-            if (markPrimary && id.isNotBlank() && id == lastPrefetchedTrackId) return
-            if (markPrimary) lastPrefetchedTrackId = id
-
-            val rawUri = (item.localConfiguration?.uri ?: item.requestMetadata.mediaUri)?.toString().orEmpty()
-            if (rawUri.isBlank() || rawUri.startsWith("content://") || rawUri.startsWith("file://")) return
-            if (FullStreamResolver.peekCachedOrDirectStreamSync(rawUri) != null) return
-
-            val title = item.mediaMetadata.title?.toString()
-            val artist = item.mediaMetadata.artist?.toString()
-            val sourceUri = item.mediaMetadata.extras?.getString("source_uri")
-            val durationMs = item.mediaMetadata.extras?.getLong("duration_ms", 0L) ?: 0L
-
-            serviceScope.launch(Dispatchers.IO) {
-                activeNetworkResolutions.incrementAndGet()
-                serviceScope.launch(Dispatchers.Main.immediate) { refreshWakeLocks() }
-                try {
-                    FullStreamResolver.resolveAudioStreamForUri(
-                        rawUri = rawUri,
-                        fallbackTitle = title,
-                        fallbackArtist = artist,
-                        trackId = id.takeIf { it.isNotBlank() },
-                        originalSourceUri = sourceUri,
-                        dao = dao,
-                        expectedDurationMs = durationMs,
-                    )
-                } finally {
-                    activeNetworkResolutions.decrementAndGet()
-                    serviceScope.launch(Dispatchers.Main.immediate) { refreshWakeLocks() }
-                }
-            }
-        }
-
+        val curIdx = player.currentMediaItemIndex
         val nextIdx = player.nextMediaItemIndex
-        if (nextIdx != C.INDEX_UNSET) {
-            triggerPrefetchAt(nextIdx, markPrimary = true)
-            if (nextIdx + 1 in 0 until count) {
-                triggerPrefetchAt(nextIdx + 1, markPrimary = false)
+        val baseNextIdx = if (nextIdx != C.INDEX_UNSET) nextIdx else (curIdx + 1).takeIf { it in 0 until count } ?: return
+        val primaryId = player.getMediaItemAt(baseNextIdx).mediaId
+        if (primaryId.isNotBlank() && primaryId == lastPrefetchedTrackId) return
+        lastPrefetchedTrackId = primaryId
+
+        val repeatAll = player.repeatMode == Player.REPEAT_MODE_ALL
+        val upcomingTracks = buildList {
+            for (offset in 0 until 3) {
+                val rawIdx = baseNextIdx + offset
+                val resolvedIdx = when {
+                    rawIdx < count -> rawIdx
+                    repeatAll -> rawIdx % count
+                    else -> -1
+                }
+                if (resolvedIdx !in 0 until count || resolvedIdx == curIdx) continue
+                val item = player.getMediaItemAt(resolvedIdx)
+                val rawUri = (item.localConfiguration?.uri ?: item.requestMetadata.mediaUri)?.toString().orEmpty()
+                if (rawUri.isBlank() || rawUri.startsWith("content://") || rawUri.startsWith("file://")) continue
+                val id = item.mediaId.ifBlank { "media_$resolvedIdx" }
+                val title = item.mediaMetadata.title?.toString().orEmpty()
+                val artist = item.mediaMetadata.artist?.toString().orEmpty()
+                val sourceUri = item.mediaMetadata.extras?.getString("source_uri") ?: rawUri
+                val durationMs = item.mediaMetadata.extras?.getLong("duration_ms", 0L) ?: 0L
+                add(
+                    com.example.data.local.TrackEntity(
+                        id = id,
+                        title = title,
+                        artist = artist,
+                        genre = "",
+                        durationMs = durationMs,
+                        sourceUri = sourceUri,
+                        waveformJson = "",
+                        cachedFilePath = null,
+                        coverArtPath = null,
+                        accentColorHex = 0xFF8B5CF6L,
+                        secondaryColorHex = 0xFF5CE1E6L,
+                        isUserUpload = false,
+                        isCachedOffline = false,
+                        fileSizeBytes = 0L,
+                    ),
+                )
             }
         }
-        val prevIdx = player.previousMediaItemIndex
-        if (prevIdx != C.INDEX_UNSET) {
-            triggerPrefetchAt(prevIdx, markPrimary = false)
+        if (upcomingTracks.isNotEmpty()) {
+            AudioPrefetchCache.prefetchUpcomingTracks(applicationContext, upcomingTracks, dao)
         }
     }
 
@@ -1350,7 +1351,7 @@ private class ResolvingCompositeMediaSource(
     }
 
     private fun buildChildMediaSource(resolved: ResolvedAudioStream): MediaSource {
-        val dataSourceFactory = if (resolved.headers.isNotEmpty()) {
+        val rawDataSourceFactory = if (resolved.headers.isNotEmpty()) {
             val httpFactory = DefaultHttpDataSource.Factory()
                 .setAllowCrossProtocolRedirects(true)
                 .setConnectTimeoutMs(15_000)
@@ -1361,18 +1362,35 @@ private class ResolvingCompositeMediaSource(
             sharedDataSourceFactory
         }
 
-        val childItem = initialMediaItem.buildUpon()
-            .setUri(Uri.parse(resolved.directUrl))
-            .build()
-
+        val isRemoteHttp = resolved.directUrl.startsWith("http://", ignoreCase = true) ||
+            resolved.directUrl.startsWith("https://", ignoreCase = true)
         val isHls = resolved.isHls || resolved.directUrl.contains(".m3u8", ignoreCase = true)
+        val stableCacheKey = if (!isHls && isRemoteHttp) {
+            AudioPrefetchCache.cacheKeyForTrack(initialMediaItem.mediaId)
+        } else {
+            null
+        }
+
+        val childItemBuilder = initialMediaItem.buildUpon()
+            .setUri(Uri.parse(resolved.directUrl))
+        if (stableCacheKey != null) {
+            childItemBuilder.setCustomCacheKey(stableCacheKey)
+        }
+        val childItem = childItemBuilder.build()
+
+        val effectiveDataSourceFactory = if (stableCacheKey != null) {
+            AudioPrefetchCache.wrapDataSourceFactory(context, rawDataSourceFactory)
+        } else {
+            rawDataSourceFactory
+        }
+
         return if (isHls) {
-            HlsMediaSource.Factory(dataSourceFactory).apply {
+            HlsMediaSource.Factory(rawDataSourceFactory).apply {
                 drmProvider?.let { setDrmSessionManagerProvider(it) }
                 loadErrorPolicy?.let { setLoadErrorHandlingPolicy(it) }
             }.createMediaSource(childItem)
         } else {
-            ProgressiveMediaSource.Factory(dataSourceFactory, extractorsFactory).apply {
+            ProgressiveMediaSource.Factory(effectiveDataSourceFactory, extractorsFactory).apply {
                 drmProvider?.let { setDrmSessionManagerProvider(it) }
                 loadErrorPolicy?.let { setLoadErrorHandlingPolicy(it) }
             }.createMediaSource(childItem)

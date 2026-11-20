@@ -714,5 +714,289 @@ test("Banned user is blocked from all cloud reads/writes while non-developer can
   }
 });
 
+test("Avatar moderation requests enforce owner pending creation, cross-user isolation, and no self-approval", async () => {
+  const unauthDb = testEnv.unauthenticatedContext().firestore();
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID, {
+    email: "alice@example.com",
+    email_verified: true,
+  }).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID, {
+    email: "bob@example.com",
+    email_verified: true,
+  }).firestore();
+
+  const validRequest = {
+    userId: ALICE_UID,
+    accountUid: "SL-1234-ABCD",
+    displayName: "Alice",
+    username: "alice_dev",
+    currentPhotoUrl: "https://example.com/old.jpg",
+    proposedPhotoUrl: "data:image/jpeg;base64,AAAA",
+    status: "pending",
+    createdAtMs: 1700000010000,
+    createdAt: ts(),
+    updatedAt: ts(),
+  };
+
+  // Unauthenticated cannot read or write avatar_requests
+  await assertFails(unauthDb.collection("avatar_requests").doc(ALICE_UID).get());
+  await assertFails(unauthDb.collection("avatar_requests").doc(ALICE_UID).set(validRequest));
+
+  // Owner cannot create an already-approved request
+  await assertFails(
+    aliceDb.collection("avatar_requests").doc(ALICE_UID).set({
+      ...validRequest,
+      status: "approved",
+    })
+  );
+
+  // Owner can create a pending avatar request
+  await assertSucceeds(aliceDb.collection("avatar_requests").doc(ALICE_UID).set(validRequest));
+
+  // Owner can read their own request
+  await assertSucceeds(aliceDb.collection("avatar_requests").doc(ALICE_UID).get());
+
+  // Owner cannot self-approve their pending request
+  await assertFails(
+    aliceDb.collection("avatar_requests").doc(ALICE_UID).update({
+      status: "approved",
+      reviewedByUid: ALICE_UID,
+      reviewedByName: "Alice",
+      reviewedAtMs: 1700000015000,
+      updatedAt: ts(),
+    })
+  );
+
+  // Cross-user isolation: Bob cannot read, list, update, or delete Alice's avatar request
+  await assertFails(bobDb.collection("avatar_requests").doc(ALICE_UID).get());
+  await assertFails(bobDb.collection("avatar_requests").get());
+  await assertFails(
+    bobDb.collection("avatar_requests").doc(ALICE_UID).update({
+      status: "approved",
+      reviewedByUid: BOB_UID,
+      updatedAt: ts(),
+    })
+  );
+  await assertFails(bobDb.collection("avatar_requests").doc(ALICE_UID).delete());
+
+  // Owner can replace their pending avatar request with a newer photo
+  await assertSucceeds(
+    aliceDb.collection("avatar_requests").doc(ALICE_UID).update({
+      proposedPhotoUrl: "data:image/jpeg;base64,BBBB",
+      status: "pending",
+      createdAtMs: 1700000012000,
+      updatedAt: ts(),
+    })
+  );
+
+  // Owner can cancel (delete) their own request
+  await assertSucceeds(aliceDb.collection("avatar_requests").doc(ALICE_UID).delete());
+});
+
+test("Public profiles and usernames block non-moderator users from spoofing isModerator", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID, {
+    email: "alice@example.com",
+    email_verified: true,
+  }).firestore();
+
+  // Regular user cannot spoof isModerator: true on public_profiles
+  await assertFails(
+    aliceDb.collection("public_profiles").doc(ALICE_UID).set({
+      userId: ALICE_UID,
+      displayName: "Alice",
+      username: "alice_user",
+      isDeveloper: false,
+      isModerator: true,
+      isPublic: true,
+      updatedAt: ts(),
+    })
+  );
+
+  // Regular user can write isModerator: false on public_profiles
+  await assertSucceeds(
+    aliceDb.collection("public_profiles").doc(ALICE_UID).set({
+      userId: ALICE_UID,
+      displayName: "Alice",
+      username: "alice_user",
+      isDeveloper: false,
+      isModerator: false,
+      isPublic: true,
+      updatedAt: ts(),
+    })
+  );
+
+  // Regular user cannot spoof isModerator: true on usernames
+  await assertFails(
+    aliceDb.collection("usernames").doc("alice_user").set({
+      username: "alice_user",
+      userId: ALICE_UID,
+      displayName: "Alice",
+      isDeveloper: false,
+      isModerator: true,
+      isPublic: true,
+      updatedAt: ts(),
+    })
+  );
+
+  // Regular user can claim username with isModerator: false
+  await assertSucceeds(
+    aliceDb.collection("usernames").doc("alice_user").set({
+      username: "alice_user",
+      userId: ALICE_UID,
+      displayName: "Alice",
+      isDeveloper: false,
+      isModerator: false,
+      isPublic: true,
+      updatedAt: ts(),
+    })
+  );
+});
+
+test("Bug reports enforce initial open status and restrict status triage updates to verified developer", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID, {
+    email: "alice@example.com",
+    email_verified: true,
+  }).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID, {
+    email: "bob@example.com",
+    email_verified: true,
+  }).firestore();
+
+  const baseReport = {
+    reportId: "rep_status_1",
+    userId: ALICE_UID,
+    reporterName: "Alice",
+    message: "Queue reorder button lags on long list",
+    appVersion: "1.4.0",
+    status: "open",
+    createdAtMs: 1700000020000,
+    createdAt: ts(),
+  };
+
+  // User cannot create a report pre-marked as resolved
+  await assertFails(
+    aliceDb.collection("bug_reports").doc("rep_bad").set({
+      ...baseReport,
+      reportId: "rep_bad",
+      status: "resolved",
+    })
+  );
+
+  // User can create an open bug report
+  await assertSucceeds(aliceDb.collection("bug_reports").doc("rep_status_1").set(baseReport));
+
+  // Neither owner nor another regular user can update report status
+  await assertFails(
+    aliceDb.collection("bug_reports").doc("rep_status_1").update({
+      status: "resolved",
+      updatedAt: ts(),
+    })
+  );
+  await assertFails(
+    bobDb.collection("bug_reports").doc("rep_status_1").update({
+      status: "in_progress",
+      updatedAt: ts(),
+    })
+  );
+
+  if (DEV_TEST_EMAIL) {
+    const devDb = testEnv.authenticatedContext("dev_uid_1", {
+      email: DEV_TEST_EMAIL,
+      email_verified: true,
+    }).firestore();
+
+    // Verified developer can triage status
+    await assertSucceeds(
+      devDb.collection("bug_reports").doc("rep_status_1").update({
+        status: "in_progress",
+        updatedAt: ts(),
+      })
+    );
+    await assertSucceeds(
+      devDb.collection("bug_reports").doc("rep_status_1").update({
+        status: "resolved",
+        updatedAt: ts(),
+      })
+    );
+    // Verified developer cannot tamper with reporter message
+    await assertFails(
+      devDb.collection("bug_reports").doc("rep_status_1").update({
+        status: "open",
+        message: "Tampered",
+        updatedAt: ts(),
+      })
+    );
+
+    // Seed Alice's profile, public_profile, username, and avatar request for reviewer approval test
+    await assertSucceeds(aliceDb.collection("users").doc(ALICE_UID).set(validProfile(ALICE_UID)));
+    await assertSucceeds(
+      aliceDb.collection("public_profiles").doc(ALICE_UID).set({
+        userId: ALICE_UID,
+        displayName: "Alice",
+        username: "alice_review",
+        isDeveloper: false,
+        isModerator: false,
+        isPublic: true,
+        updatedAt: ts(),
+      })
+    );
+    await assertSucceeds(
+      aliceDb.collection("usernames").doc("alice_review").set({
+        username: "alice_review",
+        userId: ALICE_UID,
+        displayName: "Alice",
+        isDeveloper: false,
+        isModerator: false,
+        isPublic: true,
+        updatedAt: ts(),
+      })
+    );
+    await assertSucceeds(
+      aliceDb.collection("avatar_requests").doc(ALICE_UID).set({
+        userId: ALICE_UID,
+        accountUid: "SL-1234-ABCD",
+        displayName: "Alice",
+        username: "alice_review",
+        proposedPhotoUrl: "data:image/jpeg;base64,APPROVED_IMG",
+        status: "pending",
+        createdAtMs: 1700000025000,
+        createdAt: ts(),
+        updatedAt: ts(),
+      })
+    );
+
+    // Reviewer can list requests, apply approved photoUrl, and approve the request
+    await assertSucceeds(devDb.collection("avatar_requests").get());
+    await assertSucceeds(
+      devDb.collection("users").doc(ALICE_UID).update({
+        photoUrl: "data:image/jpeg;base64,APPROVED_IMG",
+        avatarBlocked: false,
+        updatedAt: ts(),
+      })
+    );
+    await assertSucceeds(
+      devDb.collection("public_profiles").doc(ALICE_UID).update({
+        photoUrl: "data:image/jpeg;base64,APPROVED_IMG",
+        updatedAt: ts(),
+      })
+    );
+    await assertSucceeds(
+      devDb.collection("usernames").doc("alice_review").update({
+        photoUrl: "data:image/jpeg;base64,APPROVED_IMG",
+        updatedAt: ts(),
+      })
+    );
+    await assertSucceeds(
+      devDb.collection("avatar_requests").doc(ALICE_UID).update({
+        status: "approved",
+        reviewedByUid: "dev_uid_1",
+        reviewedByName: "Developer",
+        reviewedAtMs: 1700000026000,
+        updatedAt: ts(),
+      })
+    );
+  }
+});
+
 
 

@@ -787,14 +787,33 @@ object SpotifyCatalogClient {
         trackArtworkCache.putIfAbsent("*|$titleKey", url)
     }
 
-    private val defaultTrendingArtists = listOf(
-        "The Weeknd",
-        "Billie Eilish",
-        "Eminem",
-        "Miyagi",
-        "Travis Scott",
-        "Drake",
-    )
+    internal fun defaultTrendingArtistsForLanguage(appLanguage: String): List<String> =
+        when (appLanguage.trim().lowercase()) {
+            "ru" -> listOf(
+                "Miyagi & Эндшпиль",
+                "MACAN",
+                "ANNA ASTI",
+                "Три дня дождя",
+                "Егор Крид",
+                "FRIENDLY THUG 52 NGG",
+            )
+            "it" -> listOf(
+                "Lazza",
+                "Annalisa",
+                "Geolier",
+                "Mahmood",
+                "Rose Villain",
+                "Sfera Ebbasta",
+            )
+            else -> listOf(
+                "The Weeknd",
+                "Billie Eilish",
+                "Sabrina Carpenter",
+                "Bruno Mars",
+                "Lady Gaga",
+                "Tate McRae",
+            )
+        }
 
     @Volatile
     private var lastMusicBrainzCallMs: Long = 0L
@@ -803,17 +822,19 @@ object SpotifyCatalogClient {
     fun fetchSpotifyTrendingTracks(
         seedArtists: List<String> = emptyList(),
         limit: Int = 18,
+        appLanguage: String = "ru",
     ): List<TrackEntity> {
         val cleanSeeds = seedArtists
             .map { it.trim() }
             .filter { it.length >= 2 }
             .distinctBy { normalizeToken(it) }
             .take(3)
-        val queryArtists = (cleanSeeds + defaultTrendingArtists)
+        val languageDefaults = defaultTrendingArtistsForLanguage(appLanguage)
+        val queryArtists = (cleanSeeds + languageDefaults)
             .distinctBy { normalizeToken(it) }
             .take(6)
 
-        val cacheKey = queryArtists.joinToString("|") { normalizeToken(it) }
+        val cacheKey = "${appLanguage.lowercase()}|" + queryArtists.joinToString("|") { normalizeToken(it) }
         val now = System.currentTimeMillis()
         trendingTracksCache[cacheKey]?.let { (ts, cached) ->
             if (now - ts < TRENDING_CACHE_TTL_MS && cached.isNotEmpty()) {
@@ -833,7 +854,7 @@ object SpotifyCatalogClient {
         }
 
         val collected = futures
-            .flatMap { fut -> runCatching { fut.get(6, TimeUnit.SECONDS) }.getOrDefault(emptyList()) }
+            .flatMap { fut -> runCatching { fut.get(4, TimeUnit.SECONDS) }.getOrDefault(emptyList()) }
             .filter { it.title.isNotBlank() && it.playCount >= 10_000 }
             .sortedByDescending { it.playCount }
 
@@ -900,7 +921,7 @@ object SpotifyCatalogClient {
                 queries.map { q ->
                     CompletableFuture.supplyAsync { discoverSpotifyArtistIds(q, limit = 4) }
                 }.flatMap { fut ->
-                    runCatching { fut.get(5, TimeUnit.SECONDS) }.getOrDefault(emptyList())
+                    runCatching { fut.get(3200, TimeUnit.MILLISECONDS) }.getOrDefault(emptyList())
                 }.distinct()
             }
         }
@@ -912,7 +933,7 @@ object SpotifyCatalogClient {
         } else {
             val infos = resolvedIds.take(3).map { id ->
                 CompletableFuture.supplyAsync { fetchArtistInfoQuick(id) }
-            }.mapNotNull { runCatching { it.get(4, TimeUnit.SECONDS) }.getOrNull() }
+            }.mapNotNull { runCatching { it.get(2500, TimeUnit.MILLISECONDS) }.getOrNull() }
             pickBestArtistMatch(infos, artistQuery, preferredDisplayName)?.id ?: resolvedIds.first()
         }
 
@@ -930,8 +951,13 @@ object SpotifyCatalogClient {
             )
         }
 
-        val parsedSsr = runCatching { ssrFuture.get(6, TimeUnit.SECONDS) }.getOrNull()
-        val embedHtml = runCatching { embedFuture.get(5, TimeUnit.SECONDS) }.getOrNull()
+        val parsedSsr = runCatching { ssrFuture.get(4000, TimeUnit.MILLISECONDS) }.getOrNull()
+        val ssrTracks = parsedSsr?.topTracks.orEmpty()
+        val ssrAlbums = parsedSsr?.albums.orEmpty()
+
+        // Fast-path: if SSR already returned rich top tracks with valid durations, don't block long on embed
+        val embedTimeoutMs = if (ssrTracks.count { it.durationMs >= 30_000L } >= 8) 350L else 2600L
+        val embedHtml = runCatching { embedFuture.get(embedTimeoutMs, TimeUnit.MILLISECONDS) }.getOrNull()
 
         val fallbackName = parsedSsr?.info?.name?.ifBlank { preferredDisplayName } ?: preferredDisplayName
         val fallbackCover = parsedSsr?.info?.avatarUrl
@@ -941,17 +967,14 @@ object SpotifyCatalogClient {
             emptyList()
         }
 
-        val ssrTracks = parsedSsr?.topTracks.orEmpty()
-        val ssrAlbums = parsedSsr?.albums.orEmpty()
-
         // Merge embed tracks (accurate durations + 10 hits) with SSR initialState tracks (album names + high-res covers + playcounts)
         val mergedTracks = mergeSpotifyArtistTracks(
             ssrTracks = ssrTracks,
             embedTracks = embedTracks,
         ).toMutableList()
 
-        // Only fetch extra album tracks if fewer than 8 tracks were resolved directly
-        if (mergedTracks.size < 8 && ssrAlbums.isNotEmpty()) {
+        // Only fetch extra album tracks if fewer than 6 tracks were resolved directly
+        if (mergedTracks.size < 6 && ssrAlbums.isNotEmpty()) {
             val seenTitles = mergedTracks.map { normalizeToken(it.title) }.toMutableSet()
             val albumTracks = runCatching {
                 CompletableFuture.supplyAsync {
@@ -961,7 +984,7 @@ object SpotifyCatalogClient {
                         albumTitle = ssrAlbums.first().title,
                         coverUrl = ssrAlbums.first().artworkUrl,
                     )
-                }.get(4, TimeUnit.SECONDS)
+                }.get(2800, TimeUnit.MILLISECONDS)
             }.getOrDefault(emptyList())
             albumTracks.forEach { t ->
                 val key = normalizeToken(t.title)

@@ -40,7 +40,7 @@ internal fun playlistItemDocId(playlistId: String, trackId: String): String =
     safeFirestoreDocId("${safeFirestoreDocId(playlistId)}__${safeFirestoreDocId(trackId)}")
 
 internal const val DEFAULT_CLOUD_QUOTA_BYTES: Long = 1_073_741_824L // 1 GiB Firebase Spark Firestore free-tier quota
-private const val MAX_CLOUD_AVATAR_LEN = 24_000
+internal const val MAX_CLOUD_AVATAR_LEN = 24_000
 private const val MAX_CLOUD_URL_LEN = 360
 private const val FIRESTORE_DOC_OVERHEAD_BYTES = 160L
 
@@ -88,7 +88,7 @@ internal fun sanitizeCloudSourceUri(track: TrackEntity): String? {
 }
 
 internal fun sanitizeCloudCoverArt(coverArtPath: String?): String? =
-    compactCloudUrl(coverArtPath, 320)
+    compactCloudUrl(coverArtPath, 960)
 
 internal fun compactCloudTrackDescription(raw: String?): String? {
     val trimmed = raw?.trim().orEmpty()
@@ -310,18 +310,28 @@ data class CloudPublicProfile(
     @get:PropertyName("isDeveloper")
     @set:PropertyName("isDeveloper")
     var isDeveloper: Boolean = false,
+    @get:PropertyName("isModerator")
+    @set:PropertyName("isModerator")
+    var isModerator: Boolean = false,
     @get:PropertyName("isPublic")
     @set:PropertyName("isPublic")
     var isPublic: Boolean = true,
     @ServerTimestamp val updatedAt: Timestamp? = null,
 ) {
-    fun toWriteMap(uid: String, allowDeveloperFlag: Boolean): Map<String, Any> = buildMap {
+    fun toWriteMap(
+        uid: String,
+        allowDeveloperFlag: Boolean,
+        allowModeratorFlag: Boolean = false,
+    ): Map<String, Any> = buildMap {
         put("userId", uid)
         put("displayName", displayName.trim().ifBlank { "SoundLap User" }.take(64))
         username?.let(::normalizeUsernameHandle)?.takeIf(::isValidUsernameHandle)?.let { put("username", it) }
         photoUrl?.trim()?.takeIf { it.isNotEmpty() }?.let { put("photoUrl", it.take(MAX_CLOUD_AVATAR_LEN)) }
         bio?.trim()?.takeIf { it.isNotEmpty() }?.let { put("bio", it.take(180)) }
         put("isDeveloper", allowDeveloperFlag && isDeveloper)
+        if (allowModeratorFlag && isModerator) {
+            put("isModerator", true)
+        }
         put("isPublic", true)
         put("updatedAt", FieldValue.serverTimestamp())
     }
@@ -337,18 +347,28 @@ data class CloudUsernameHandle(
     @get:PropertyName("isDeveloper")
     @set:PropertyName("isDeveloper")
     var isDeveloper: Boolean = false,
+    @get:PropertyName("isModerator")
+    @set:PropertyName("isModerator")
+    var isModerator: Boolean = false,
     @get:PropertyName("isPublic")
     @set:PropertyName("isPublic")
     var isPublic: Boolean = true,
     @ServerTimestamp val updatedAt: Timestamp? = null,
 ) {
-    fun toWriteMap(uid: String, allowDeveloperFlag: Boolean): Map<String, Any> = buildMap {
+    fun toWriteMap(
+        uid: String,
+        allowDeveloperFlag: Boolean,
+        allowModeratorFlag: Boolean = false,
+    ): Map<String, Any> = buildMap {
         val handle = normalizeUsernameHandle(username)
         put("username", handle)
         put("userId", uid)
         put("displayName", displayName.trim().ifBlank { "SoundLap User" }.take(64))
         photoUrl?.trim()?.takeIf { it.isNotEmpty() }?.let { put("photoUrl", it.take(MAX_CLOUD_AVATAR_LEN)) }
         put("isDeveloper", allowDeveloperFlag && isDeveloper)
+        if (allowModeratorFlag && isModerator) {
+            put("isModerator", true)
+        }
         put("isPublic", true)
         put("updatedAt", FieldValue.serverTimestamp())
     }
@@ -365,6 +385,9 @@ data class CloudFriend(
     @get:PropertyName("isDeveloper")
     @set:PropertyName("isDeveloper")
     var isDeveloper: Boolean = false,
+    @get:PropertyName("isModerator")
+    @set:PropertyName("isModerator")
+    var isModerator: Boolean = false,
     val addedAtMs: Long = 0L,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null,
@@ -376,6 +399,7 @@ data class CloudFriend(
         put("displayName", displayName.trim().ifBlank { "SoundLap User" }.take(64))
         photoUrl?.trim()?.takeIf { it.isNotEmpty() }?.let { put("photoUrl", it.take(MAX_CLOUD_AVATAR_LEN)) }
         put("isDeveloper", isDeveloper)
+        if (isModerator) put("isModerator", true)
         put("addedAtMs", addedAtMs.coerceAtLeast(0L))
         put("createdAt", FieldValue.serverTimestamp())
         put("updatedAt", FieldValue.serverTimestamp())
@@ -386,6 +410,7 @@ data class CloudFriend(
         put("displayName", displayName.trim().ifBlank { "SoundLap User" }.take(64))
         photoUrl?.trim()?.takeIf { it.isNotEmpty() }?.let { put("photoUrl", it.take(MAX_CLOUD_AVATAR_LEN)) }
         put("isDeveloper", isDeveloper)
+        if (isModerator) put("isModerator", true)
         put("addedAtMs", addedAtMs.coerceAtLeast(0L))
         put("updatedAt", FieldValue.serverTimestamp())
     }
@@ -427,6 +452,17 @@ data class CloudArtistSubscription(
     }
 }
 
+enum class BugReportStatus(val wireValue: String) {
+    OPEN("open"),
+    IN_PROGRESS("in_progress"),
+    RESOLVED("resolved");
+
+    companion object {
+        fun fromWire(raw: String?): BugReportStatus =
+            entries.firstOrNull { it.wireValue.equals(raw?.trim(), ignoreCase = true) } ?: OPEN
+    }
+}
+
 @IgnoreExtraProperties
 data class CloudBugReport(
     @DocumentId val docId: String = "",
@@ -436,18 +472,68 @@ data class CloudBugReport(
     val reporterAvatarUrl: String? = null,
     val message: String = "",
     val appVersion: String = "",
+    val status: String = BugReportStatus.OPEN.wireValue,
     val createdAtMs: Long = 0L,
     @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null,
 ) {
+    fun parsedStatus(): BugReportStatus = BugReportStatus.fromWire(status)
+
     fun toCreateMap(uid: String): Map<String, Any> = buildMap {
         put("reportId", safeFirestoreDocId(reportId.ifBlank { "rep_${System.currentTimeMillis()}" }))
         put("userId", uid)
         put("reporterName", reporterName.trim().ifBlank { "SoundLap User" }.take(64))
         reporterAvatarUrl?.trim()?.takeIf { it.isNotEmpty() }?.let { put("reporterAvatarUrl", it.take(MAX_CLOUD_AVATAR_LEN)) }
         put("message", message.trim().ifBlank { "Bug report" }.take(1000))
-        put("appVersion", appVersion.trim().ifBlank { "3.4.2" }.take(32))
+        put("appVersion", appVersion.trim().ifBlank { "3.4.3" }.take(32))
+        put("status", BugReportStatus.OPEN.wireValue)
         put("createdAtMs", createdAtMs.coerceAtLeast(0L))
         put("createdAt", FieldValue.serverTimestamp())
+    }
+}
+
+enum class AvatarModerationStatus(val wireValue: String) {
+    PENDING("pending"),
+    APPROVED("approved"),
+    REJECTED("rejected");
+
+    companion object {
+        fun fromWire(raw: String?): AvatarModerationStatus =
+            entries.firstOrNull { it.wireValue.equals(raw?.trim(), ignoreCase = true) } ?: PENDING
+    }
+}
+
+@IgnoreExtraProperties
+data class CloudAvatarModerationRequest(
+    @DocumentId val docId: String = "",
+    val userId: String = "",
+    val accountUid: String = "",
+    val displayName: String = "",
+    val username: String? = null,
+    val currentPhotoUrl: String? = null,
+    val proposedPhotoUrl: String = "",
+    val status: String = AvatarModerationStatus.PENDING.wireValue,
+    val rejectReason: String? = null,
+    val reviewedByUid: String? = null,
+    val reviewedByName: String? = null,
+    val createdAtMs: Long = 0L,
+    val reviewedAtMs: Long = 0L,
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null,
+) {
+    fun parsedStatus(): AvatarModerationStatus = AvatarModerationStatus.fromWire(status)
+
+    fun toCreateMap(uid: String): Map<String, Any> = buildMap {
+        put("userId", uid)
+        put("accountUid", accountUid.trim().takeIf { it.length in 3..32 } ?: SoundLapUidFormatter.format(uid))
+        put("displayName", displayName.trim().ifBlank { "SoundLap User" }.take(64))
+        username?.let(::normalizeUsernameHandle)?.takeIf(::isValidUsernameHandle)?.let { put("username", it) }
+        currentPhotoUrl?.trim()?.takeIf { it.isNotEmpty() }?.let { put("currentPhotoUrl", it.take(MAX_CLOUD_AVATAR_LEN)) }
+        put("proposedPhotoUrl", proposedPhotoUrl.trim().take(MAX_CLOUD_AVATAR_LEN))
+        put("status", AvatarModerationStatus.PENDING.wireValue)
+        put("createdAtMs", createdAtMs.coerceAtLeast(0L))
+        put("createdAt", FieldValue.serverTimestamp())
+        put("updatedAt", FieldValue.serverTimestamp())
     }
 }
 
@@ -617,15 +703,29 @@ data class CloudUserPlaylist(
     }
 
     fun toLocalPlaylistEntity(existing: PlaylistEntity?): PlaylistEntity {
-        val localCover = existing?.coverArtPath?.takeIf {
-            !it.startsWith("http", ignoreCase = true)
+        val localCover = existing?.coverArtPath?.takeIf { raw ->
+            val trimmed = raw.trim()
+            when {
+                trimmed.isEmpty() -> false
+                trimmed.startsWith("http://", ignoreCase = true) || trimmed.startsWith("https://", ignoreCase = true) -> false
+                trimmed.startsWith("content://", ignoreCase = true) -> true
+                trimmed.startsWith("file://", ignoreCase = true) -> {
+                    val p = runCatching { Uri.parse(trimmed).path }.getOrNull()
+                    !p.isNullOrBlank() && java.io.File(p).let { it.exists() && it.length() > 0L }
+                }
+                else -> java.io.File(trimmed).let { it.exists() && it.length() > 0L }
+            }
+        }
+        val remoteCover = coverArtPath?.trim()?.takeIf { it.isNotEmpty() }
+        val existingHttpCover = existing?.coverArtPath?.trim()?.takeIf {
+            it.startsWith("http://", ignoreCase = true) || it.startsWith("https://", ignoreCase = true)
         }
         return PlaylistEntity(
             id = playlistId,
             name = name.ifBlank { existing?.name ?: "Playlist" },
             description = description ?: existing?.description ?: "",
             createdAt = if (playlistCreatedAtMs > 0L) playlistCreatedAtMs else (existing?.createdAt ?: System.currentTimeMillis()),
-            coverArtPath = localCover ?: coverArtPath ?: existing?.coverArtPath,
+            coverArtPath = localCover ?: remoteCover ?: existingHttpCover,
             isPinned = isPinned || (existing?.isPinned == true),
             pinnedAtMs = maxOf(pinnedAtMs, existing?.pinnedAtMs ?: 0L),
             sortMode = sortMode.ifBlank { existing?.sortMode ?: "CUSTOM" },
@@ -750,6 +850,7 @@ data class DeveloperUserOverview(
     val isBanned: Boolean = false,
     val banReason: String? = null,
     val bannedAtMs: Long = 0L,
+    val isModerator: Boolean = false,
 )
 
 data class DeveloperUserFullDetails(
@@ -760,6 +861,28 @@ data class DeveloperUserFullDetails(
     val subscriptions: List<CloudArtistSubscription> = emptyList(),
 )
 
+data class CloudStorageUserSlice(
+    val userId: String,
+    val displayName: String,
+    val accountUid: String? = null,
+    val storageBytes: Long = 0L,
+    val tracksCount: Int = 0,
+    val playlistsCount: Int = 0,
+)
+
+data class LocalDeviceCacheStats(
+    val audioPrefetchBytes: Long = 0L,
+    val audioPrefetchTracksCount: Int = 0,
+    val audioPrefetchMaxBytes: Long = 180L * 1024L * 1024L,
+    val imageCacheBytes: Long = 0L,
+    val roomDatabaseBytes: Long = 0L,
+    val offlineAudioBytes: Long = 0L,
+    val offlineTracksCount: Int = 0,
+) {
+    val totalLocalBytes: Long
+        get() = (audioPrefetchBytes + imageCacheBytes + roomDatabaseBytes + offlineAudioBytes).coerceAtLeast(0L)
+}
+
 data class CloudStorageStats(
     val usedBytes: Long = 0L,
     val quotaBytes: Long = DEFAULT_CLOUD_QUOTA_BYTES,
@@ -767,6 +890,11 @@ data class CloudStorageStats(
     val totalTracks: Int = 0,
     val totalPlaylists: Int = 0,
     val totalBugReports: Int = 0,
+    val totalAvatarRequests: Int = 0,
+    val accountsBytes: Long = 0L,
+    val reportsBytes: Long = 0L,
+    val avatarRequestsBytes: Long = 0L,
+    val topUsers: List<CloudStorageUserSlice> = emptyList(),
     val isCloudLive: Boolean = false,
 ) {
     val usageFraction: Float

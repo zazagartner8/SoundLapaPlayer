@@ -75,6 +75,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
@@ -94,6 +95,8 @@ import com.example.ui.formatDuration
 import com.example.ui.i18n.LocalAppStrings
 import com.example.ui.shaders.TrackCoverArtwork
 import com.example.ui.theme.LiquidMint
+import com.example.ui.theme.SoundLapMotion
+import com.example.ui.theme.expressivePressScale
 import kotlinx.coroutines.flow.StateFlow
 import kotlin.math.abs
 
@@ -365,6 +368,7 @@ fun QuickPickGridCard(
         modifier = modifier
             .fillMaxWidth()
             .height(64.dp)
+            .expressivePressScale(pressedScale = 0.965f)
             .testTag("quick_pick_${track.id}"),
         onClick = onClick,
         shape = QuickPickShape,
@@ -426,6 +430,7 @@ fun TrackRowItem(
     Row(
         modifier = modifier
             .fillMaxWidth()
+            .expressivePressScale(pressedScale = 0.98f)
             .clip(TrackRowShape)
             .background(rowBackground, TrackRowShape)
             .clickable(onClick = onPlayClick)
@@ -496,9 +501,15 @@ fun TrackRowItem(
             )
         }
 
+        val likeIconScale by animateFloatAsState(
+            targetValue = if (track.isLiked) 1.12f else 1.0f,
+            animationSpec = SoundLapMotion.spatialBouncy(),
+            label = "rowLikeScale",
+        )
         Box(
             modifier = Modifier
                 .size(48.dp)
+                .expressivePressScale(pressedScale = 0.86f)
                 .clip(CircleShape)
                 .clickable(onClick = onLikeClick)
                 .testTag("track_like_${track.id}"),
@@ -508,13 +519,19 @@ fun TrackRowItem(
                 imageVector = if (track.isLiked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
                 contentDescription = strings.cdLikeTrack,
                 tint = if (track.isLiked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(20.dp),
+                modifier = Modifier
+                    .size(20.dp)
+                    .graphicsLayer {
+                        scaleX = likeIconScale
+                        scaleY = likeIconScale
+                    },
             )
         }
 
         Box(
             modifier = Modifier
                 .size(48.dp)
+                .expressivePressScale(pressedScale = 0.88f)
                 .clip(CircleShape)
                 .clickable(onClick = onMoreClick)
                 .testTag("track_more_${track.id}"),
@@ -690,6 +707,7 @@ fun FloatingMiniPlayer(
                             onClick = onPrevious,
                             modifier = Modifier
                                 .minimumInteractiveComponentSize()
+                                .expressivePressScale(pressedScale = 0.86f)
                                 .testTag("mini_player_previous"),
                         ) {
                             Icon(
@@ -704,6 +722,7 @@ fun FloatingMiniPlayer(
                             onClick = onTogglePlayPause,
                             modifier = Modifier
                                 .minimumInteractiveComponentSize()
+                                .expressivePressScale(pressedScale = 0.84f)
                                 .testTag("mini_player_play_pause"),
                         ) {
                             Icon(
@@ -718,6 +737,7 @@ fun FloatingMiniPlayer(
                             onClick = onNext,
                             modifier = Modifier
                                 .minimumInteractiveComponentSize()
+                                .expressivePressScale(pressedScale = 0.86f)
                                 .testTag("mini_player_next"),
                         ) {
                             Icon(
@@ -881,23 +901,24 @@ private fun NavTabItem(
 ) {
     val accent = MaterialTheme.colorScheme.primary
     val iconScale by animateFloatAsState(
-        targetValue = if (selected) 1.08f else 0.96f,
-        animationSpec = spring(dampingRatio = 0.7f, stiffness = 480f),
+        targetValue = if (selected) 1.09f else 0.96f,
+        animationSpec = SoundLapMotion.spatialBouncy(),
         label = "navIconScale",
     )
     val iconTint by animateColorAsState(
         targetValue = if (selected) accent else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
-        animationSpec = tween(180),
+        animationSpec = SoundLapMotion.effectsFast(),
         label = "navIconTint",
     )
     val labelColor by animateColorAsState(
         targetValue = if (selected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.70f),
-        animationSpec = tween(180),
+        animationSpec = SoundLapMotion.effectsFast(),
         label = "navLabelColor",
     )
 
     Column(
         modifier = modifier
+            .expressivePressScale(pressedScale = 0.92f)
             .clip(RoundedCornerShape(18.dp))
             .clickable(onClick = onClick)
             .padding(vertical = 6.dp)

@@ -138,6 +138,53 @@ object RecommendationEngine {
         )
     }
 
+    /**
+     * Permanently excludes unwanted legacy seed tracks ("goosebumps" and "passionfruit")
+     * from Recommendations, For You, Trending, and Wave feeds regardless of old local cache
+     * or incidental artist overlap. Users can still explicitly find them in Search.
+     */
+    fun isBlockedRecommendationTrack(track: TrackEntity): Boolean {
+        val normTitle = normalizeKey(track.title)
+        return normTitle.contains("goosebumps") ||
+            normTitle.contains("passionfruit") ||
+            normTitle.contains("passion fruit")
+    }
+
+    private fun computePersonalAffinity(
+        track: TrackEntity,
+        profile: TasteProfile,
+    ): Float {
+        if (!profile.hasPersonalSignals) return 0f
+        val normArtist = normalizeKey(track.artist)
+        val normGenre = normalizeKey(track.genre)
+        val trackTokens = tokenize("${track.title} ${track.artist}")
+        val trackArtistTokens = tokenize(track.artist)
+
+        val directArtistWeight = profile.artistWeights[normArtist] ?: 0f
+        val artistTokenOverlap = trackArtistTokens.sumOf { tok ->
+            (profile.tokenWeights[tok] ?: 0f).toDouble()
+        }.toFloat()
+        val genreWeight = profile.genreWeights[normGenre] ?: 0f
+        val tokenMatchScore = trackTokens.sumOf { tok ->
+            (profile.tokenWeights[tok] ?: 0f).toDouble()
+        }.toFloat()
+
+        return directArtistWeight * 40f +
+            artistTokenOverlap * 16f +
+            genreWeight * 24f +
+            tokenMatchScore * 12f
+    }
+
+    private fun languageColdStartBonus(track: TrackEntity, appLanguage: String): Float {
+        val sample = "${track.title} ${track.artist}"
+        val isCyr = containsCyrillic(sample)
+        return when (appLanguage.trim().lowercase()) {
+            "ru" -> if (isCyr) 42f else -18f
+            "en", "it" -> if (!isCyr) 34f else -18f
+            else -> 0f
+        }
+    }
+
     fun computeRecommendations(
         allTracks: List<TrackEntity>,
         listeningHistory: List<ListeningHistoryEntry>,
@@ -145,6 +192,7 @@ object RecommendationEngine {
         limit: Int = 12,
         listeningEvents: List<ListeningPlayEvent> = emptyList(),
         excludeIds: Set<String> = emptySet(),
+        appLanguage: String = "ru",
     ): RecommendationResult {
         if (allTracks.isEmpty()) {
             return RecommendationResult(
@@ -161,41 +209,30 @@ object RecommendationEngine {
         val nowMs = System.currentTimeMillis()
         val lastPlayedById = listeningHistory.associate { it.trackId to it.lastPlayedAtMs }
 
+        val cleanedAll = allTracks.filterNot { isBlockedRecommendationTrack(it) }
+        if (cleanedAll.isEmpty()) {
+            return RecommendationResult(
+                tracks = emptyList(),
+                topSeedArtists = profile.topSeedArtists.take(3),
+                topSeedGenres = profile.topSeedGenres.take(2),
+                onlineSeedQueries = emptyList(),
+            )
+        }
         val candidatePool = if (excludeIds.isNotEmpty()) {
-            allTracks.filter { it.id !in excludeIds }.ifEmpty { allTracks }
+            cleanedAll.filter { it.id !in excludeIds }.ifEmpty { cleanedAll }
         } else {
-            allTracks
+            cleanedAll
         }
 
-        val scored = candidatePool.map { track ->
-            val normArtist = normalizeKey(track.artist)
-            val normGenre = normalizeKey(track.genre)
-            val trackTokens = tokenize("${track.title} ${track.artist}")
+        val scoredEntries = candidatePool.map { track ->
             val isCyr = containsCyrillic("${track.title} ${track.artist}")
+            val affinity = computePersonalAffinity(track, profile)
+            var score = affinity
 
-            var score = 0f
             if (profile.hasPersonalSignals) {
-                val directArtistWeight = profile.artistWeights[normArtist] ?: 0f
-                score += directArtistWeight * 40f
-
-                val trackArtistTokens = tokenize(track.artist)
-                val artistTokenOverlap = trackArtistTokens.sumOf { tok ->
-                    (profile.tokenWeights[tok] ?: 0f).toDouble()
-                }.toFloat()
-                score += artistTokenOverlap * 15f
-
-                val genreWeight = profile.genreWeights[normGenre] ?: 0f
-                score += genreWeight * 26f
-
-                val tokenMatchScore = trackTokens.sumOf { tok ->
-                    (profile.tokenWeights[tok] ?: 0f).toDouble()
-                }.toFloat()
-                score += tokenMatchScore * 12f
-
-                // Language affinity
                 score += when (profile.preferredLanguage) {
-                    "ru" -> if (isCyr) 26f else -14f
-                    "en" -> if (!isCyr) 22f else -12f
+                    "ru" -> if (isCyr) 26f else -16f
+                    "en" -> if (!isCyr) 22f else -14f
                     else -> if (isCyr) (profile.cyrillicShare - 0.5f) * 20f else ((1f - profile.cyrillicShare) - 0.5f) * 20f
                 }
 
@@ -208,17 +245,59 @@ object RecommendationEngine {
                     else -> score += 16f // Fresh discovery bonus
                 }
 
-                score += ln((track.playCount.coerceAtLeast(1) + 1).toDouble()).toFloat() * 0.85f
+                score += ln((track.playCount.coerceAtLeast(1) + 1).toDouble()).toFloat() * 0.65f
             } else {
-                score = ln((track.playCount.coerceAtLeast(1) + 1).toDouble()).toFloat() * 3f +
+                // Cold start: fresh hits matching the app language
+                score = languageColdStartBonus(track, appLanguage) +
+                    ln((track.playCount.coerceAtLeast(1) + 1).toDouble()).toFloat() * 2.8f +
                     (if (track.isLiked) 6f else 0f) +
                     if (track.id in recentExactIds) -40f else 0f
             }
-            track to score
-        }.sortedByDescending { it.second }
+            Triple(track, score, affinity)
+        }
 
-        val maxPerArtist = if (candidatePool.size >= limit * 2) 1 else 2
-        val picked = pickDiverseTracks(scored.map { it.first }, limit = limit, maxPerArtist = maxPerArtist)
+        // When user has personal signals, strictly prioritize tracks with genuine taste affinity
+        // so unrelated global hits never hijack personal recommendations via raw playCount.
+        val filteredOrdered = if (profile.hasPersonalSignals) {
+            val relevant = scoredEntries
+                .filter { it.third > 0f }
+                .sortedByDescending { it.second }
+                .map { it.first }
+            if (relevant.size >= minOf(limit, 4)) {
+                relevant
+            } else {
+                val relevantIds = relevant.mapTo(HashSet()) { it.id }
+                val langMatchedFallback = scoredEntries
+                    .filter { it.first.id !in relevantIds }
+                    .filter { entry ->
+                        val isCyr = containsCyrillic("${entry.first.title} ${entry.first.artist}")
+                        when (profile.preferredLanguage) {
+                            "ru" -> isCyr
+                            "en" -> !isCyr
+                            else -> if (appLanguage.equals("ru", ignoreCase = true)) isCyr else true
+                        }
+                    }
+                    .sortedByDescending { it.second }
+                    .map { it.first }
+                (relevant + langMatchedFallback).ifEmpty {
+                    scoredEntries.sortedByDescending { it.second }.map { it.first }
+                }
+            }
+        } else {
+            val langPreferred = scoredEntries
+                .filter { languageColdStartBonus(it.first, appLanguage) >= 0f }
+                .sortedByDescending { it.second }
+                .map { it.first }
+            val preferredIds = langPreferred.mapTo(HashSet()) { it.id }
+            val rest = scoredEntries
+                .filter { it.first.id !in preferredIds }
+                .sortedByDescending { it.second }
+                .map { it.first }
+            langPreferred + rest
+        }
+
+        val maxPerArtist = if (filteredOrdered.size >= limit * 2) 1 else 2
+        val picked = pickDiverseTracks(filteredOrdered, limit = limit, maxPerArtist = maxPerArtist)
 
         val onlineQueries = buildList {
             profile.topSeedArtists.take(2).forEach { add(it) }
@@ -247,19 +326,23 @@ object RecommendationEngine {
         searchHistory: List<String> = emptyList(),
         excludeIds: Set<String> = emptySet(),
         limit: Int = 36,
+        appLanguage: String = "ru",
     ): List<TrackEntity> {
         if (allTracks.isEmpty()) return emptyList()
         val profile = buildTasteProfile(allTracks, listeningHistory, listeningEvents, searchHistory)
         val allHistoryIds = listeningHistory.mapTo(HashSet()) { it.trackId }
 
-        val nonExcluded = allTracks.filter { it.id !in excludeIds }
-        val pool = nonExcluded.ifEmpty { allTracks }
+        val cleanedAll = allTracks.filterNot { isBlockedRecommendationTrack(it) }
+        if (cleanedAll.isEmpty()) return emptyList()
+        val nonExcluded = cleanedAll.filter { it.id !in excludeIds }
+        val pool = nonExcluded.ifEmpty { cleanedAll }
 
-        val scored = pool.map { track ->
+        val scoredEntries = pool.map { track ->
             val normArtist = normalizeKey(track.artist)
             val normGenre = normalizeKey(track.genre)
             val isCyr = containsCyrillic("${track.title} ${track.artist}")
             val trackTokens = tokenize("${track.title} ${track.artist}")
+            val affinity = computePersonalAffinity(track, profile)
 
             var score = 0f
             if (profile.hasPersonalSignals) {
@@ -267,21 +350,56 @@ object RecommendationEngine {
                 score += (profile.artistWeights[normArtist] ?: 0f) * 24f
                 score += trackTokens.sumOf { (profile.tokenWeights[it] ?: 0f).toDouble() }.toFloat() * 14f
                 score += when (profile.preferredLanguage) {
-                    "ru" -> if (isCyr) 28f else -16f
-                    "en" -> if (!isCyr) 24f else -14f
+                    "ru" -> if (isCyr) 28f else -18f
+                    "en" -> if (!isCyr) 24f else -16f
                     else -> 0f
                 }
                 // Strongly boost unheard tracks so "Для вас" differs cleanly from "Рекомендации"
                 if (track.id !in allHistoryIds) score += 26f else score -= 34f
             } else {
+                score += languageColdStartBonus(track, appLanguage)
                 score += ln((track.playCount.coerceAtLeast(1) + 1).toDouble()).toFloat() * 2.5f
             }
             if (track.isLiked) score -= 8f // Let fresh tracks float above already-liked catalog
-            score += ln((track.playCount.coerceAtLeast(1) + 1).toDouble()).toFloat() * 0.7f
-            track to score
-        }.sortedByDescending { it.second }
+            score += ln((track.playCount.coerceAtLeast(1) + 1).toDouble()).toFloat() * 0.6f
+            Triple(track, score, affinity)
+        }
 
-        return pickDiverseTracks(scored.map { it.first }, limit = limit, maxPerArtist = 2)
+        val ordered = if (profile.hasPersonalSignals) {
+            val relevant = scoredEntries
+                .filter { it.third > 0f }
+                .sortedByDescending { it.second }
+                .map { it.first }
+            val relevantIds = relevant.mapTo(HashSet()) { it.id }
+            val langMatchedExtra = scoredEntries
+                .filter { it.first.id !in relevantIds }
+                .filter { entry ->
+                    val isCyr = containsCyrillic("${entry.first.title} ${entry.first.artist}")
+                    when (profile.preferredLanguage) {
+                        "ru" -> isCyr
+                        "en" -> !isCyr
+                        else -> if (appLanguage.equals("ru", ignoreCase = true)) isCyr else true
+                    }
+                }
+                .sortedByDescending { it.second }
+                .map { it.first }
+            (relevant + langMatchedExtra).ifEmpty {
+                scoredEntries.sortedByDescending { it.second }.map { it.first }
+            }
+        } else {
+            val langPreferred = scoredEntries
+                .filter { languageColdStartBonus(it.first, appLanguage) >= 0f }
+                .sortedByDescending { it.second }
+                .map { it.first }
+            val preferredIds = langPreferred.mapTo(HashSet()) { it.id }
+            val rest = scoredEntries
+                .filter { it.first.id !in preferredIds }
+                .sortedByDescending { it.second }
+                .map { it.first }
+            langPreferred + rest
+        }
+
+        return pickDiverseTracks(ordered, limit = limit, maxPerArtist = 2)
     }
 
     private fun pickDiverseTracks(
@@ -364,7 +482,7 @@ object RecommendationEngine {
         // Rank candidates primarily by real Spotify play counts (and verified stream counts),
         // giving a slight tie-break / selection preference to Spotify-verified and taste-matching popular hits.
         val rankedCandidates = allTracks
-            .filter { !(it.isUserUpload && it.playCount < 10) }
+            .filter { !isBlockedRecommendationTrack(it) && !(it.isUserUpload && it.playCount < 10) }
             .sortedWith(
                 compareByDescending<TrackEntity> {
                     val isSpotifyStat = it.id.startsWith("sp_") || it.description.contains("Spotify", ignoreCase = true)
@@ -559,8 +677,10 @@ object RecommendationEngine {
         }
         val recentIds = listeningHistory.take(4).mapTo(HashSet()) { it.trackId }
 
-        val candidates = allTracks.filter { it.id !in excludeIds }
-            .ifEmpty { allTracks }
+        val cleanedWave = allTracks.filterNot { isBlockedRecommendationTrack(it) }
+        if (cleanedWave.isEmpty()) return emptyList()
+        val candidates = cleanedWave.filter { it.id !in excludeIds }
+            .ifEmpty { cleanedWave }
 
         val scored = candidates.map { track ->
             var score = 0f

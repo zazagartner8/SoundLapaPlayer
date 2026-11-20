@@ -34,6 +34,7 @@ import androidx.compose.material.icons.rounded.PersonAdd
 import androidx.compose.material.icons.rounded.PersonRemove
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Verified
+import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -59,6 +60,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.data.local.ListeningHistoryEntry
@@ -128,7 +130,13 @@ fun DeveloperVerifiedPill(
             title = {
                 Text(
                     text = strings.social.developerBadgeInfoTitle,
+                    style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.fillMaxWidth(),
                 )
             },
             text = {
@@ -142,6 +150,90 @@ fun DeveloperVerifiedPill(
                 TextButton(
                     onClick = { showInfoDialog = false },
                     modifier = Modifier.testTag("developer_badge_dialog_close"),
+                ) {
+                    Text(strings.close, color = accent, fontWeight = FontWeight.SemiBold)
+                }
+            },
+        )
+    }
+}
+
+@Composable
+fun ModeratorVerifiedPill(
+    label: String,
+    accent: Color = com.example.ui.theme.LiquidCyan,
+    modifier: Modifier = Modifier,
+) {
+    val strings = LocalAppStrings.current
+    var showInfoDialog by remember { mutableStateOf(false) }
+
+    Surface(
+        onClick = { showInfoDialog = true },
+        modifier = modifier.testTag("moderator_verified_pill"),
+        shape = CircleShape,
+        color = accent.copy(alpha = 0.18f),
+        contentColor = accent,
+        border = androidx.compose.foundation.BorderStroke(1.dp, accent.copy(alpha = 0.50f)),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.VerifiedUser,
+                contentDescription = label,
+                tint = accent,
+                modifier = Modifier.size(13.dp),
+            )
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = accent,
+                maxLines = 1,
+                softWrap = false,
+            )
+        }
+    }
+
+    if (showInfoDialog) {
+        AlertDialog(
+            onDismissRequest = { showInfoDialog = false },
+            containerColor = MaterialTheme.colorScheme.surface,
+            titleContentColor = MaterialTheme.colorScheme.onSurface,
+            textContentColor = MaterialTheme.colorScheme.onSurface,
+            icon = {
+                Icon(
+                    imageVector = Icons.Rounded.VerifiedUser,
+                    contentDescription = label,
+                    tint = accent,
+                    modifier = Modifier.size(30.dp),
+                )
+            },
+            title = {
+                Text(
+                    text = strings.v35.moderatorBadgeInfoTitle,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            },
+            text = {
+                Text(
+                    text = strings.v35.moderatorBadgeInfoBody,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = { showInfoDialog = false },
+                    modifier = Modifier.testTag("moderator_badge_dialog_close"),
                 ) {
                     Text(strings.close, color = accent, fontWeight = FontWeight.SemiBold)
                 }
@@ -313,11 +405,19 @@ fun UserProfileAndFriendsScreen(
                                     text = inspectedProfile.displayName.ifBlank { "SoundLap User" },
                                     style = MaterialTheme.typography.titleLarge,
                                     fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f, fill = false),
                                 )
                                 if (inspectedProfile.isDeveloper) {
                                     DeveloperVerifiedPill(
                                         label = social.developerBadge,
                                         accent = accent,
+                                    )
+                                }
+                                if (inspectedProfile.isModerator) {
+                                    ModeratorVerifiedPill(
+                                        label = strings.v35.moderatorBadge,
                                     )
                                 }
                             }
@@ -402,11 +502,17 @@ fun UserProfileAndFriendsScreen(
                                                 fontWeight = FontWeight.Bold,
                                                 maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f, fill = false),
                                             )
                                             if (currentProfile.isDeveloper) {
                                                 DeveloperVerifiedPill(
                                                     label = social.developerBadge,
                                                     accent = accent,
+                                                )
+                                            }
+                                            if (currentProfile.isModerator) {
+                                                ModeratorVerifiedPill(
+                                                    label = strings.v35.moderatorBadge,
                                                 )
                                             }
                                         }
@@ -602,6 +708,7 @@ fun UserProfileAndFriendsScreen(
                                 isFriend = isFriend,
                                 accent = accent,
                                 developerBadgeLabel = social.developerBadge,
+                                moderatorBadgeLabel = strings.v35.moderatorBadge,
                                 addFriendLabel = social.addFriendButton,
                                 friendBadgeLabel = social.friendAddedBadge,
                                 onOpenProfile = { onInspectProfile(user) },
@@ -643,6 +750,7 @@ fun UserProfileAndFriendsScreen(
                                 username = friend.username,
                                 photoUrl = friend.photoUrl,
                                 isDeveloper = friend.isDeveloper,
+                                isModerator = friend.isModerator,
                                 isPublic = true,
                             )
                             Surface(
@@ -679,11 +787,17 @@ fun UserProfileAndFriendsScreen(
                                                 fontWeight = FontWeight.SemiBold,
                                                 maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f, fill = false),
                                             )
                                             if (friend.isDeveloper) {
                                                 DeveloperVerifiedPill(
                                                     label = social.developerBadge,
                                                     accent = accent,
+                                                )
+                                            }
+                                            if (friend.isModerator) {
+                                                ModeratorVerifiedPill(
+                                                    label = strings.v35.moderatorBadge,
                                                 )
                                             }
                                         }
@@ -731,6 +845,7 @@ private fun PublicUserRowCard(
     isFriend: Boolean,
     accent: Color,
     developerBadgeLabel: String,
+    moderatorBadgeLabel: String,
     addFriendLabel: String,
     friendBadgeLabel: String,
     onOpenProfile: () -> Unit,
@@ -770,9 +885,13 @@ private fun PublicUserRowCard(
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
                     )
                     if (profile.isDeveloper) {
                         DeveloperVerifiedPill(label = developerBadgeLabel, accent = accent)
+                    }
+                    if (profile.isModerator) {
+                        ModeratorVerifiedPill(label = moderatorBadgeLabel)
                     }
                 }
                 profile.username?.takeIf { it.isNotBlank() }?.let { h ->

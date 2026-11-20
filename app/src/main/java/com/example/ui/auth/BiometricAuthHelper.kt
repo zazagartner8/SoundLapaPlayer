@@ -8,6 +8,7 @@ import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
+import com.example.data.local.SoundLapUidFormatter
 import java.security.KeyStore
 import java.security.MessageDigest
 import javax.crypto.KeyGenerator
@@ -22,6 +23,19 @@ private const val ALLOWED_AUTHENTICATORS =
     BiometricManager.Authenticators.BIOMETRIC_STRONG or BiometricManager.Authenticators.BIOMETRIC_WEAK
 
 private const val DEV_EMAIL_SHA256 = "15f1e7a5e2780e58b8f5fdb2bf5fd811e841467762a079169d03c1d8552479d3"
+const val DEVELOPER_ACCOUNT_UID = "SL-D1E6-EE60"
+const val MODERATOR_ACCOUNT_UID = "SL-C526-964C"
+const val SECOND_MODERATOR_ACCOUNT_UID = "SL-6721-BEED"
+val MODERATOR_ACCOUNT_UIDS: Set<String> = setOf(
+    MODERATOR_ACCOUNT_UID,
+    SECOND_MODERATOR_ACCOUNT_UID,
+)
+
+enum class AdminBiometricScope {
+    DEVELOPER_ONLY,
+    MODERATOR_OR_DEVELOPER,
+}
+
 private const val DEV_KEYSTORE_PROVIDER = "AndroidKeyStore"
 private const val DEV_KEY_ALIAS_PREFIX = "soundlap_dev_bio_v1_"
 
@@ -41,6 +55,42 @@ fun sha256NormalizedHex(value: String?): String {
 fun isAllowedDeveloperEmail(email: String?): Boolean =
     sha256NormalizedHex(email) == DEV_EMAIL_SHA256
 
+fun isVerifiedDeveloperUid(firebaseUid: String?): Boolean {
+    val clean = firebaseUid?.trim().orEmpty()
+    if (clean.isEmpty()) return false
+    return SoundLapUidFormatter.format(clean).equals(DEVELOPER_ACCOUNT_UID, ignoreCase = true)
+}
+
+fun isVerifiedModeratorUid(firebaseUid: String?): Boolean {
+    val clean = firebaseUid?.trim().orEmpty()
+    if (clean.isEmpty()) return false
+    val formatted = SoundLapUidFormatter.format(clean).uppercase()
+    return formatted in MODERATOR_ACCOUNT_UIDS
+}
+
+fun isVerifiedModeratorAccountUid(accountUid: String?): Boolean {
+    val clean = accountUid?.trim()?.uppercase().orEmpty()
+    return clean.isNotEmpty() && clean in MODERATOR_ACCOUNT_UIDS
+}
+
+fun isVerifiedDeveloperAccountUid(accountUid: String?): Boolean =
+    accountUid?.trim()?.equals(DEVELOPER_ACCOUNT_UID, ignoreCase = true) == true
+
+fun isVerifiedDeveloperAccount(firebaseUid: String?, email: String?): Boolean =
+    isAllowedDeveloperEmail(email) || isVerifiedDeveloperUid(firebaseUid)
+
+fun isAdminPanelAccount(firebaseUid: String?, email: String?): Boolean =
+    isVerifiedDeveloperAccount(firebaseUid, email) || isVerifiedModeratorUid(firebaseUid)
+
+fun isAuthorizedForBiometricScope(
+    scope: AdminBiometricScope,
+    firebaseUid: String?,
+    email: String?,
+): Boolean = when (scope) {
+    AdminBiometricScope.DEVELOPER_ONLY -> isVerifiedDeveloperAccount(firebaseUid, email)
+    AdminBiometricScope.MODERATOR_OR_DEVELOPER -> isAdminPanelAccount(firebaseUid, email)
+}
+
 fun hasProvisionedDeveloperBiometricKey(uid: String?): Boolean {
     val cleanUid = uid?.trim()?.takeIf { it.isNotEmpty() } ?: return false
     return runCatching {
@@ -50,7 +100,7 @@ fun hasProvisionedDeveloperBiometricKey(uid: String?): Boolean {
 }
 
 fun provisionDeveloperBiometricKey(uid: String, email: String?): Boolean {
-    if (!isAllowedDeveloperEmail(email)) return false
+    if (!isAdminPanelAccount(uid, email)) return false
     val cleanUid = uid.trim().takeIf { it.isNotEmpty() } ?: return false
     return runCatching {
         val alias = "$DEV_KEY_ALIAS_PREFIX$cleanUid"
@@ -98,11 +148,12 @@ fun launchDeveloperBiometricPrompt(
     negativeButtonText: String,
     unavailableMessage: String,
     failedMessage: String,
+    scope: AdminBiometricScope = AdminBiometricScope.MODERATOR_OR_DEVELOPER,
     onAuthenticated: () -> Unit,
     onDismissed: () -> Unit,
     onError: (String) -> Unit,
 ) {
-    if (!isAllowedDeveloperEmail(signedInEmail) || signedInUid.isNullOrBlank()) {
+    if (!isAuthorizedForBiometricScope(scope, signedInUid, signedInEmail) || signedInUid.isNullOrBlank()) {
         onError(failedMessage)
         return
     }
@@ -127,7 +178,7 @@ fun launchDeveloperBiometricPrompt(
     val callback = object : BiometricPrompt.AuthenticationCallback() {
         override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
             super.onAuthenticationSucceeded(result)
-            if (isAllowedDeveloperEmail(signedInEmail) &&
+            if (isAuthorizedForBiometricScope(scope, signedInUid, signedInEmail) &&
                 hasProvisionedDeveloperBiometricKey(signedInUid)
             ) {
                 onAuthenticated()

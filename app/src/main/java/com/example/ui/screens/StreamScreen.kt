@@ -32,6 +32,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.CircularProgressIndicator
@@ -41,6 +42,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
@@ -73,6 +75,7 @@ import com.example.ui.components.rememberSoundLapaHaptics
 import com.example.ui.i18n.LocalAppStrings
 import com.example.ui.i18n.filterDisplayLabel
 import com.example.ui.shaders.TrackCoverArtwork
+import com.example.ui.theme.expressivePressScale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -91,6 +94,9 @@ fun StreamScreen(
     modifier: Modifier = Modifier,
     onPlayQuickPickTrack: (TrackEntity) -> Unit = onPlayTrack,
     onPlayTrendingTrack: (TrackEntity) -> Unit = onPlayTrack,
+    onOpenTrendingAll: () -> Unit = {},
+    onOpenRecommendedAll: () -> Unit = {},
+    isInitialFeedSettled: Boolean = true,
 ) {
     val strings = LocalAppStrings.current
     val haptics = rememberSoundLapaHaptics()
@@ -234,10 +240,14 @@ fun StreamScreen(
                 if (state.trendingCarousel.isNotEmpty()) {
                     item(key = "trending_carousel", contentType = "trending_carousel") {
                         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                            Text(
-                                text = strings.trending,
-                                style = MaterialTheme.typography.titleLarge,
-                                color = MaterialTheme.colorScheme.onBackground,
+                            SectionNavigationHeader(
+                                title = strings.trending,
+                                contentDescription = strings.startup.openAllCd,
+                                testTag = "home_trending_header",
+                                onClick = {
+                                    haptics.tick()
+                                    onOpenTrendingAll()
+                                },
                             )
                             LazyRow(
                                 state = trendingRowState,
@@ -273,10 +283,14 @@ fun StreamScreen(
                             modifier = Modifier.testTag("home_recommendations_section"),
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
-                            Text(
-                                text = strings.recommendedForYou,
-                                style = MaterialTheme.typography.titleLarge,
-                                color = MaterialTheme.colorScheme.onBackground,
+                            SectionNavigationHeader(
+                                title = strings.recommendedForYou,
+                                contentDescription = strings.startup.openAllCd,
+                                testTag = "home_recommendations_header",
+                                onClick = {
+                                    haptics.tick()
+                                    onOpenRecommendedAll()
+                                },
                             )
 
                             LazyRow(
@@ -321,28 +335,45 @@ fun StreamScreen(
             }
 
             if (state.filteredTracks.isEmpty()) {
+                val stillLoadingFeed =
+                    !isInitialFeedSettled || state.isRefreshingTrending || state.isRefreshingHome || state.isSearching
                 item(key = "empty_tracks", contentType = "empty_notice") {
-                    Surface(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(22.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                        contentColor = MaterialTheme.colorScheme.onSurface,
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(24.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                    if (stillLoadingFeed) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 28.dp),
+                            contentAlignment = Alignment.Center,
                         ) {
-                            Text(
-                                text = strings.nothingFound,
-                                style = MaterialTheme.typography.titleMedium,
-                                color = MaterialTheme.colorScheme.onSurface,
+                            CircularProgressIndicator(
+                                color = MaterialTheme.colorScheme.primary,
+                                strokeWidth = 3.dp,
+                                modifier = Modifier.size(28.dp),
                             )
-                            Text(
-                                text = strings.nothingFoundHint,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
+                        }
+                    } else {
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(22.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                            contentColor = MaterialTheme.colorScheme.onSurface,
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(24.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Text(
+                                    text = strings.nothingFound,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                )
+                                Text(
+                                    text = strings.nothingFoundHint,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
                         }
                     }
                 }
@@ -496,6 +527,7 @@ private fun FilterPill(
     val accent = MaterialTheme.colorScheme.primary
     Box(
         modifier = Modifier
+            .expressivePressScale(pressedScale = 0.93f)
             .clip(CircleShape)
             .background(
                 if (selected) {
@@ -525,6 +557,43 @@ private fun FilterPill(
 }
 
 @Composable
+private fun SectionNavigationHeader(
+    title: String,
+    contentDescription: String,
+    testTag: String,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .minimumInteractiveComponentSize()
+            .expressivePressScale(pressedScale = 0.985f)
+            .clip(RoundedCornerShape(14.dp))
+            .clickable(onClick = onClick)
+            .padding(vertical = 4.dp)
+            .testTag(testTag),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onBackground,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        Icon(
+            imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+            contentDescription = contentDescription,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(26.dp),
+        )
+    }
+}
+
+@Composable
 private fun TrendingSquareCard(
     track: TrackEntity,
     isCurrent: Boolean,
@@ -534,6 +603,7 @@ private fun TrendingSquareCard(
     Column(
         modifier = Modifier
             .width(156.dp)
+            .expressivePressScale(pressedScale = 0.955f)
             .clip(RoundedCornerShape(22.dp))
             .background(
                 if (isCurrent) trackAccent.copy(alpha = 0.16f)
@@ -550,7 +620,7 @@ private fun TrendingSquareCard(
                 track = track,
                 modifier = Modifier.fillMaxSize(),
                 cornerRadius = 18.dp,
-                targetSizePx = 540,
+                targetSizePx = 360,
             )
         }
         Column(

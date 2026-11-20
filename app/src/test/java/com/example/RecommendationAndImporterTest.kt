@@ -381,4 +381,242 @@ class RecommendationAndImporterTest {
         )
         assertTrue(forYou.none { it.id in recIds })
     }
+
+    @Test
+    fun recommendationsAndForYouExcludeUnrequestedGoosebumpsAndPassionfruit() {
+        val nowMs = System.currentTimeMillis()
+        val ru1 = track("ru1", "Минор", "Miyagi & Эндшпиль", "Хип-хоп", playCount = 50_000)
+        val ru2 = track("ru2", "Косандра", "Miyagi & Эндшпиль", "Хип-хоп", playCount = 40_000)
+        val ru3 = track("ru3", "Там ревели горы", "Miyagi & Эндшпиль", "Хип-хоп", playCount = 35_000)
+        val ru4 = track("ru4", "Отпускай", "Три дня дождя", "Рок", playCount = 45_000)
+        val goosebumps = track("sp_g", "goosebumps", "Travis Scott", "Хип-хоп", playCount = 2_000_000_000)
+        val passionfruit = track("sp_p", "Passionfruit", "Drake", "Поп", playCount = 1_800_000_000)
+
+        val history = listOf(
+            ListeningHistoryEntry(
+                trackId = "ru1",
+                title = "Минор",
+                artist = "Miyagi & Эндшпиль",
+                genre = "Хип-хоп",
+                playCount = 3,
+                lastPlayedAtMs = nowMs,
+            ),
+        )
+
+        val allTracks = listOf(ru1, ru2, ru3, ru4, goosebumps, passionfruit)
+        val recs = RecommendationEngine.computeRecommendations(
+            allTracks = allTracks,
+            listeningHistory = history,
+            limit = 6,
+            appLanguage = "ru",
+        )
+        assertTrue(recs.tracks.none { it.title.equals("goosebumps", ignoreCase = true) })
+        assertTrue(recs.tracks.none { it.title.equals("passionfruit", ignoreCase = true) })
+
+        val forYou = RecommendationEngine.computeForYouTracks(
+            allTracks = allTracks,
+            listeningHistory = history,
+            limit = 6,
+            appLanguage = "ru",
+        )
+        assertTrue(forYou.none { it.title.equals("goosebumps", ignoreCase = true) })
+        assertTrue(forYou.none { it.title.equals("passionfruit", ignoreCase = true) })
+    }
+
+    @Test
+    fun coldStartRecommendationsFollowAppLanguageFreshHits() {
+        val ruHit = track("ru_hit", "По барам", "ANNA ASTI", "Поп", playCount = 120_000)
+        val enHit = track("en_hit", "Espresso", "Sabrina Carpenter", "Pop", playCount = 900_000)
+        val goosebumps = track("sp_g", "goosebumps", "Travis Scott", "Хип-хоп", playCount = 2_000_000_000)
+
+        val ruRecs = RecommendationEngine.computeRecommendations(
+            allTracks = listOf(ruHit, enHit, goosebumps),
+            listeningHistory = emptyList(),
+            limit = 2,
+            appLanguage = "ru",
+        )
+        assertEquals("ru_hit", ruRecs.tracks.first().id)
+        assertTrue(ruRecs.tracks.none { it.id == "sp_g" })
+
+        val enRecs = RecommendationEngine.computeRecommendations(
+            allTracks = listOf(ruHit, enHit, goosebumps),
+            listeningHistory = emptyList(),
+            limit = 2,
+            appLanguage = "en",
+        )
+        assertEquals("en_hit", enRecs.tracks.first().id)
+        assertTrue(enRecs.tracks.none { it.id == "sp_g" })
+
+        val ruDefaults = com.example.data.remote.SpotifyCatalogClient.defaultTrendingArtistsForLanguage("ru")
+        val enDefaults = com.example.data.remote.SpotifyCatalogClient.defaultTrendingArtistsForLanguage("en")
+        assertTrue(ruDefaults.none { it.equals("Travis Scott", ignoreCase = true) || it.equals("Drake", ignoreCase = true) })
+        assertTrue(enDefaults.none { it.equals("Travis Scott", ignoreCase = true) || it.equals("Drake", ignoreCase = true) })
+        assertNotEquals(ruDefaults, enDefaults)
+    }
+
+    @Test
+    fun developerPresenceKeepsBackgroundPlaybackAsPlayingAndRespectsExplicitPause() {
+        val nowMs = 1_750_000_000_000L
+
+        // Background playback: window minimized (isOnline = false), fresh active track heartbeat
+        val bgPlayingProfile = com.example.data.remote.CloudUserProfile(
+            userId = "u1",
+            displayName = "Listener",
+            isOnline = false,
+            lastActiveAtMs = nowMs - 30_000L,
+            currentTrackId = "t1",
+            currentTrackTitle = "Kosandra",
+            currentTrackArtist = "Miyagi",
+            currentTrackIsPlaying = true,
+            currentTrackUpdatedAtMs = nowMs - 25_000L,
+        )
+        val (bgOnline, bgPlaying) = com.example.data.remote.CloudLibraryRepository
+            .resolveDeveloperPresenceStatus(bgPlayingProfile, nowMs)
+        assertTrue(bgOnline)
+        assertTrue(bgPlaying)
+
+        // Explicitly paused in foreground
+        val pausedProfile = bgPlayingProfile.copy(
+            isOnline = true,
+            currentTrackIsPlaying = false,
+        )
+        val (pausedOnline, pausedPlaying) = com.example.data.remote.CloudLibraryRepository
+            .resolveDeveloperPresenceStatus(pausedProfile, nowMs)
+        assertTrue(pausedOnline)
+        assertFalse(pausedPlaying)
+
+        // Stale crashed playback older than 5 minutes expires cleanly
+        val staleProfile = bgPlayingProfile.copy(
+            lastActiveAtMs = nowMs - 10L * 60_000L,
+            currentTrackUpdatedAtMs = nowMs - 10L * 60_000L,
+        )
+        val (staleOnline, stalePlaying) = com.example.data.remote.CloudLibraryRepository
+            .resolveDeveloperPresenceStatus(staleProfile, nowMs)
+        assertFalse(staleOnline)
+        assertFalse(stalePlaying)
+    }
+
+    @Test
+    fun startupProgressStateCalculatesCleanPercentageBounds() {
+        val init = com.example.ui.components.StartupProgressState(
+            progress = 0.14f,
+            stage = com.example.ui.components.StartupBootStage.INITIALIZING,
+        )
+        val ready = com.example.ui.components.StartupProgressState(
+            progress = 1.25f,
+            stage = com.example.ui.components.StartupBootStage.READY,
+        )
+        assertEquals(14, init.percentInt)
+        assertEquals(100, ready.percentInt)
+    }
+
+    @Test
+    fun goosebumpsAndPassionfruitAreUnconditionallyExcludedFromRecommendationsForYouAndWave() {
+        val nowMs = System.currentTimeMillis()
+        val goosebumps = track("sp_g", "goosebumps (feat. Kendrick Lamar)", "Travis Scott", "Хип-хоп", playCount = 9_999_999, isLiked = true)
+        val passionfruit = track("sp_p", "Passionfruit", "Drake", "Поп", playCount = 8_888_888, isLiked = true)
+        val clean1 = track("c1", "Minor", "Miyagi & Эндшпиль", "Хип-хоп", playCount = 10_000)
+        val clean2 = track("c2", "Kosandra", "Miyagi & Эндшпиль", "Хип-хоп", playCount = 12_000)
+
+        assertTrue(RecommendationEngine.isBlockedRecommendationTrack(goosebumps))
+        assertTrue(RecommendationEngine.isBlockedRecommendationTrack(passionfruit))
+        assertFalse(RecommendationEngine.isBlockedRecommendationTrack(clean1))
+
+        val poisonedHistory = listOf(
+            ListeningHistoryEntry("sp_g", "goosebumps", "Travis Scott", "Хип-хоп", playCount = 20, lastPlayedAtMs = nowMs),
+            ListeningHistoryEntry("sp_p", "Passionfruit", "Drake", "Поп", playCount = 20, lastPlayedAtMs = nowMs),
+        )
+        val pool = listOf(goosebumps, passionfruit, clean1, clean2)
+
+        val recs = RecommendationEngine.computeRecommendations(
+            allTracks = pool,
+            listeningHistory = poisonedHistory,
+            searchHistory = listOf("Travis Scott", "Drake"),
+            limit = 10,
+            appLanguage = "ru",
+        )
+        assertTrue(recs.tracks.none { it.id == "sp_g" || it.id == "sp_p" })
+
+        val forYou = RecommendationEngine.computeForYouTracks(
+            allTracks = pool,
+            listeningHistory = poisonedHistory,
+            searchHistory = listOf("Travis Scott", "Drake"),
+            limit = 10,
+            appLanguage = "ru",
+        )
+        assertTrue(forYou.none { it.id == "sp_g" || it.id == "sp_p" })
+
+        val wave = RecommendationEngine.computeWaveTracks(
+            allTracks = pool,
+            listeningHistory = poisonedHistory,
+            config = com.example.data.local.WaveFilterConfig(),
+            limit = 10,
+        )
+        assertTrue(wave.none { it.id == "sp_g" || it.id == "sp_p" })
+
+        val trending = RecommendationEngine.computeTrendingSimilarTracks(
+            allTracks = pool,
+            listeningHistory = poisonedHistory,
+            limit = 10,
+        )
+        assertTrue(trending.none { it.id == "sp_g" || it.id == "sp_p" })
+    }
+
+    @Test
+    fun adminRoleAccountUidHelpersRecognizeDeveloperAndModeratorUids() {
+        assertTrue(com.example.ui.auth.isVerifiedDeveloperAccountUid("SL-D1E6-EE60"))
+        assertTrue(com.example.ui.auth.isVerifiedDeveloperAccountUid("sl-d1e6-ee60"))
+        assertFalse(com.example.ui.auth.isVerifiedDeveloperAccountUid("SL-C526-964C"))
+        assertFalse(com.example.ui.auth.isVerifiedDeveloperAccountUid("SL-6721-BEED"))
+        assertFalse(com.example.ui.auth.isVerifiedDeveloperAccountUid("SL-0000-0000"))
+
+        assertTrue(com.example.ui.auth.isVerifiedModeratorAccountUid("SL-C526-964C"))
+        assertTrue(com.example.ui.auth.isVerifiedModeratorAccountUid("sl-c526-964c"))
+        assertTrue(com.example.ui.auth.isVerifiedModeratorAccountUid("SL-6721-BEED"))
+        assertTrue(com.example.ui.auth.isVerifiedModeratorAccountUid("sl-6721-beed"))
+        assertFalse(com.example.ui.auth.isVerifiedModeratorAccountUid("SL-D1E6-EE60"))
+        assertFalse(com.example.ui.auth.isVerifiedModeratorAccountUid(null))
+
+        // Regular accounts are denied both split biometric scopes
+        assertFalse(
+            com.example.ui.auth.isAuthorizedForBiometricScope(
+                scope = com.example.ui.auth.AdminBiometricScope.DEVELOPER_ONLY,
+                firebaseUid = "regular_user_uid",
+                email = "user@example.com",
+            ),
+        )
+        assertFalse(
+            com.example.ui.auth.isAuthorizedForBiometricScope(
+                scope = com.example.ui.auth.AdminBiometricScope.MODERATOR_OR_DEVELOPER,
+                firebaseUid = "regular_user_uid",
+                email = "user@example.com",
+            ),
+        )
+    }
+
+    @Test
+    fun playlistImportLimitIs500AndLongCoverUrlsSurviveCloudSanitization() {
+        assertEquals(500, PlaylistImporter.MAX_IMPORT_TRACKS)
+        val longCoverUrl = "https://mosaic.scdn.co/640/" + "a".repeat(420)
+        val localPlaylist = com.example.data.local.PlaylistEntity(
+            id = "pl_long_cover",
+            name = "Imported Mix",
+            description = "Test",
+            createdAt = 1_000L,
+            coverArtPath = longCoverUrl,
+        )
+        val synced = com.example.data.remote.CloudUserPlaylist.fromPlaylistEntity(
+            userId = "user_1",
+            playlist = localPlaylist,
+        )
+        assertEquals(longCoverUrl, synced.coverArtPath)
+
+        // Missing local file path should NOT shadow valid cloud cover URL on restore
+        val staleLocal = localPlaylist.copy(coverArtPath = "/nonexistent/path/missing_cover.jpg")
+        val restored = synced.toLocalPlaylistEntity(existing = staleLocal)
+        assertEquals(longCoverUrl, restored.coverArtPath)
+    }
 }
+
+
+

@@ -290,12 +290,108 @@ class PlaybackController(
 
     fun findTrackById(trackId: String?): TrackEntity? = trackId?.let { knownTracksById[it] }
 
+    fun currentMediaMetadataFallback(): Triple<String, String, String?>? {
+        val item = mediaController?.currentMediaItem ?: return null
+        val meta = item.mediaMetadata
+        val title = meta.title?.toString()?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val artist = meta.artist?.toString()?.trim()?.takeIf { it.isNotEmpty() } ?: "SoundLap"
+        val cover = meta.artworkUri?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+        return Triple(title, artist, cover)
+    }
+
     fun isTrackActiveInController(trackId: String): Boolean {
         val controller = mediaController ?: return false
         return controller.mediaItemCount > 0 && controller.currentMediaItem?.mediaId == trackId
     }
 
+    private var unshuffledQueueBackup: List<TrackEntity> = emptyList()
+
+    private fun syncQueueOrderFromController(controller: MediaController) {
+        val count = controller.mediaItemCount
+        if (count <= 0) return
+        val synced = ArrayList<TrackEntity>(count)
+        for (i in 0 until count) {
+            val id = controller.getMediaItemAt(i).mediaId
+            val track = knownTracksById[id] ?: _queueTracks.value.find { it.id == id } ?: cachedQueue.find { it.id == id }
+            if (track != null) {
+                synced += track
+            }
+        }
+        if (synced.isNotEmpty()) {
+            _queueTracks.value = synced
+        }
+    }
+
+    private fun prefetchUpcomingWindow(controller: MediaController, fromIndex: Int = controller.currentMediaItemIndex) {
+        val count = controller.mediaItemCount
+        if (count <= 1 || fromIndex !in 0 until count) return
+        val repeatAll = controller.repeatMode == Player.REPEAT_MODE_ALL
+        val upcoming = buildList {
+            for (offset in 1..3) {
+                val idx = fromIndex + offset
+                val resolvedIdx = when {
+                    idx < count -> idx
+                    repeatAll -> idx % count
+                    else -> -1
+                }
+                if (resolvedIdx >= 0 && resolvedIdx != fromIndex) {
+                    val id = controller.getMediaItemAt(resolvedIdx).mediaId
+                    val track = knownTracksById[id] ?: _queueTracks.value.find { it.id == id }
+                    if (track != null) add(track)
+                }
+            }
+        }
+        if (upcoming.isNotEmpty()) {
+            AudioPrefetchCache.prefetchUpcomingTracks(context, upcoming, dao)
+        }
+    }
+
     fun playFromActiveQueue(track: TrackEntity) {
+        val controller = mediaController
+        if (controller != null && controller.mediaItemCount > 0) {
+            var targetIdx = -1
+            for (i in 0 until controller.mediaItemCount) {
+                if (controller.getMediaItemAt(i).mediaId == track.id) {
+                    targetIdx = i
+                    break
+                }
+            }
+            if (targetIdx >= 0) {
+                knownTracksById[track.id] = track
+                SoundLapaPlaybackService.prepareCleanSingleDeckStart()
+                pendingSeekTargetMs = 0L
+                pendingSeekExpiresAt = System.currentTimeMillis() + 1200L
+                autoCrossfadeTriggeredTrackId = null
+                rapidSkipTrackId = track.id
+                rapidSkipExpiresAtMs = System.currentTimeMillis() + 3_000L
+                controller.volume = if (isClipAudioMuted) 0f else 1f
+                controller.seekTo(targetIdx, 0L)
+                if (controller.playbackState == Player.STATE_IDLE) {
+                    controller.prepare()
+                }
+                controller.playWhenReady = true
+                controller.play()
+                playCountTracker.onTrackStarted(track.id, 0L)
+                _positionMs.value = 0L
+                _playbackState.update {
+                    it.copy(
+                        currentTrackId = track.id,
+                        isPlaying = true,
+                        isBuffering = true,
+                        positionMs = 0L,
+                        durationMs = track.durationMs,
+                        transitionCounter = it.transitionCounter + 1,
+                    )
+                }
+                prefetchUpcomingWindow(controller, targetIdx)
+                scope.launch(Dispatchers.IO) {
+                    if (dao.getTrackById(track.id) == null) dao.upsertTrack(track)
+                    preferences.savePlaybackState(track.id, 0L)
+                    preferences.recordTrackRecentlyPlayed(track)
+                }
+                return
+            }
+        }
         val active = _queueTracks.value.ifEmpty { cachedQueue }
         playTrack(track, active, startPositionMs = 0L, contextTitle = _playbackState.value.playbackContextTitle)
     }
@@ -309,18 +405,31 @@ class PlaybackController(
             playTrack(track, (listOf(track) + currentQueue).distinctBy { it.id })
             return
         }
-        val currentId = controller.currentMediaItem?.mediaId ?: _playbackState.value.currentTrackId
-        val insertQueueIdx = currentQueue.indexOfFirst { it.id == currentId }.let { idx ->
-            if (idx >= 0) idx + 1 else 0
+        val currentIdx = controller.currentMediaItemIndex.coerceIn(0, controller.mediaItemCount - 1)
+        var existingIdx = -1
+        for (i in 0 until controller.mediaItemCount) {
+            if (controller.getMediaItemAt(i).mediaId == track.id) {
+                existingIdx = i
+                break
+            }
         }
-        currentQueue.removeAll { it.id == track.id && currentQueue.indexOf(it) != idxOfCurrent(currentQueue, currentId) }
-        val safeQueueIdx = insertQueueIdx.coerceIn(0, currentQueue.size)
-        currentQueue.add(safeQueueIdx, track)
-        _queueTracks.value = currentQueue
-
-        val insertControllerIdx = (controller.currentMediaItemIndex + 1).coerceIn(0, controller.mediaItemCount)
-        controller.addMediaItem(insertControllerIdx, mediaItem)
-        FullStreamResolver.prefetchTracks(listOf(track), dao)
+        when {
+            existingIdx == currentIdx -> {
+                // Already currently playing
+            }
+            existingIdx >= 0 -> {
+                val targetIdx = if (existingIdx < currentIdx) currentIdx else (currentIdx + 1).coerceAtMost(controller.mediaItemCount - 1)
+                if (existingIdx != targetIdx) {
+                    controller.moveMediaItem(existingIdx, targetIdx)
+                }
+            }
+            else -> {
+                val insertIdx = (currentIdx + 1).coerceIn(0, controller.mediaItemCount)
+                controller.addMediaItem(insertIdx, mediaItem)
+            }
+        }
+        syncQueueOrderFromController(controller)
+        prefetchUpcomingWindow(controller)
     }
 
     fun addToQueue(track: TrackEntity) {
@@ -332,11 +441,66 @@ class PlaybackController(
             playTrack(track, (currentQueue + track).distinctBy { it.id })
             return
         }
-        if (currentQueue.none { it.id == track.id }) {
-            currentQueue.add(track)
-            _queueTracks.value = currentQueue
+        val currentIdx = controller.currentMediaItemIndex.coerceIn(0, controller.mediaItemCount - 1)
+        var existingIdx = -1
+        for (i in 0 until controller.mediaItemCount) {
+            if (controller.getMediaItemAt(i).mediaId == track.id) {
+                existingIdx = i
+                break
+            }
         }
-        controller.addMediaItem(mediaItem)
+        when {
+            existingIdx == currentIdx -> {
+                // Already currently playing; keep queue unique
+            }
+            existingIdx >= 0 -> {
+                val endIdx = (controller.mediaItemCount - 1).coerceAtLeast(0)
+                if (existingIdx != endIdx) {
+                    controller.moveMediaItem(existingIdx, endIdx)
+                }
+            }
+            else -> {
+                controller.addMediaItem(mediaItem)
+            }
+        }
+        syncQueueOrderFromController(controller)
+        prefetchUpcomingWindow(controller)
+    }
+
+    fun removeFromQueue(trackId: String) {
+        val controller = mediaController ?: return
+        val count = controller.mediaItemCount
+        if (count <= 1) return
+        val currentIdx = controller.currentMediaItemIndex
+        var targetIdx = -1
+        for (i in 0 until count) {
+            if (controller.getMediaItemAt(i).mediaId == trackId) {
+                targetIdx = i
+                break
+            }
+        }
+        if (targetIdx < 0 || targetIdx == currentIdx) return
+        controller.removeMediaItem(targetIdx)
+        syncQueueOrderFromController(controller)
+        prefetchUpcomingWindow(controller)
+    }
+
+    fun moveQueueItem(fromIndex: Int, toIndex: Int) {
+        val controller = mediaController ?: return
+        val count = controller.mediaItemCount
+        if (fromIndex == toIndex || fromIndex !in 0 until count || toIndex !in 0 until count) return
+        controller.moveMediaItem(fromIndex, toIndex)
+        syncQueueOrderFromController(controller)
+        prefetchUpcomingWindow(controller)
+    }
+
+    fun clearUpcomingQueue() {
+        val controller = mediaController ?: return
+        val count = controller.mediaItemCount
+        val currentIdx = controller.currentMediaItemIndex
+        if (currentIdx !in 0 until count || currentIdx >= count - 1) return
+        controller.removeMediaItems(currentIdx + 1, count)
+        syncQueueOrderFromController(controller)
     }
 
     fun appendTracksToQueue(tracks: List<TrackEntity>) {
@@ -344,18 +508,18 @@ class PlaybackController(
         tracks.forEach { knownTracksById[it.id] = it }
         val controller = mediaController ?: return
         if (controller.mediaItemCount == 0) return
-        val existingIds = _queueTracks.value.mapTo(HashSet()) { it.id }
-        val newTracks = tracks.filter { it.id !in existingIds && resolveTrackUri(it) != null }
+        val existingIds = HashSet<String>(controller.mediaItemCount)
+        for (i in 0 until controller.mediaItemCount) {
+            existingIds += controller.getMediaItemAt(i).mediaId
+        }
+        val newTracks = tracks.filter { it.id !in existingIds && resolveTrackUri(it) != null }.distinctBy { it.id }
         if (newTracks.isEmpty()) return
         val newItems = newTracks.mapNotNull { toMediaItem(it) }
         if (newItems.isEmpty()) return
-        _queueTracks.value = _queueTracks.value + newTracks
         controller.addMediaItems(newItems)
-        FullStreamResolver.prefetchTracks(newTracks.take(2), dao)
+        syncQueueOrderFromController(controller)
+        prefetchUpcomingWindow(controller)
     }
-
-    private fun idxOfCurrent(list: List<TrackEntity>, currentId: String?): Int =
-        if (currentId == null) -1 else list.indexOfFirst { it.id == currentId }
 
     fun playTrack(
         track: TrackEntity,
@@ -396,6 +560,14 @@ class PlaybackController(
             rawFiltered.ifEmpty { listOfNotNull(track.takeIf { resolveTrackUri(it) != null }) }
         }
         val playableQueue = normalizedQueue.distinctBy { it.id }
+        val isSameQueueIds = _queueTracks.value.size == playableQueue.size &&
+            _queueTracks.value.indices.all { _queueTracks.value[it].id == playableQueue[it].id }
+        if (!isSameQueueIds) {
+            unshuffledQueueBackup = emptyList()
+            if (_playbackState.value.shuffleEnabled) {
+                _playbackState.update { it.copy(shuffleEnabled = false) }
+            }
+        }
         _queueTracks.value = playableQueue
         val targetIndex = playableQueue.indexOfFirst { it.id == track.id }.coerceAtLeast(0)
         val mediaItems = playableQueue.mapNotNull { toMediaItem(it) }
@@ -460,18 +632,23 @@ class PlaybackController(
         controller.playWhenReady = true
         controller.play()
 
-        // Prefetch next 2 + previous 1 tracks so track switching in both directions stays instant
+        // Prefetch & disk-cache next 3 upcoming tracks in the background so switching has zero delay
         val currentIdxInQueue = prefetchQueue.indexOfFirst { it.id == track.id }
-        val surrounding = if (currentIdxInQueue >= 0) {
+        val upcoming = if (currentIdxInQueue >= 0) {
             buildList {
-                prefetchQueue.getOrNull(currentIdxInQueue + 1)?.let { add(it) }
-                prefetchQueue.getOrNull(currentIdxInQueue + 2)?.let { add(it) }
-                prefetchQueue.getOrNull(currentIdxInQueue - 1)?.let { add(it) }
+                for (offset in 1..3) {
+                    prefetchQueue.getOrNull(currentIdxInQueue + offset)?.let { add(it) }
+                }
             }
         } else {
             emptyList()
         }
-        FullStreamResolver.prefetchTracks(surrounding, dao)
+        if (upcoming.isNotEmpty()) {
+            AudioPrefetchCache.prefetchUpcomingTracks(context, upcoming, dao)
+        }
+        prefetchQueue.getOrNull(currentIdxInQueue - 1)?.let { prev ->
+            FullStreamResolver.prefetchTracks(listOf(prev), dao)
+        }
 
         playCountTracker.onTrackStarted(track.id, safeStart)
         _positionMs.value = safeStart
@@ -673,9 +850,10 @@ class PlaybackController(
         val upcomingWindow = listOfNotNull(
             mediaItems.getOrNull((nextIdx + 1) % mediaItems.size)?.let { knownTracksById[it.mediaId] },
             mediaItems.getOrNull((nextIdx + 2) % mediaItems.size)?.let { knownTracksById[it.mediaId] },
+            mediaItems.getOrNull((nextIdx + 3) % mediaItems.size)?.let { knownTracksById[it.mediaId] },
         )
         if (upcomingWindow.isNotEmpty()) {
-            FullStreamResolver.prefetchTracks(upcomingWindow, dao)
+            AudioPrefetchCache.prefetchUpcomingTracks(context, upcomingWindow, dao)
         }
 
         playCountTracker.onTrackStarted(targetMediaId, 0L)
@@ -801,8 +979,59 @@ class PlaybackController(
 
     fun toggleShuffle() {
         val controller = mediaController ?: return
-        val next = !controller.shuffleModeEnabled
-        controller.shuffleModeEnabled = next
+        val next = !_playbackState.value.shuffleEnabled
+        // Materialize shuffle order directly into the controller queue so Up Next, Play Next,
+        // drag/reorder, and 3-track background caching ALWAYS match the exact playback order!
+        controller.shuffleModeEnabled = false
+        val count = controller.mediaItemCount
+        val currentIdx = controller.currentMediaItemIndex
+        val currentId = controller.currentMediaItem?.mediaId ?: _playbackState.value.currentTrackId
+        if (count > 2 && currentIdx in 0 until count) {
+            val currentTracks = _queueTracks.value.ifEmpty {
+                List(count) { i -> knownTracksById[controller.getMediaItemAt(i).mediaId] }.filterNotNull()
+            }
+            if (next) {
+                unshuffledQueueBackup = currentTracks
+                val currentTrack = currentTracks.find { it.id == currentId } ?: currentTracks.getOrNull(currentIdx)
+                val others = currentTracks.filter { it.id != currentTrack?.id }.shuffled()
+                val reordered = if (currentTrack != null) listOf(currentTrack) + others else others
+                val reorderedItems = reordered.mapNotNull { toMediaItem(it) }
+                if (reorderedItems.size >= 2) {
+                    // Replace only items before and after current item so audio never hiccups!
+                    if (currentIdx + 1 < controller.mediaItemCount) {
+                        controller.removeMediaItems(currentIdx + 1, controller.mediaItemCount)
+                    }
+                    if (currentIdx > 0) {
+                        controller.removeMediaItems(0, currentIdx)
+                    }
+                    controller.addMediaItems(reorderedItems.drop(1))
+                    syncQueueOrderFromController(controller)
+                    prefetchUpcomingWindow(controller, 0)
+                }
+            } else if (unshuffledQueueBackup.isNotEmpty()) {
+                val restored = unshuffledQueueBackup
+                unshuffledQueueBackup = emptyList()
+                val restoredCurIdx = restored.indexOfFirst { it.id == currentId }
+                if (restoredCurIdx >= 0) {
+                    val beforeItems = restored.subList(0, restoredCurIdx).mapNotNull { toMediaItem(it) }
+                    val afterItems = restored.subList(restoredCurIdx + 1, restored.size).mapNotNull { toMediaItem(it) }
+                    if (currentIdx + 1 < controller.mediaItemCount) {
+                        controller.removeMediaItems(currentIdx + 1, controller.mediaItemCount)
+                    }
+                    if (currentIdx > 0) {
+                        controller.removeMediaItems(0, currentIdx)
+                    }
+                    if (beforeItems.isNotEmpty()) {
+                        controller.addMediaItems(0, beforeItems)
+                    }
+                    if (afterItems.isNotEmpty()) {
+                        controller.addMediaItems(afterItems)
+                    }
+                    syncQueueOrderFromController(controller)
+                    prefetchUpcomingWindow(controller, beforeItems.size)
+                }
+            }
+        }
         _playbackState.update { it.copy(shuffleEnabled = next) }
     }
 
@@ -853,13 +1082,7 @@ class PlaybackController(
 
                 _playbackState.update { it.copy(transitionCounter = it.transitionCounter + 1) }
 
-                val nextIdx = controller.currentMediaItemIndex + 1
-                if (nextIdx in 0 until controller.mediaItemCount) {
-                    val nextTrack = knownTracksById[controller.getMediaItemAt(nextIdx).mediaId]
-                    if (nextTrack != null) {
-                        FullStreamResolver.prefetchTracks(listOf(nextTrack), dao)
-                    }
-                }
+                prefetchUpcomingWindow(controller)
 
                 transitioningId?.let { id ->
                     playCountTracker.onTrackStarted(id, 0L)
@@ -901,6 +1124,7 @@ class PlaybackController(
                 FullStreamResolver.invalidateCachedStream(uri)
                 FullStreamResolver.invalidateCachedStream(sourceUriExtra)
                 FullStreamResolver.invalidateCachedStream(knownTrack?.sourceUri)
+                AudioPrefetchCache.evictTrack(context, mediaId)
                 if (knownTrack != null && FullStreamResolver.isShortPreviewTrack(knownTrack)) {
                     FullStreamResolver.invalidateCachedStream(FullStreamResolver.buildLegacyUpgradeUri(knownTrack))
                 }
@@ -966,7 +1190,10 @@ class PlaybackController(
     private fun computeEffectivePlayback(controller: MediaController): Pair<Boolean, Boolean> {
         val state = controller.playbackState
         val buffering = controller.playWhenReady && state == Player.STATE_BUFFERING
-        val effectivePlaying = controller.isPlaying || buffering
+        val activelyIntended = controller.playWhenReady &&
+            state != Player.STATE_ENDED &&
+            state != Player.STATE_IDLE
+        val effectivePlaying = controller.isPlaying || activelyIntended
         return effectivePlaying to buffering
     }
 
@@ -1001,7 +1228,7 @@ class PlaybackController(
                 isBuffering = buffering,
                 positionMs = resolvedPos,
                 durationMs = duration,
-                shuffleEnabled = controller.shuffleModeEnabled,
+                shuffleEnabled = it.shuffleEnabled,
                 repeatMode = controller.repeatMode,
             )
         }

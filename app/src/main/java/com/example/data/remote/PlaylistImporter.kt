@@ -407,37 +407,64 @@ class PlaylistImporter(
             .firstNotNullOfOrNull { key ->
                 root[key]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
             }
-        val tracksData = (root["tracks"] as? JsonObject)?.get("data") as? JsonArray ?: return null
-        val queries = tracksData.take(MAX_IMPORT_TRACKS).mapNotNull { el ->
-            val obj = el as? JsonObject ?: return@mapNotNull null
-            val trackTitle = obj["title"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
-            if (trackTitle.isBlank()) return@mapNotNull null
-            val contributors = (obj["contributors"] as? JsonArray)?.mapNotNull { c ->
-                (c as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotBlank() }
-            }.orEmpty()
-            val primaryArtist = (obj["artist"] as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
-            val artist = if (contributors.isNotEmpty()) contributors.distinct().joinToString(", ") else primaryArtist
-            val sec = obj["duration"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 180L
-            val isExplicitFlag = obj["explicit_lyrics"]?.jsonPrimitive?.booleanOrNull == true
-            val albumObj = obj["album"] as? JsonObject
-            val album = if (kind == "album") {
-                title
-            } else {
-                albumObj?.get("title")?.jsonPrimitive?.contentOrNull?.trim()
+        val initialTracks = (root["tracks"] as? JsonObject)?.get("data") as? JsonArray
+        val queries = mutableListOf<ImportedTrackQuery>()
+
+        fun appendDeezerArray(arr: JsonArray?) {
+            if (arr == null) return
+            for (el in arr) {
+                if (queries.size >= MAX_IMPORT_TRACKS) break
+                val obj = el as? JsonObject ?: continue
+                val trackTitle = obj["title"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+                if (trackTitle.isBlank()) continue
+                val contributors = (obj["contributors"] as? JsonArray)?.mapNotNull { c ->
+                    (c as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotBlank() }
+                }.orEmpty()
+                val primaryArtist = (obj["artist"] as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+                val artist = if (contributors.isNotEmpty()) contributors.distinct().joinToString(", ") else primaryArtist
+                val sec = obj["duration"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 180L
+                val isExplicitFlag = obj["explicit_lyrics"]?.jsonPrimitive?.booleanOrNull == true
+                val albumObj = obj["album"] as? JsonObject
+                val album = if (kind == "album") {
+                    title
+                } else {
+                    albumObj?.get("title")?.jsonPrimitive?.contentOrNull?.trim()
+                }
+                val trackCover = listOf("cover_xl", "cover_big", "cover_medium")
+                    .firstNotNullOfOrNull { key ->
+                        albumObj?.get(key)?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                    } ?: coverUrl
+                queries += ImportedTrackQuery(
+                    title = trackTitle,
+                    artist = artist,
+                    durationMs = (sec.coerceAtLeast(30L) * 1000L),
+                    albumTitle = album,
+                    coverArtUrl = trackCover,
+                    isExplicit = isExplicitFlag,
+                )
             }
-            val trackCover = listOf("cover_xl", "cover_big", "cover_medium")
-                .firstNotNullOfOrNull { key ->
-                    albumObj?.get(key)?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
-                } ?: coverUrl
-            ImportedTrackQuery(
-                title = trackTitle,
-                artist = artist,
-                durationMs = (sec.coerceAtLeast(30L) * 1000L),
-                albumTitle = album,
-                coverArtUrl = trackCover,
-                isExplicit = isExplicitFlag,
-            )
         }
+
+        // Paginate Deezer tracks endpoint when playlist/album has more tracks than the initial payload
+        val totalTracks = root["nb_tracks"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0
+        if (totalTracks > (initialTracks?.size ?: 0)) {
+            var offset = 0
+            val pageLimit = 100
+            while (queries.size < MAX_IMPORT_TRACKS) {
+                val pageJson = fetchJsonText("https://api.deezer.com/$kind/$id/tracks?index=$offset&limit=$pageLimit")
+                    ?: break
+                val pageRoot = runCatching { jsonParser.parseToJsonElement(pageJson).jsonObject }.getOrNull() ?: break
+                val dataArr = pageRoot["data"] as? JsonArray ?: break
+                if (dataArr.isEmpty()) break
+                appendDeezerArray(dataArr)
+                if (dataArr.size < pageLimit || pageRoot["next"]?.jsonPrimitive?.contentOrNull == null) break
+                offset += pageLimit
+            }
+        }
+        if (queries.isEmpty()) {
+            appendDeezerArray(initialTracks)
+        }
+        if (queries.isEmpty()) return null
         return ParsedPlaylistPayload(
             playlistName = title,
             sourceLabel = "Deezer",
@@ -452,7 +479,7 @@ class PlaylistImporter(
     ): PlaylistImportResult {
         val finalName = overrideName ?: payload.playlistName.ifBlank { "Импорт" }
         val resolvedTracks = mutableListOf<TrackEntity>()
-        resolvedTracks += payload.directTracks
+        resolvedTracks += payload.directTracks.take(MAX_IMPORT_TRACKS)
 
         if (payload.queries.isNotEmpty()) {
             val limitedQueries = payload.queries.take(MAX_IMPORT_TRACKS)
@@ -706,8 +733,8 @@ class PlaylistImporter(
     }
 
     companion object {
-        const val MAX_PLAYLIST_FILE_BYTES = 5 * 1024 * 1024
-        const val MAX_IMPORT_TRACKS = 160
+        const val MAX_PLAYLIST_FILE_BYTES = 12 * 1024 * 1024
+        const val MAX_IMPORT_TRACKS = 500
         const val EAGER_IMPORT_RESOLUTION_LIMIT = 10
         const val IMPORT_SEMAPHORE_CONCURRENCY = 12
         const val IMPORT_PER_TRACK_TIMEOUT_MS = 4500L

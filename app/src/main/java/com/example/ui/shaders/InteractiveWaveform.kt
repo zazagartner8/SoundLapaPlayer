@@ -30,6 +30,8 @@ import com.example.data.local.TrackEntity
 import com.example.data.remote.FullStreamResolver
 import java.io.File
 
+import com.example.ui.theme.resolveCoverImageData
+
 private val PlaceholderTrackBg = Color(0xFF1A1624)
 
 val LocalDataSaverEnabled = staticCompositionLocalOf { false }
@@ -54,39 +56,35 @@ fun TrackCoverArtwork(
         }
     }
     var useFallbackUrl by remember(upgradedCoverPath) { mutableStateOf(false) }
-    val activeCoverPath = remember(upgradedCoverPath, rawCoverPath, useFallbackUrl) {
-        if (useFallbackUrl) {
-            FullStreamResolver.fallbackArtworkUrl(upgradedCoverPath) ?: rawCoverPath
-        } else {
-            upgradedCoverPath
-        }
-    }
+    var imageFailed by remember(rawCoverPath) { mutableStateOf(false) }
     val shape = remember(cornerRadius) { RoundedCornerShape(cornerRadius) }
 
-    val imageModel = remember(activeCoverPath, effectiveSizePx, crossfade) {
-        if (activeCoverPath.isNullOrBlank()) {
-            null
-        } else {
-            val isRemoteUrl = activeCoverPath.startsWith("http://") || activeCoverPath.startsWith("https://")
-            val data: Any = if (isRemoteUrl) activeCoverPath else File(activeCoverPath)
-            ImageRequest.Builder(context)
-                .data(data)
-                .size(effectiveSizePx)
-                .precision(if (effectiveSizePx >= 480) Precision.EXACT else Precision.INEXACT)
-                .allowHardware(true)
-                .crossfade(if (crossfade) 160 else 0)
-                .listener(
-                    onError = { _, _ ->
-                        if (!useFallbackUrl && FullStreamResolver.fallbackArtworkUrl(upgradedCoverPath) != null) {
-                            useFallbackUrl = true
-                        }
-                    },
-                )
-                .build()
-        }
+    val resolvedData = remember(rawCoverPath, dataSaver, useFallbackUrl, imageFailed) {
+        if (imageFailed) null
+        else resolveCoverImageData(rawCoverPath, dataSaver = dataSaver, useFallbackUrl = useFallbackUrl)
     }
 
-    if (imageModel != null) {
+    val imageModel = remember(resolvedData, effectiveSizePx, crossfade) {
+        val data = resolvedData ?: return@remember null
+        ImageRequest.Builder(context)
+            .data(data)
+            .size(effectiveSizePx)
+            .precision(if (effectiveSizePx >= 480) Precision.EXACT else Precision.INEXACT)
+            .allowHardware(true)
+            .crossfade(if (crossfade) 150 else 0)
+            .listener(
+                onError = { _, _ ->
+                    if (!useFallbackUrl && FullStreamResolver.fallbackArtworkUrl(upgradedCoverPath) != null) {
+                        useFallbackUrl = true
+                    } else {
+                        imageFailed = true
+                    }
+                },
+            )
+            .build()
+    }
+
+    if (imageModel != null && !imageFailed) {
         AsyncImage(
             model = imageModel,
             contentDescription = track.title,

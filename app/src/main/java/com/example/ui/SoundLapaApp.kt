@@ -106,7 +106,9 @@ import com.example.ui.components.LocalHapticsConfig
 import com.example.ui.components.NetworkReconnectedBanner
 import com.example.ui.components.OfflineNetworkErrorBanner
 import com.example.ui.components.QueueBottomSheet
+import com.example.ui.components.StartupBootStage
 import com.example.ui.components.StartupLoadingOverlay
+import com.example.ui.components.StartupProgressState
 import com.example.ui.components.SystemUtilityTopBar
 import com.example.ui.components.TrackOptionsBottomSheet
 import com.example.ui.components.UploadTracksBottomSheet
@@ -118,9 +120,11 @@ import com.example.ui.screens.AboutScreen
 import com.example.ui.screens.ArtistProfileScreen
 import com.example.ui.screens.BannedAccountScreen
 import com.example.ui.screens.ChangelogHistoryScreen
+import com.example.ui.screens.CollectionFeedScreen
 import com.example.ui.screens.DeveloperScreen
 import com.example.ui.screens.EasterEggScreen
 import com.example.ui.screens.GoogleAuthScreen
+import com.example.ui.screens.HomeCollectionType
 import com.example.ui.screens.LibraryScreen
 import com.example.ui.screens.NowPlayingSheet
 import com.example.ui.screens.SearchScreen
@@ -132,6 +136,8 @@ import com.example.ui.shaders.LocalBatterySaverEnabled
 import com.example.ui.shaders.LocalDataSaverEnabled
 import com.example.ui.shaders.LocalIsMainUiVisible
 import com.example.ui.theme.LiquidRose
+import com.example.ui.theme.LocalReducedMotion
+import com.example.ui.theme.SoundLapMotion
 import com.example.ui.theme.SoundLapaTheme
 import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
@@ -171,7 +177,10 @@ private fun tabIndexForRoute(route: String?): Int = when {
 }
 
 @Composable
-fun SoundLapaApp() {
+fun SoundLapaApp(
+    pendingAdminTabDeepLink: String? = null,
+    onConsumeAdminTabDeepLink: () -> Unit = {},
+) {
     val context = LocalContext.current
     val app = context.applicationContext as SoundLapaApplication
     val preferences = remember(app) { app.preferences }
@@ -206,6 +215,7 @@ fun SoundLapaApp() {
             CompositionLocalProvider(
                 LocalAppStrings provides preAuthStrings,
                 LocalDataSaverEnabled provides preAuthSettings.dataSaverEnabled,
+                LocalReducedMotion provides preAuthSettings.batterySaverEnabled,
                 LocalBatterySaverEnabled provides preAuthSettings.batterySaverEnabled,
                 LocalHapticsConfig provides HapticConfig(
                     enabled = preAuthSettings.hapticsEnabled,
@@ -259,7 +269,11 @@ fun SoundLapaApp() {
                 }
             },
         )
-        SoundLapaAuthenticatedShell(viewModel = viewModel)
+        SoundLapaAuthenticatedShell(
+            viewModel = viewModel,
+            pendingAdminTabDeepLink = pendingAdminTabDeepLink,
+            onConsumeAdminTabDeepLink = onConsumeAdminTabDeepLink,
+        )
     }
 }
 
@@ -267,6 +281,8 @@ fun SoundLapaApp() {
 @Composable
 private fun SoundLapaAuthenticatedShell(
     viewModel: SoundLapaViewModel,
+    pendingAdminTabDeepLink: String? = null,
+    onConsumeAdminTabDeepLink: () -> Unit = {},
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val homeState by viewModel.homeUiState.collectAsStateWithLifecycle()
@@ -279,6 +295,7 @@ private fun SoundLapaAuthenticatedShell(
     val requestedLibrarySection by viewModel.requestedLibrarySection.collectAsStateWithLifecycle()
     val showReconnectedBanner by viewModel.showReconnectedBanner.collectAsStateWithLifecycle()
     val statsBackupState by viewModel.statsBackupState.collectAsStateWithLifecycle()
+    val isInitialFeedSettled by viewModel.isInitialFeedSettled.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
     val app = context.applicationContext as SoundLapaApplication
@@ -287,11 +304,14 @@ private fun SoundLapaAuthenticatedShell(
 
     var showSettingsSheet by remember { mutableStateOf(false) }
     var showDeveloperScreen by remember { mutableStateOf(false) }
+    var requestedAdminTab by remember { mutableStateOf<String?>(null) }
     var showAboutScreen by remember { mutableStateOf(false) }
     var showSocialScreen by remember { mutableStateOf(false) }
     var socialStandaloneProfileOnly by remember { mutableStateOf(false) }
     var showChangelogHistory by remember { mutableStateOf(false) }
     var showEasterEggScreen by remember { mutableStateOf(false) }
+    var openedHomeCollection by remember { mutableStateOf<HomeCollectionType?>(null) }
+    var lastOpenedHomeCollection by remember { mutableStateOf(HomeCollectionType.TRENDING) }
     var showImportPlaylistDialog by remember { mutableStateOf(false) }
     var isPlaylistDetailOpen by remember { mutableStateOf(false) }
     var pendingScrollToLyrics by remember { mutableStateOf(false) }
@@ -308,8 +328,7 @@ private fun SoundLapaAuthenticatedShell(
     var isPlayerDragging by remember { mutableStateOf(false) }
 
     var isStartupReady by rememberSaveable { mutableStateOf(false) }
-    var loadedCoversCount by remember { mutableIntStateOf(0) }
-    var totalCoversCount by remember { mutableIntStateOf(0) }
+    var startupProgress by remember { mutableStateOf(StartupProgressState()) }
     val latestUiState by rememberUpdatedState(state)
     val latestHomeState by rememberUpdatedState(homeState)
 
@@ -329,35 +348,68 @@ private fun SoundLapaAuthenticatedShell(
 
     LaunchedEffect(isStartupReady) {
         if (isStartupReady) return@LaunchedEffect
-        val startMs = System.currentTimeMillis()
-        withTimeoutOrNull(6000L) {
-            viewModel.homeUiState.first {
-                it.trendingCarousel.isNotEmpty() || it.quickPickRows.isNotEmpty() || it.filteredTracks.isNotEmpty()
+
+        // Stage 1 (0% -> 28%): Real local Room DB + preferences + PlaybackController hydration
+        startupProgress = StartupProgressState(
+            progress = 0.14f,
+            stage = StartupBootStage.INITIALIZING,
+        )
+        withTimeoutOrNull(2500L) {
+            viewModel.isLocalLibraryHydrated.first { it }
+        }
+
+        // Stage 2 (28% -> 68%): Real initial feed settlement (blocks until cold-start trending/recs are ready)
+        startupProgress = StartupProgressState(
+            progress = 0.34f,
+            stage = StartupBootStage.HYDRATING_FEED,
+        )
+        withTimeoutOrNull(9000L) {
+            viewModel.isInitialFeedSettled.first { it }
+        }
+        startupProgress = StartupProgressState(
+            progress = 0.52f,
+            stage = StartupBootStage.HYDRATING_FEED,
+        )
+        val hasContentNow = latestHomeState.trendingCarousel.isNotEmpty() ||
+            latestHomeState.quickPickRows.isNotEmpty() ||
+            latestHomeState.filteredTracks.isNotEmpty()
+        if (!hasContentNow && latestUiState.isOnline) {
+            withTimeoutOrNull(3500L) {
+                viewModel.homeUiState.first {
+                    it.trendingCarousel.isNotEmpty() ||
+                        it.quickPickRows.isNotEmpty() ||
+                        it.filteredTracks.isNotEmpty() ||
+                        !it.isRefreshingTrending
+                }
             }
         }
+
+        // Stage 3 (68% -> 98%): Pre-warm visible home cover art with tight 1.6s budget
         val snapshot = latestUiState
         val homeSnapshot = latestHomeState
         val coverUrls = buildList {
-            homeSnapshot.trendingCarousel.forEach { t ->
+            homeSnapshot.quickPickRows.flatten().take(4).forEach { t ->
                 t.coverArtPath?.takeIf { it.isNotBlank() }?.let { add(it) }
             }
-            homeSnapshot.quickPickRows.flatten().forEach { t ->
+            homeSnapshot.trendingCarousel.take(4).forEach { t ->
                 t.coverArtPath?.takeIf { it.isNotBlank() }?.let { add(it) }
             }
-            homeSnapshot.recommendedTracks.forEach { t ->
+            homeSnapshot.recommendedTracks.take(2).forEach { t ->
                 t.coverArtPath?.takeIf { it.isNotBlank() }?.let { add(it) }
             }
-            snapshot.tracks.forEach { t ->
-                t.coverArtPath?.takeIf { it.isNotBlank() }?.let { add(it) }
-            }
-            snapshot.cloudSync.photoUrl?.takeIf { it.isNotBlank() }?.let { add(it) }
-        }.distinct().take(16)
+        }.distinct().take(8)
 
-        totalCoversCount = coverUrls.size
+        startupProgress = StartupProgressState(
+            progress = 0.68f,
+            stage = StartupBootStage.WARMING_COVERS,
+            loadedCovers = 0,
+            totalCovers = coverUrls.size,
+        )
+
         if (snapshot.isOnline && coverUrls.isNotEmpty()) {
             val imageLoader = context.imageLoader
             val counter = AtomicInteger(0)
-            withTimeoutOrNull(6500L) {
+            withTimeoutOrNull(1600L) {
                 coroutineScope {
                     coverUrls.map { url ->
                         async {
@@ -365,22 +417,32 @@ private fun SoundLapaAuthenticatedShell(
                                 imageLoader.execute(
                                     ImageRequest.Builder(context)
                                         .data(url)
-                                        .size(360)
+                                        .size(256)
                                         .build(),
                                 )
                             }
-                            loadedCoversCount = counter.incrementAndGet()
+                            val done = counter.incrementAndGet()
+                            val fraction = 0.68f + 0.30f * (done.toFloat() / coverUrls.size.toFloat())
+                            startupProgress = StartupProgressState(
+                                progress = fraction.coerceIn(0.68f, 0.98f),
+                                stage = StartupBootStage.WARMING_COVERS,
+                                loadedCovers = done,
+                                totalCovers = coverUrls.size,
+                            )
                         }
                     }.awaitAll()
                 }
             }
-        } else {
-            loadedCoversCount = coverUrls.size
         }
-        val elapsed = System.currentTimeMillis() - startMs
-        if (elapsed < 650L) {
-            delay(650L - elapsed)
-        }
+
+        // Stage 4 (100%): Ready
+        startupProgress = StartupProgressState(
+            progress = 1f,
+            stage = StartupBootStage.READY,
+            loadedCovers = coverUrls.size,
+            totalCovers = coverUrls.size,
+        )
+        delay(100L)
         isStartupReady = true
     }
 
@@ -398,6 +460,26 @@ private fun SoundLapaAuthenticatedShell(
             if (!granted) {
                 askedNotificationPermission = true
                 notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+    }
+
+    LaunchedEffect(state.cloudSync.canOpenAdminPanel, isStartupReady) {
+        if (isStartupReady && state.cloudSync.canOpenAdminPanel) {
+            ensureNotificationPermissionOnce()
+        }
+    }
+
+    LaunchedEffect(pendingAdminTabDeepLink, state.cloudSync.canOpenAdminPanel) {
+        if (!pendingAdminTabDeepLink.isNullOrBlank()) {
+            if (state.cloudSync.canOpenAdminPanel) {
+                requestedAdminTab = pendingAdminTabDeepLink
+                showDeveloperScreen = true
+                if (state.developerMode.isUnlocked) {
+                    viewModel.refreshDeveloperDashboard()
+                    viewModel.refreshAvatarModerationRequests()
+                }
+                onConsumeAdminTabDeepLink()
             }
         }
     }
@@ -445,6 +527,7 @@ private fun SoundLapaAuthenticatedShell(
             LocalExplicitTrackIds provides state.explicitTrackIds,
             LocalDataSaverEnabled provides state.settings.dataSaverEnabled,
             LocalBatterySaverEnabled provides state.settings.batterySaverEnabled,
+            LocalReducedMotion provides state.settings.batterySaverEnabled,
             LocalHapticsConfig provides HapticConfig(
                 enabled = state.settings.hapticsEnabled,
                 intensityPercent = state.settings.hapticIntensity,
@@ -512,6 +595,9 @@ private fun SoundLapaAuthenticatedShell(
                 if (artistProfile.isVisible) {
                     viewModel.closeArtistProfile()
                 }
+                if (openedHomeCollection != null) {
+                    openedHomeCollection = null
+                }
                 if (showSocialScreen) {
                     viewModel.clearInspectedPublicProfile()
                     showSocialScreen = false
@@ -533,6 +619,7 @@ private fun SoundLapaAuthenticatedShell(
 
             fun openDownloadedTracksOffline() {
                 viewModel.setPlayerExpanded(false)
+                openedHomeCollection = null
                 showDeveloperScreen = false
                 showSettingsSheet = false
                 showAboutScreen = false
@@ -644,6 +731,7 @@ private fun SoundLapaAuthenticatedShell(
                             modifier = Modifier.fillMaxSize(),
                         ) {
                             val showTopBar = !artistProfile.isVisible &&
+                                openedHomeCollection == null &&
                                 !isPlaylistDetailOpen &&
                                 !showSocialScreen &&
                                 !showChangelogHistory
@@ -774,9 +862,18 @@ private fun SoundLapaAuthenticatedShell(
                                                 contextTitle = appStrings.recommendedForYou,
                                             )
                                         },
+                                        onOpenTrendingAll = {
+                                            lastOpenedHomeCollection = HomeCollectionType.TRENDING
+                                            openedHomeCollection = HomeCollectionType.TRENDING
+                                        },
+                                        onOpenRecommendedAll = {
+                                            lastOpenedHomeCollection = HomeCollectionType.RECOMMENDED
+                                            openedHomeCollection = HomeCollectionType.RECOMMENDED
+                                        },
                                         onToggleLike = viewModel::toggleLike,
                                         onOpenTrackOptions = { optionsMenuTarget = TrackOptionsMenuTarget(it) },
                                         bottomContentPadding = bottomOverlaySpace,
+                                        isInitialFeedSettled = isInitialFeedSettled,
                                     )
                                 }
 
@@ -892,12 +989,12 @@ private fun SoundLapaAuthenticatedShell(
                             visible = artistProfile.isVisible,
                             enter = slideInHorizontally(
                                 initialOffsetX = { it },
-                                animationSpec = tween(310, easing = SilkyEaseOut),
-                            ) + fadeIn(animationSpec = tween(200, easing = FastOutSlowInEasing)),
+                                animationSpec = SoundLapMotion.spatialGentle(),
+                            ) + fadeIn(animationSpec = SoundLapMotion.effectsFast()),
                             exit = slideOutHorizontally(
                                 targetOffsetX = { it },
-                                animationSpec = tween(260, easing = SilkyEaseOut),
-                            ) + fadeOut(animationSpec = tween(180, easing = FastOutSlowInEasing)),
+                                animationSpec = SoundLapMotion.spatialFast(),
+                            ) + fadeOut(animationSpec = SoundLapMotion.effectsFast()),
                         ) {
                             val isSubscribed = remember(state.subscribedArtists, artistProfile.artistName) {
                                 state.subscribedArtists.any {
@@ -948,13 +1045,80 @@ private fun SoundLapaAuthenticatedShell(
                             )
                         }
 
+                        androidx.compose.animation.AnimatedVisibility(
+                            visible = openedHomeCollection != null && !artistProfile.isVisible,
+                            enter = slideInHorizontally(
+                                initialOffsetX = { it },
+                                animationSpec = SoundLapMotion.spatialGentle(),
+                            ) + fadeIn(animationSpec = SoundLapMotion.effectsFast()),
+                            exit = slideOutHorizontally(
+                                targetOffsetX = { it },
+                                animationSpec = SoundLapMotion.spatialFast(),
+                            ) + fadeOut(animationSpec = SoundLapMotion.effectsFast()),
+                        ) {
+                            val activeType = openedHomeCollection ?: lastOpenedHomeCollection
+                            val collectionTracks = when (activeType) {
+                                HomeCollectionType.TRENDING ->
+                                    homeState.trendingAllTracks.ifEmpty { homeState.trendingCarousel }
+                                HomeCollectionType.RECOMMENDED ->
+                                    homeState.recommendedAllTracks.ifEmpty { homeState.recommendedTracks }
+                            }
+                            val collectionTitle = when (activeType) {
+                                HomeCollectionType.TRENDING -> appStrings.trending
+                                HomeCollectionType.RECOMMENDED -> appStrings.recommendedForYou
+                            }
+                            CollectionFeedScreen(
+                                collectionType = activeType,
+                                tracks = collectionTracks,
+                                currentTrackId = state.playback.currentTrackId,
+                                isPlaying = state.playback.isPlaying,
+                                bottomContentPadding = bottomOverlaySpace,
+                                onBack = { openedHomeCollection = null },
+                                onPlayAll = {
+                                    val first = collectionTracks.firstOrNull() ?: return@CollectionFeedScreen
+                                    ensureNotificationPermissionOnce()
+                                    viewModel.playOrToggleTrack(
+                                        track = first,
+                                        customQueue = collectionTracks,
+                                        contextTitle = collectionTitle,
+                                    )
+                                },
+                                onShufflePlay = {
+                                    if (collectionTracks.isEmpty()) return@CollectionFeedScreen
+                                    val shuffled = collectionTracks.shuffled()
+                                    ensureNotificationPermissionOnce()
+                                    viewModel.playOrToggleTrack(
+                                        track = shuffled.first(),
+                                        customQueue = shuffled,
+                                        contextTitle = collectionTitle,
+                                    )
+                                },
+                                onPlayTrack = { track ->
+                                    ensureNotificationPermissionOnce()
+                                    viewModel.playOrToggleTrack(
+                                        track = track,
+                                        customQueue = collectionTracks,
+                                        contextTitle = collectionTitle,
+                                    )
+                                },
+                                onToggleLike = viewModel::toggleLike,
+                                onOpenTrackOptions = { optionsMenuTarget = TrackOptionsMenuTarget(it) },
+                            )
+                        }
+
                         Column(
                             modifier = Modifier.align(Alignment.BottomCenter),
                         ) {
                             AnimatedVisibility(
                                 visible = !playerTransition.targetState && !isMainScreenCovered && state.currentTrack != null,
-                                enter = fadeIn(tween(220)),
-                                exit = fadeOut(tween(180)),
+                                enter = slideInVertically(
+                                    initialOffsetY = { it / 2 },
+                                    animationSpec = SoundLapMotion.spatialDefault(),
+                                ) + fadeIn(animationSpec = SoundLapMotion.effectsFast()),
+                                exit = slideOutVertically(
+                                    targetOffsetY = { it / 2 },
+                                    animationSpec = SoundLapMotion.spatialFast(),
+                                ) + fadeOut(animationSpec = SoundLapMotion.effectsFast()),
                             ) {
                                 FloatingMiniPlayer(
                                     track = state.currentTrack,
@@ -1080,17 +1244,17 @@ private fun SoundLapaAuthenticatedShell(
                 }
             }
 
-            // Full-Screen Settings Page with horizontal slide transition
+            // Full-Screen Settings Page with Material Expressive spring slide
             AnimatedVisibility(
                 visibleState = settingsTransition,
                 enter = slideInHorizontally(
                     initialOffsetX = { it },
-                    animationSpec = tween(310, easing = SilkyEaseOut),
-                ) + fadeIn(animationSpec = tween(200, easing = FastOutSlowInEasing)),
+                    animationSpec = SoundLapMotion.spatialGentle(),
+                ) + fadeIn(animationSpec = SoundLapMotion.effectsFast()),
                 exit = slideOutHorizontally(
                     targetOffsetX = { it },
-                    animationSpec = tween(260, easing = SilkyEaseOut),
-                ) + fadeOut(animationSpec = tween(180, easing = FastOutSlowInEasing)),
+                    animationSpec = SoundLapMotion.spatialFast(),
+                ) + fadeOut(animationSpec = SoundLapMotion.effectsFast()),
             ) {
                 val appPrefs = app.preferences
                 val activityContext = remember(context) { context.findActivity() ?: context }
@@ -1177,6 +1341,7 @@ private fun SoundLapaAuthenticatedShell(
                     isSigningInGoogleFromGuest = isSigningInGoogleFromGuest,
                     guestGoogleSignInError = guestGoogleSignInError,
                     onUpdateProfile = viewModel::updateAccountProfile,
+                    onCancelOwnAvatarRequest = viewModel::cancelOwnAvatarModerationRequest,
                     onClearProfileStatus = viewModel::clearProfileStatusMessage,
                     onOpenFriendsScreen = {
                         socialStandaloneProfileOnly = false
@@ -1187,6 +1352,7 @@ private fun SoundLapaAuthenticatedShell(
                     onOpenDeveloperScreen = {
                         if (state.developerMode.isUnlocked) {
                             viewModel.refreshDeveloperDashboard()
+                            viewModel.refreshLocalCacheStats()
                         }
                         showDeveloperScreen = true
                     },
@@ -1196,46 +1362,64 @@ private fun SoundLapaAuthenticatedShell(
                 )
             }
 
-            // Dedicated Full-Screen Developer Page (Fingerprint / Password + Cloud Storage Usage + Reports)
+            // Dedicated Full-Screen Developer & Admins Page (Biometrics + Users + Moderators + Reports + Storage)
             AnimatedVisibility(
                 visibleState = developerTransition,
                 enter = slideInHorizontally(
                     initialOffsetX = { it },
-                    animationSpec = tween(310, easing = SilkyEaseOut),
-                ) + fadeIn(animationSpec = tween(200, easing = FastOutSlowInEasing)),
+                    animationSpec = SoundLapMotion.spatialGentle(),
+                ) + fadeIn(animationSpec = SoundLapMotion.effectsFast()),
                 exit = slideOutHorizontally(
                     targetOffsetX = { it },
-                    animationSpec = tween(260, easing = SilkyEaseOut),
-                ) + fadeOut(animationSpec = tween(180, easing = FastOutSlowInEasing)),
+                    animationSpec = SoundLapMotion.spatialFast(),
+                ) + fadeOut(animationSpec = SoundLapMotion.effectsFast()),
             ) {
                 DeveloperScreen(
                     state = state,
+                    initialTab = requestedAdminTab,
+                    onConsumeInitialTab = {
+                        requestedAdminTab = null
+                        onConsumeAdminTabDeepLink()
+                    },
                     onClose = { showDeveloperScreen = false },
-                    onUnlockWithBiometrics = viewModel::unlockDeveloperWithBiometrics,
+                    onUnlockDeveloper = viewModel::unlockDeveloperAreaWithBiometrics,
+                    onUnlockModerators = viewModel::unlockModeratorAreaWithBiometrics,
                     onLock = viewModel::lockDeveloperSection,
                     onRefreshDashboard = viewModel::refreshDeveloperDashboard,
                     onRefreshUsers = viewModel::refreshDeveloperUsers,
+                    onRefreshAvatarRequests = viewModel::refreshAvatarModerationRequests,
+                    onApproveAvatarRequest = viewModel::approveAvatarModerationRequest,
+                    onRejectAvatarRequest = viewModel::rejectAvatarModerationRequest,
                     onSelectUser = viewModel::inspectDeveloperUser,
                     onCloseUserDetails = viewModel::closeDeveloperUserDetails,
+                    onPlayUserTrack = { overview ->
+                        ensureNotificationPermissionOnce()
+                        viewModel.playDeveloperUserCurrentTrack(overview)
+                    },
                     onBanUser = viewModel::banDeveloperUser,
                     onUnbanUser = viewModel::unbanDeveloperUser,
                     onDeleteUserFromServer = viewModel::deleteDeveloperUserFromServer,
                     onClearUserActionMessage = viewModel::clearDeveloperUserActionMessage,
+                    onUpdateReportStatus = viewModel::updateDeveloperBugReportStatus,
                     onDeleteReport = viewModel::deleteDeveloperBugReport,
+                    onRefreshLocalCacheStats = viewModel::refreshLocalCacheStats,
+                    onClearAudioPrefetchCache = viewModel::clearAudioPrefetchCacheOnly,
+                    onClearImageCoverCache = viewModel::clearImageCoverCacheOnly,
+                    onClearAllLocalCaches = viewModel::clearAllLocalCachesFromDev,
                 )
             }
 
-            // Full-Screen About App Page with horizontal slide transition
+            // Full-Screen About App Page with Material Expressive spring slide
             AnimatedVisibility(
                 visibleState = aboutTransition,
                 enter = slideInHorizontally(
                     initialOffsetX = { it },
-                    animationSpec = tween(310, easing = SilkyEaseOut),
-                ) + fadeIn(animationSpec = tween(200, easing = FastOutSlowInEasing)),
+                    animationSpec = SoundLapMotion.spatialGentle(),
+                ) + fadeIn(animationSpec = SoundLapMotion.effectsFast()),
                 exit = slideOutHorizontally(
                     targetOffsetX = { it },
-                    animationSpec = tween(260, easing = SilkyEaseOut),
-                ) + fadeOut(animationSpec = tween(180, easing = FastOutSlowInEasing)),
+                    animationSpec = SoundLapMotion.spatialFast(),
+                ) + fadeOut(animationSpec = SoundLapMotion.effectsFast()),
             ) {
                 AboutScreen(
                     onClose = { showAboutScreen = false },
@@ -1256,12 +1440,12 @@ private fun SoundLapaAuthenticatedShell(
                 visibleState = socialTransition,
                 enter = slideInHorizontally(
                     initialOffsetX = { it },
-                    animationSpec = tween(310, easing = SilkyEaseOut),
-                ) + fadeIn(animationSpec = tween(200, easing = FastOutSlowInEasing)),
+                    animationSpec = SoundLapMotion.spatialGentle(),
+                ) + fadeIn(animationSpec = SoundLapMotion.effectsFast()),
                 exit = slideOutHorizontally(
                     targetOffsetX = { it },
-                    animationSpec = tween(260, easing = SilkyEaseOut),
-                ) + fadeOut(animationSpec = tween(180, easing = FastOutSlowInEasing)),
+                    animationSpec = SoundLapMotion.spatialFast(),
+                ) + fadeOut(animationSpec = SoundLapMotion.effectsFast()),
             ) {
                 UserProfileAndFriendsScreen(
                     isSignedIn = !state.cloudSync.isGuest,
@@ -1332,12 +1516,12 @@ private fun SoundLapaAuthenticatedShell(
                 visibleState = changelogTransition,
                 enter = slideInHorizontally(
                     initialOffsetX = { it },
-                    animationSpec = tween(310, easing = SilkyEaseOut),
-                ) + fadeIn(animationSpec = tween(200, easing = FastOutSlowInEasing)),
+                    animationSpec = SoundLapMotion.spatialGentle(),
+                ) + fadeIn(animationSpec = SoundLapMotion.effectsFast()),
                 exit = slideOutHorizontally(
                     targetOffsetX = { it },
-                    animationSpec = tween(260, easing = SilkyEaseOut),
-                ) + fadeOut(animationSpec = tween(180, easing = FastOutSlowInEasing)),
+                    animationSpec = SoundLapMotion.spatialFast(),
+                ) + fadeOut(animationSpec = SoundLapMotion.effectsFast()),
             ) {
                 ChangelogHistoryScreen(
                     accent = MaterialTheme.colorScheme.primary,
@@ -1350,12 +1534,12 @@ private fun SoundLapaAuthenticatedShell(
 
             AnimatedVisibility(
                 visible = !isStartupReady,
-                enter = fadeIn(animationSpec = tween(120)),
-                exit = fadeOut(animationSpec = tween(380, easing = FastOutSlowInEasing)),
+                enter = fadeIn(animationSpec = tween(100)),
+                exit = fadeOut(animationSpec = SoundLapMotion.effectsDefault()) +
+                    scaleOut(targetScale = 1.04f, animationSpec = SoundLapMotion.spatialFast()),
             ) {
                 StartupLoadingOverlay(
-                    loadedCoversCount = loadedCoversCount,
-                    totalCoversCount = totalCoversCount,
+                    state = startupProgress,
                 )
             }
 
@@ -1363,12 +1547,12 @@ private fun SoundLapaAuthenticatedShell(
                 visibleState = easterEggTransition,
                 enter = slideInHorizontally(
                     initialOffsetX = { it },
-                    animationSpec = tween(310, easing = SilkyEaseOut),
-                ) + fadeIn(animationSpec = tween(200, easing = FastOutSlowInEasing)),
+                    animationSpec = SoundLapMotion.spatialGentle(),
+                ) + fadeIn(animationSpec = SoundLapMotion.effectsFast()),
                 exit = slideOutHorizontally(
                     targetOffsetX = { it },
-                    animationSpec = tween(260, easing = SilkyEaseOut),
-                ) + fadeOut(animationSpec = tween(180, easing = FastOutSlowInEasing)),
+                    animationSpec = SoundLapMotion.spatialFast(),
+                ) + fadeOut(animationSpec = SoundLapMotion.effectsFast()),
             ) {
                 EasterEggScreen(
                     accent = MaterialTheme.colorScheme.primary,
@@ -1380,12 +1564,12 @@ private fun SoundLapaAuthenticatedShell(
                 visible = showReconnectedBanner,
                 enter = slideInVertically(
                     initialOffsetY = { -it },
-                    animationSpec = tween(280, easing = SilkyEaseOut),
-                ) + fadeIn(animationSpec = tween(200)),
+                    animationSpec = SoundLapMotion.spatialBouncy(),
+                ) + fadeIn(animationSpec = SoundLapMotion.effectsFast()),
                 exit = slideOutVertically(
                     targetOffsetY = { -it },
-                    animationSpec = tween(240, easing = FastOutSlowInEasing),
-                ) + fadeOut(animationSpec = tween(180)),
+                    animationSpec = SoundLapMotion.spatialFast(),
+                ) + fadeOut(animationSpec = SoundLapMotion.effectsFast()),
                 modifier = Modifier
                     .align(Alignment.TopCenter)
                     .windowInsetsPadding(WindowInsets.statusBars)
@@ -1614,6 +1798,9 @@ private fun SoundLapaAuthenticatedShell(
                         contextTitle = state.playback.playbackContextTitle ?: appStrings.queueSheetTitle,
                     )
                 },
+                onRemoveFromQueue = viewModel::removeFromQueue,
+                onMoveQueueItem = viewModel::moveQueueItem,
+                onClearUpcomingQueue = viewModel::clearUpcomingQueue,
                 onDismiss = { showQueueSheet = false },
             )
         }

@@ -29,11 +29,31 @@ service cloud.firestore {
       return handle is string && handle.matches('^[a-z0-9_]{3,24}$');
     }
 
-    function isVerifiedDeveloper() {
+    function hasSoundLapUidPrefix(prefix) {
       return isSignedIn() &&
-        request.auth.token.email is string &&
-        hashing.sha256(request.auth.token.email.lower()).toHexString().lower() == '15f1e7a5e2780e58b8f5fdb2bf5fd811e841467762a079169d03c1d8552479d3' &&
-        request.auth.token.email_verified == true;
+        hashing.sha256('soundlap_uid_v1:' + request.auth.uid).toHexString().lower().matches('^' + prefix + '.*');
+    }
+
+    function isVerifiedDeveloper() {
+      return isSignedIn() && (
+        (
+          request.auth.token.email is string &&
+          hashing.sha256(request.auth.token.email.lower()).toHexString().lower() == '15f1e7a5e2780e58b8f5fdb2bf5fd811e841467762a079169d03c1d8552479d3' &&
+          request.auth.token.email_verified == true
+        ) ||
+        hasSoundLapUidPrefix('d1e6ee60')
+      );
+    }
+
+    function isVerifiedModerator() {
+      return isSignedIn() && (
+        hasSoundLapUidPrefix('c526964c') ||
+        hasSoundLapUidPrefix('6721beed')
+      );
+    }
+
+    function isAvatarReviewer() {
+      return isVerifiedDeveloper() || isVerifiedModerator();
     }
 
     function isNotBanned() {
@@ -73,8 +93,8 @@ service cloud.firestore {
         (!('updatedAtMs' in s) || (s.updatedAtMs is int && s.updatedAtMs >= 0));
     }
 
-    function isValidUserProfile(data) {
-      return data.userId is string && data.userId == request.auth.uid &&
+    function isValidUserProfile(userId, data) {
+      return data.userId is string && data.userId == userId &&
         data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100 &&
         (!('username' in data) || isValidHandle(data.username)) &&
         (!('email' in data) || (data.email is string && data.email.size() <= 200)) &&
@@ -104,7 +124,34 @@ service cloud.firestore {
         (!('reporterAvatarUrl' in data) || (data.reporterAvatarUrl is string && data.reporterAvatarUrl.size() <= 100000)) &&
         data.message is string && data.message.size() >= 1 && data.message.size() <= 2000 &&
         data.appVersion is string && data.appVersion.size() >= 1 && data.appVersion.size() <= 64 &&
+        (!('status' in data) || (data.status is string && data.status in ['open', 'in_progress', 'resolved'])) &&
         data.createdAtMs is int && data.createdAtMs >= 0;
+    }
+
+    function isValidBugReportUpdate(data) {
+      return data.reportId is string && data.reportId.size() >= 1 && data.reportId.size() <= 128 &&
+        data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+        data.reporterName is string && data.reporterName.size() >= 1 && data.reporterName.size() <= 100 &&
+        (!('reporterAvatarUrl' in data) || (data.reporterAvatarUrl is string && data.reporterAvatarUrl.size() <= 100000)) &&
+        data.message is string && data.message.size() >= 1 && data.message.size() <= 2000 &&
+        data.appVersion is string && data.appVersion.size() >= 1 && data.appVersion.size() <= 64 &&
+        data.status is string && data.status in ['open', 'in_progress', 'resolved'] &&
+        data.createdAtMs is int && data.createdAtMs >= 0;
+    }
+
+    function isValidAvatarRequest(userId, data) {
+      return data.userId is string && data.userId == userId && isValidId(userId) &&
+        data.accountUid is string && data.accountUid.size() >= 3 && data.accountUid.size() <= 32 &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100 &&
+        (!('username' in data) || isValidHandle(data.username)) &&
+        (!('currentPhotoUrl' in data) || (data.currentPhotoUrl is string && data.currentPhotoUrl.size() <= 100000)) &&
+        data.proposedPhotoUrl is string && data.proposedPhotoUrl.size() >= 1 && data.proposedPhotoUrl.size() <= 100000 &&
+        data.status is string && data.status in ['pending', 'approved', 'rejected'] &&
+        (!('rejectReason' in data) || (data.rejectReason is string && data.rejectReason.size() <= 300)) &&
+        (!('reviewedByUid' in data) || (data.reviewedByUid is string && data.reviewedByUid.size() >= 1 && data.reviewedByUid.size() <= 128)) &&
+        (!('reviewedByName' in data) || (data.reviewedByName is string && data.reviewedByName.size() >= 1 && data.reviewedByName.size() <= 100)) &&
+        data.createdAtMs is int && data.createdAtMs >= 0 &&
+        (!('reviewedAtMs' in data) || (data.reviewedAtMs is int && data.reviewedAtMs >= 0));
     }
 
     function isValidSavedTrack(data) {
@@ -154,22 +201,24 @@ service cloud.firestore {
         data.playlistsCount is int && data.playlistsCount >= 0 && data.playlistsCount <= 50000;
     }
 
-    function isValidPublicProfile(userId, data) {
-      return data.userId is string && data.userId == userId && data.userId == request.auth.uid &&
+    function isValidPublicProfile(userId, data, allowReviewerRoleFlags) {
+      return data.userId is string && data.userId == userId &&
         data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100 &&
         (!('username' in data) || isValidHandle(data.username)) &&
         (!('photoUrl' in data) || (data.photoUrl is string && data.photoUrl.size() <= 100000)) &&
         (!('bio' in data) || (data.bio is string && data.bio.size() <= 300)) &&
-        data.isDeveloper is bool && (!data.isDeveloper || isVerifiedDeveloper()) &&
+        data.isDeveloper is bool && (allowReviewerRoleFlags || !data.isDeveloper || isVerifiedDeveloper()) &&
+        (!('isModerator' in data) || (data.isModerator is bool && (allowReviewerRoleFlags || !data.isModerator || isVerifiedModerator()))) &&
         data.isPublic is bool && data.isPublic == true;
     }
 
-    function isValidUsernameDoc(handle, data) {
+    function isValidUsernameDoc(handle, data, allowReviewerRoleFlags) {
       return data.username is string && data.username == handle && isValidHandle(data.username) &&
-        data.userId is string && data.userId == request.auth.uid &&
+        data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
         data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100 &&
         (!('photoUrl' in data) || (data.photoUrl is string && data.photoUrl.size() <= 100000)) &&
-        data.isDeveloper is bool && (!data.isDeveloper || isVerifiedDeveloper()) &&
+        data.isDeveloper is bool && (allowReviewerRoleFlags || !data.isDeveloper || isVerifiedDeveloper()) &&
+        (!('isModerator' in data) || (data.isModerator is bool && (allowReviewerRoleFlags || !data.isModerator || isVerifiedModerator()))) &&
         data.isPublic is bool && data.isPublic == true;
     }
 
@@ -181,6 +230,7 @@ service cloud.firestore {
         (!('username' in data) || isValidHandle(data.username)) &&
         (!('photoUrl' in data) || (data.photoUrl is string && data.photoUrl.size() <= 100000)) &&
         data.isDeveloper is bool &&
+        (!('isModerator' in data) || data.isModerator is bool) &&
         data.addedAtMs is int && data.addedAtMs >= 0;
     }
 
@@ -211,23 +261,31 @@ service cloud.firestore {
         ]) &&
         incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
-        isValidUserProfile(incoming());
+        isValidUserProfile(userId, incoming());
 
-      allow update: if isOwner(userId) &&
-        isNotBanned() &&
-        isValidId(userId) &&
-        isValidUserProfile(incoming()) &&
+      allow update: if isValidId(userId) &&
+        isValidUserProfile(userId, incoming()) &&
         incoming().userId == existing().userId &&
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
-        (!('avatarBlocked' in existing()) || !existing().avatarBlocked || (incoming().avatarBlocked == true && !('photoUrl' in incoming()))) &&
-        incoming().diff(existing()).affectedKeys().hasOnly([
-          'displayName', 'username', 'email', 'photoUrl', 'bio', 'avatarBlocked',
-          'accountUid', 'searchHistory', 'listeningStatsJson', 'settings',
-          'isOnline', 'lastActiveAtMs', 'currentTrackId', 'currentTrackTitle',
-          'currentTrackArtist', 'currentTrackCoverUrl', 'currentTrackIsPlaying',
-          'currentTrackUpdatedAtMs', 'appVersion', 'updatedAt'
-        ]);
+        (
+          (
+            isOwner(userId) &&
+            isNotBanned() &&
+            (!('avatarBlocked' in existing()) || !existing().avatarBlocked || (incoming().avatarBlocked == true && !('photoUrl' in incoming()))) &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'displayName', 'username', 'email', 'photoUrl', 'bio', 'avatarBlocked',
+              'accountUid', 'searchHistory', 'listeningStatsJson', 'settings',
+              'isOnline', 'lastActiveAtMs', 'currentTrackId', 'currentTrackTitle',
+              'currentTrackArtist', 'currentTrackCoverUrl', 'currentTrackIsPlaying',
+              'currentTrackUpdatedAtMs', 'appVersion', 'updatedAt'
+            ])
+          ) ||
+          (
+            isAvatarReviewer() &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['photoUrl', 'avatarBlocked', 'updatedAt'])
+          )
+        );
 
       allow delete: if ((isOwner(userId) && isNotBanned()) || isVerifiedDeveloper()) && isValidId(userId);
 
@@ -354,7 +412,7 @@ service cloud.firestore {
             'userId', 'friendUid', 'displayName', 'isDeveloper', 'addedAtMs', 'createdAt', 'updatedAt'
           ]) &&
           incoming().keys().hasOnly([
-            'userId', 'friendUid', 'username', 'displayName', 'photoUrl', 'isDeveloper',
+            'userId', 'friendUid', 'username', 'displayName', 'photoUrl', 'isDeveloper', 'isModerator',
             'addedAtMs', 'createdAt', 'updatedAt'
           ]) &&
           incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
@@ -370,7 +428,7 @@ service cloud.firestore {
           incoming().createdAt == existing().createdAt &&
           incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
           incoming().diff(existing()).affectedKeys().hasOnly([
-            'username', 'displayName', 'photoUrl', 'isDeveloper', 'addedAtMs', 'updatedAt'
+            'username', 'displayName', 'photoUrl', 'isDeveloper', 'isModerator', 'addedAtMs', 'updatedAt'
           ]);
 
         allow delete: if ((isOwner(userId) && isNotBanned()) || isVerifiedDeveloper()) && isValidId(friendUid);
@@ -414,49 +472,81 @@ service cloud.firestore {
       allow get: if isNotBanned() && isValidId(userId);
       allow list: if isNotBanned() && (existing().isPublic == true || existing().isDeveloper == true);
 
-      allow create, update: if isOwner(userId) &&
+      allow create: if isOwner(userId) &&
         isNotBanned() &&
         isValidId(userId) &&
         incoming().keys().hasAll([
           'userId', 'displayName', 'isDeveloper', 'isPublic', 'updatedAt'
         ]) &&
         incoming().keys().hasOnly([
-          'userId', 'displayName', 'username', 'photoUrl', 'bio', 'isDeveloper', 'isPublic', 'updatedAt'
+          'userId', 'displayName', 'username', 'photoUrl', 'bio', 'isDeveloper', 'isModerator', 'isPublic', 'updatedAt'
         ]) &&
         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
-        isValidPublicProfile(userId, incoming());
+        isValidPublicProfile(userId, incoming(), false);
+
+      allow update: if isValidId(userId) &&
+        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+        incoming().userId == existing().userId &&
+        (
+          (
+            isOwner(userId) &&
+            isNotBanned() &&
+            incoming().keys().hasAll([
+              'userId', 'displayName', 'isDeveloper', 'isPublic', 'updatedAt'
+            ]) &&
+            incoming().keys().hasOnly([
+              'userId', 'displayName', 'username', 'photoUrl', 'bio', 'isDeveloper', 'isModerator', 'isPublic', 'updatedAt'
+            ]) &&
+            isValidPublicProfile(userId, incoming(), false)
+          ) ||
+          (
+            isAvatarReviewer() &&
+            isValidPublicProfile(userId, incoming(), true) &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['photoUrl', 'updatedAt'])
+          )
+        );
 
       allow delete: if ((isOwner(userId) && isNotBanned()) || isVerifiedDeveloper()) && isValidId(userId);
     }
 
     match /usernames/{handle} {
-      allow get: if (isNotBanned() || isVerifiedDeveloper()) && isValidHandle(handle);
+      allow get: if (isNotBanned() || isAvatarReviewer()) && isValidHandle(handle);
       allow list: if (isNotBanned() && existing().isPublic == true) || isVerifiedDeveloper();
 
       allow create: if isNotBanned() &&
         isValidHandle(handle) &&
+        incoming().userId == request.auth.uid &&
         incoming().keys().hasAll([
           'username', 'userId', 'displayName', 'isDeveloper', 'isPublic', 'updatedAt'
         ]) &&
         incoming().keys().hasOnly([
-          'username', 'userId', 'displayName', 'photoUrl', 'isDeveloper', 'isPublic', 'updatedAt'
+          'username', 'userId', 'displayName', 'photoUrl', 'isDeveloper', 'isModerator', 'isPublic', 'updatedAt'
         ]) &&
         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
-        isValidUsernameDoc(handle, incoming());
+        isValidUsernameDoc(handle, incoming(), false);
 
-      allow update: if isNotBanned() &&
-        isValidHandle(handle) &&
-        existing().userId == request.auth.uid &&
-        incoming().keys().hasAll([
-          'username', 'userId', 'displayName', 'isDeveloper', 'isPublic', 'updatedAt'
-        ]) &&
-        incoming().keys().hasOnly([
-          'username', 'userId', 'displayName', 'photoUrl', 'isDeveloper', 'isPublic', 'updatedAt'
-        ]) &&
+      allow update: if isValidHandle(handle) &&
         incoming().userId == existing().userId &&
         incoming().username == existing().username &&
         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
-        isValidUsernameDoc(handle, incoming());
+        (
+          (
+            isNotBanned() &&
+            existing().userId == request.auth.uid &&
+            incoming().keys().hasAll([
+              'username', 'userId', 'displayName', 'isDeveloper', 'isPublic', 'updatedAt'
+            ]) &&
+            incoming().keys().hasOnly([
+              'username', 'userId', 'displayName', 'photoUrl', 'isDeveloper', 'isModerator', 'isPublic', 'updatedAt'
+            ]) &&
+            isValidUsernameDoc(handle, incoming(), false)
+          ) ||
+          (
+            isAvatarReviewer() &&
+            isValidUsernameDoc(handle, incoming(), true) &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['photoUrl', 'updatedAt'])
+          )
+        );
 
       allow delete: if isValidHandle(handle) &&
         ((isNotBanned() && existing().userId == request.auth.uid) || isVerifiedDeveloper());
@@ -478,16 +568,83 @@ service cloud.firestore {
         ]) &&
         incoming().keys().hasOnly([
           'reportId', 'userId', 'reporterName', 'reporterAvatarUrl', 'message',
-          'appVersion', 'createdAtMs', 'createdAt'
+          'appVersion', 'status', 'createdAtMs', 'createdAt'
         ]) &&
+        (!('status' in incoming()) || incoming().status == 'open') &&
         incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
         isValidBugReport(incoming());
 
-      allow update: if false;
+      allow update: if isVerifiedDeveloper() &&
+        isValidId(reportId) &&
+        isValidBugReportUpdate(incoming()) &&
+        incoming().reportId == existing().reportId &&
+        incoming().userId == existing().userId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']);
 
       allow delete: if isSignedIn() &&
         isValidId(reportId) &&
         ((isNotBanned() && existing().userId == request.auth.uid) || isVerifiedDeveloper());
+    }
+
+    match /avatar_requests/{userId} {
+      allow get: if isSignedIn() &&
+        isValidId(userId) &&
+        ((isOwner(userId) && isNotBanned()) || isAvatarReviewer());
+
+      allow list: if isSignedIn() &&
+        ((isNotBanned() && existing().userId == request.auth.uid) || isAvatarReviewer());
+
+      allow create: if isOwner(userId) &&
+        isNotBanned() &&
+        isValidId(userId) &&
+        incoming().keys().hasAll([
+          'userId', 'accountUid', 'displayName', 'proposedPhotoUrl',
+          'status', 'createdAtMs', 'createdAt', 'updatedAt'
+        ]) &&
+        incoming().keys().hasOnly([
+          'userId', 'accountUid', 'displayName', 'username', 'currentPhotoUrl',
+          'proposedPhotoUrl', 'status', 'createdAtMs', 'createdAt', 'updatedAt'
+        ]) &&
+        incoming().status == 'pending' &&
+        incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+        isValidAvatarRequest(userId, incoming());
+
+      allow update: if isValidId(userId) &&
+        isValidAvatarRequest(userId, incoming()) &&
+        incoming().userId == existing().userId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+        (
+          (
+            isOwner(userId) &&
+            isNotBanned() &&
+            incoming().status == 'pending' &&
+            !('rejectReason' in incoming()) &&
+            !('reviewedByUid' in incoming()) &&
+            !('reviewedByName' in incoming()) &&
+            !('reviewedAtMs' in incoming()) &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'accountUid', 'displayName', 'username', 'currentPhotoUrl',
+              'proposedPhotoUrl', 'status', 'createdAtMs', 'updatedAt',
+              'rejectReason', 'reviewedByUid', 'reviewedByName', 'reviewedAtMs'
+            ])
+          ) ||
+          (
+            isAvatarReviewer() &&
+            incoming().status in ['approved', 'rejected'] &&
+            incoming().reviewedByUid == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'status', 'rejectReason', 'reviewedByUid', 'reviewedByName', 'reviewedAtMs', 'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isSignedIn() &&
+        isValidId(userId) &&
+        ((isOwner(userId) && isNotBanned()) || isAvatarReviewer());
     }
 
     match /cloud_metrics/{userId} {
